@@ -18,6 +18,10 @@ Living log for the LocalPass build. [PRD.md](PRD.md) is the *what*; this file re
 - **2026-07-04 — PRD v1.0 ratified** including the 8 decision-log items (PRD §11): server-enforced token scopes (P2), persisted incremental encrypted search index, MPL-2.0 for GUI, `localpass://` with `op://` alias, best-effort passkeys (macOS/iOS → Windows → Linux), file-based sync as onboarding default, pairing-code-gated relay enrollment, keep-forever retention + visible stats + prune tooling.
 - **2026-07-04 — Toolchain:** Rust stable (1.96.1 at time of setup), edition 2024, resolver 2. `rust-version = 1.90` floor.
 - **2026-07-04 — Supply chain:** cargo-deny gates in CI from day one (advisories, license allowlist, unknown sources).
+- **2026-07-04 — On-disk layout:** one **account store** SQLite file (KDF params, wrapped AccountKey, device keys, vault registry, settings) plus **one SQLite file per vault**. Rationale: per-vault portability and sync, blast-radius isolation, matches PRD "single-file vaults". Specified in `docs/specs/vault-format.md`.
+- **2026-07-04 — Durability:** uniform `PRAGMA synchronous=FULL` (WAL) on the account store AND vault files. NORMAL could lose the last committed write on power loss — unacceptable for a just-saved credential; human-scale write rates make the fsync cost irrelevant.
+- **2026-07-04 — Plaintext minimization:** `item_type`, `favorite`, `folder_id` live INSIDE the encrypted item payload, not as plaintext columns (spec-review tightening). PRD §6.3 fixes plaintext to ids/counters/timestamps; type distribution is targeting info. Type/folder/favorite filters run via the encrypted index.
+- **2026-07-04 — Sync MVP boundary confirmed:** single-user multi-device only; team membership-change ops are a named P2 extension point (new signed op_kind gated on admin keys), not designed now.
 
 ## Environment notes
 
@@ -26,4 +30,4 @@ Living log for the LocalPass build. [PRD.md](PRD.md) is the *what*; this file re
 
 ## Lessons learned
 
-- (add entries as they happen — include *why* and *how to apply*)
+- **2026-07-04 — Cross-artifact consistency review pays.** Orchestrator review of the spec drafts caught a wire/DDL mismatch (op wire field `target_ver` had no `ops.target_version` column, which would have broken canonical-byte reconstruction for hash-chain verification) and a plaintext-set overreach vs PRD §6.3. **How to apply:** after any subagent delivers multi-document or code+spec output, diff the artifacts against each other and against the PRD before committing — don't review documents only in isolation.
