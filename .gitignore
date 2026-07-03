@@ -1,0 +1,49 @@
+# --- Rust ---
+target/
+**/*.rs.bk
+*.pdb
+
+# --- Tauri ---
+apps/desktop/src-tauri/gen/apple/
+apps/desktop/src-tauri/gen/android/
+WixTools/
+
+# --- Node / frontend ---
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.tsbuildinfo
+
+# --- Environment & local secrets (never commit) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+*.keystore
+
+# --- Test / coverage artifacts ---
+coverage/
+*.profraw
+*.profdata
+tarpaulin-report.html
+lcov.info
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- IDEs / editors ---
+.idea/
+.vscode/
+!.vscode/extensions.json
+*.iml
+*.swp
+
+# --- Logs & scratch ---
+*.log
+*.tmp
+scratch/
