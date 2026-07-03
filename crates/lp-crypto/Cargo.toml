@@ -8,3 +8,47 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# --- AEAD: XChaCha20-Poly1305 (PRD §5.2 symmetric AEAD; §6.2 audited NCC 2020). ---
+# `alloc` for Vec-returning encrypt/decrypt; no `std` needed by the AEAD itself.
+chacha20poly1305 = { version = "0.10", default-features = false, features = [
+    "alloc",
+] }
+# --- Password KDF: Argon2id (PRD §5.2 / §6.2, reference-conformant). ---
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+# --- Key mixing / subkey derivation: HKDF-SHA256 (PRD §5.2). ---
+hkdf = "0.12"
+sha2 = "0.10"
+# --- Asymmetric sealing: X25519 ECDH, age-style recipient model (PRD §5.2). ---
+# `static_secrets` gives us long-term recipient keys; `getrandom` enables OsRng
+# constructors on both static and ephemeral secrets; `zeroize` wipes secrets.
+x25519-dalek = { version = "2", default-features = false, features = [
+    "static_secrets",
+    "getrandom",
+    "zeroize",
+] }
+# --- Signatures: Ed25519 (PRD §5.2; SSH-key trust-anchor interop). ---
+ed25519-dalek = { version = "2", default-features = false, features = [
+    "rand_core",
+    "zeroize",
+] }
+# --- Constant-time comparison of secret material (PRD §5.1 memory hygiene). ---
+subtle = "2.6"
+# --- Drop-zeroed key containers everywhere (PRD §5.1 / §6.2 hygiene). ---
+zeroize = { workspace = true }
+# --- OS CSPRNG only (PRD §5.2 "OS CSPRNG (getrandom) only"). ---
+# `rand_core::OsRng` is the RNG the dalek keygen APIs consume; `getrandom` is the
+# direct byte source used to fill nonces and raw key bytes.
+rand_core = { version = "0.6", default-features = false, features = [
+    "getrandom",
+] }
+getrandom = "0.2"
+# --- Human-readable SecretKey encoding: Crockford base32 (unambiguous alphabet). ---
+data-encoding = "2"
+# --- One error enum across the crate (PRD §6.2 hygiene). ---
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# Compile-time hex test vectors for the KDF and envelope fixtures.
+hex-literal = "0.4"
+# Property-based round-trip tests for encode/decode paths.
+proptest = "1"

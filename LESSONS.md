@@ -30,4 +30,6 @@ Living log for the LocalPass build. [PRD.md](PRD.md) is the *what*; this file re
 
 ## Lessons learned
 
+- **2026-07-04 — Review subagent crypto with a hardening checklist, not just tests.** The lp-crypto delivery was excellent (constructions, hygiene, oracle-resistance all correct), yet still missed X25519 low-order-point rejection (`SharedSecret::was_contributory()`), added in review. **How to apply:** for crypto deliveries, walk a fixed checklist (nonce sourcing, contributory ECDH, domain separation, zeroization on every early-return path, error-oracle collapse) rather than relying on the test suite the same author wrote.
+
 - **2026-07-04 — Cross-artifact consistency review pays.** Orchestrator review of the spec drafts caught a wire/DDL mismatch (op wire field `target_ver` had no `ops.target_version` column, which would have broken canonical-byte reconstruction for hash-chain verification) and a plaintext-set overreach vs PRD §6.3. **How to apply:** after any subagent delivers multi-document or code+spec output, diff the artifacts against each other and against the PRD before committing — don't review documents only in isolation.
