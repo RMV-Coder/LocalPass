@@ -1,0 +1,10 @@
+[package]
+name = "lp-crypto"
+description = "LocalPass cryptographic core: KDF, AEAD envelopes, key wrapping, sealing, signing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
