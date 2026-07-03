@@ -44,6 +44,8 @@ rand_core = { version = "0.6", default-features = false, features = [
 getrandom = "0.2"
 # --- Human-readable SecretKey encoding: Crockford base32 (unambiguous alphabet). ---
 data-encoding = "2"
+# --- Op-chain hashing: BLAKE3 (sync-protocol.md §5). Integrity chaining only. ---
+blake3 = "1"
 # --- One error enum across the crate (PRD §6.2 hygiene). ---
 thiserror = { workspace = true }
 

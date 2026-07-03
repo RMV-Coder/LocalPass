@@ -69,6 +69,7 @@
 
 pub mod envelope;
 pub mod error;
+pub mod hash;
 pub mod kdf;
 pub mod keys;
 pub mod params;
@@ -85,6 +86,7 @@ mod symmetric;
 
 pub use envelope::Envelope;
 pub use error::{Error, Result};
+pub use hash::blake3_256;
 pub use keys::{
     AccountKey, ItemKey, MasterUnlockKey, SECRET_KEY_LEN, SYMMETRIC_KEY_LEN, SecretKey,
     SymmetricKey, VaultKey,
