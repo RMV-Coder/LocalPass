@@ -78,3 +78,7 @@ serde_json = "1"
 # --- Authoring a .1pux fixture (a ZIP holding export.data) inline in the
 # --- import integration test. Same crate/features lp-porter uses. ---
 zip = { version = "8", default-features = false, features = ["deflate"] }
+# --- Raw SQL access to the account store's `audit_log` table in the audit
+# --- integration test (tamper a record to prove `audit --verify` detects it).
+# --- Same crate/features lp-vault uses (bundled SQLite, no system-lib skew). ---
+rusqlite = { version = "0.32", features = ["bundled"] }

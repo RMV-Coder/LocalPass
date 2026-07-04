@@ -163,12 +163,23 @@ fn get(
         let Some(f) = output::find_field(&fields, name) else {
             bail!(CliError::usage(format!("item has no field {name:?}")));
         };
+        // A --field read is an explicit reveal of exactly one field's value:
+        // audit it (PRD §4.9), naming the field (never its value). Best-effort.
+        vault.record_secret_read(&item.item_id, Some(&f.name)).ok();
         // Raw value, one trailing newline. --field is an explicit reveal of
         // that single field (secret or not), for scripting.
         let mut stdout = std::io::stdout().lock();
         stdout.write_all(f.value.as_bytes())?;
         stdout.write_all(b"\n")?;
         return Ok(());
+    }
+
+    // --reveal shows every secret field of the item: audit a whole-item secret
+    // read (PRD §4.9) when the item actually has a secret to reveal. A masked
+    // `item get` (no --reveal) discloses nothing and is NOT audited. Best-effort —
+    // never fail the read over an audit hiccup.
+    if reveal && fields.iter().any(|f| f.secret) {
+        vault.record_secret_read(&item.item_id, None).ok();
     }
 
     if json_out {

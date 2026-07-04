@@ -102,3 +102,8 @@ ssh-key = { version = "0.6", default-features = false, features = [
 ] }
 ssh-encoding = "0.2"
 signature = "2"
+# --- The audit-proxy integration test reads the account store's plaintext
+# --- `audit_log` table directly (raw SQL) to prove proxied actions record their
+# --- audit events exactly once. Same crate/features lp-vault uses (bundled
+# --- SQLite, no system-lib skew). ---
+rusqlite = { version = "0.32", features = ["bundled"] }

@@ -41,6 +41,9 @@
 //! - [`Vault`] — item create/get/update/delete/restore, history, folders,
 //!   trash + purge, linear [`search`](Vault::search), and
 //!   [`verify_local_chain`](Vault::verify_local_chain) ([`vault`]).
+//! - [`audit`] — the device-local, hash-chained [audit log](audit) (PRD §4.9):
+//!   plaintext metadata (ids/kinds/timestamps, never secrets or names) recording
+//!   unlocks, secret reveals, edits, exports, and shares, in the account store.
 //! - [`payload`] — the canonical item model (the six MVP types).
 //! - [`canonical`] — deterministic canonical-JSON encoding (a pragmatic RFC 8785
 //!   / JCS profile; see its module docs for the documented UTF-8-vs-UTF-16
@@ -82,6 +85,7 @@
 
 pub mod aad;
 pub mod account;
+pub mod audit;
 pub mod backup;
 pub mod canonical;
 pub mod db;
@@ -94,6 +98,7 @@ pub mod payload;
 pub mod vault;
 
 pub use account::{AccountStore, DeviceIdentityInfo, PeerDevice, Session};
+pub use audit::{AuditKind, AuditRecord};
 pub use error::{Error, Result};
 pub use foreign::{
     ItemMaterialization, Materialization, StoredOp, TombstoneMaterialization,

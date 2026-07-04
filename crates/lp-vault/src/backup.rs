@@ -395,8 +395,10 @@ pub fn verify(backup_dir: &Path, creds: Option<(&str, &SecretKey)>) -> Result<Ve
 /// item per vault. Returns `(passed, human note)`.
 fn verify_recoverable(backup_dir: &Path, password: &str, secret_key: &SecretKey) -> (bool, String) {
     // A backup directory has the exact profile layout (account.localpass +
-    // vaults/), so the normal unlock flow applies directly.
-    let session = match AccountStore::unlock(backup_dir, password, secret_key) {
+    // vaults/), so the normal unlock flow applies directly. Use the *quiet*
+    // unlock: verifying a backup must not write an audit record into it (that
+    // would change its bytes and trip the manifest hash check).
+    let session = match AccountStore::unlock_quiet(backup_dir, password, secret_key) {
         Ok(s) => s,
         Err(Error::DecryptionFailed) => {
             return (
@@ -620,8 +622,9 @@ pub fn restore_single_item(
     target: &str,
     live_vault: &Vault<'_>,
 ) -> Result<ItemId> {
-    // Open the backup as a read-only profile and locate the item.
-    let backup_session = AccountStore::unlock(backup_dir, password, secret_key)?;
+    // Open the backup as a read-only profile and locate the item. Quiet unlock:
+    // the backup source must not be mutated (no audit record) during a restore.
+    let backup_session = AccountStore::unlock_quiet(backup_dir, password, secret_key)?;
     let backup_vault = backup_session.open_vault(backup_vault_id)?;
 
     let payload = find_item_payload(&backup_vault, target)?;

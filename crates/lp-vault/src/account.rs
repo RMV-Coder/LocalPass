@@ -27,6 +27,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 
 use crate::aad;
+use crate::audit::{self, AuditKind, AuditRecord};
 use crate::db;
 use crate::error::{Error, Result};
 use crate::ids::{DeviceId, Id, VaultId};
@@ -94,6 +95,9 @@ impl AccountStore {
 
         let tx = conn.transaction()?;
         tx.execute_batch(db::ACCOUNT_STORE_DDL)?;
+        // The device-local audit log (PRD §4.9) lives in the account store; create
+        // it up front so a fresh store never needs the forward-only migration.
+        tx.execute_batch(db::AUDIT_LOG_DDL)?;
         tx.execute(
             "INSERT INTO meta (id, format_version, file_kind, cipher_suite, created_at, schema_migrated_at)
              VALUES (1, ?1, ?2, ?3, ?4, ?4)",
@@ -152,6 +156,17 @@ impl AccountStore {
     /// [`Error::DecryptionFailed`] — vault-format.md §5.2 step 4, no partial
     /// state), and loads this device's public identity.
     ///
+    /// # Audit (PRD §4.9)
+    ///
+    /// A successful unlock records an [`AuditKind::UnlockSuccess`]; a wrong
+    /// password/Secret Key records an [`AuditKind::UnlockFailure`] **before**
+    /// returning the error, so a brute-force attempt leaves a persistent,
+    /// hash-chained trail even though no session was produced. Recording happens
+    /// here (not in the CLI/daemon) so *every* unlock path is covered exactly
+    /// once, with no double-logging. An audit-append failure never masks the
+    /// unlock outcome (it is logged-and-ignored — the log is best-effort relative
+    /// to the security-critical unlock result).
+    ///
     /// # Errors
     ///
     /// - [`Error::NotFound`] if no account store exists at `dir`.
@@ -159,6 +174,32 @@ impl AccountStore {
     /// - [`Error::UnsupportedFormat`] if the file is newer than this build.
     /// - [`Error::Sqlite`] on a DB failure.
     pub fn unlock(dir: &Path, password: &str, secret_key: &SecretKey) -> Result<Session> {
+        Self::unlock_inner(dir, password, secret_key, /* audit = */ true)
+    }
+
+    /// Unlock **without** touching the audit log (no `UnlockSuccess`/`Failure`
+    /// record). Used to open a store that must stay **byte-for-byte read-only** —
+    /// notably a **backup** being verified or restored, whose bytes are pinned by
+    /// its manifest hash (a stray append would corrupt the hash check). Never use
+    /// this for a real user unlock of the live profile; use [`unlock`](Self::unlock).
+    ///
+    /// # Errors
+    ///
+    /// Same as [`unlock`](Self::unlock).
+    pub fn unlock_quiet(dir: &Path, password: &str, secret_key: &SecretKey) -> Result<Session> {
+        Self::unlock_inner(dir, password, secret_key, /* audit = */ false)
+    }
+
+    /// The shared unlock body. When `audit` is true, a successful unlock appends
+    /// an [`AuditKind::UnlockSuccess`] and a wrong-password/Secret-Key failure
+    /// appends an [`AuditKind::UnlockFailure`] (PRD §4.9); when false, neither is
+    /// written and the store is opened strictly read-only.
+    fn unlock_inner(
+        dir: &Path,
+        password: &str,
+        secret_key: &SecretKey,
+        audit: bool,
+    ) -> Result<Session> {
         let path = dir.join(ACCOUNT_FILE);
         if !path.exists() {
             return Err(Error::NotFound("account store"));
@@ -178,18 +219,246 @@ impl AccountStore {
         let envelope =
             lp_crypto::Envelope::from_bytes(&wrapped_ak_bytes).map_err(Error::from_crypto)?;
         // MUK is verified here: a wrong password/Secret Key ⇒ DecryptionFailed.
-        let account_key_inner = unwrap_key(muk.inner(), &envelope, aad_str(&aad::account_key()))
-            .map_err(Error::from_crypto)?;
+        let account_key_inner =
+            match unwrap_key(muk.inner(), &envelope, aad_str(&aad::account_key())) {
+                Ok(inner) => inner,
+                Err(e) => {
+                    // Record the failed unlock (PRD §4.9) against this device before
+                    // surfacing the auth error. We know the device id from the stored
+                    // plaintext identity even without the AccountKey. Skipped for a
+                    // read-only (backup) unlock, which must not mutate the file.
+                    let mapped = Error::from_crypto(e);
+                    if audit && matches!(mapped, Error::DecryptionFailed) {
+                        Self::record_unlock_failure(dir).ok();
+                    }
+                    return Err(mapped);
+                }
+            };
         let account_key = AccountKey::from_inner(account_key_inner);
 
         let device = DeviceIdentity::load(&conn, &account_key)?;
 
-        Ok(Session {
+        let session = Session {
             dir: dir.to_path_buf(),
             account_key,
             device,
-        })
+        };
+        // A successful unlock is an audited event. Best-effort: never fail the
+        // unlock over an audit-append hiccup. Skipped on the read-only path.
+        if audit {
+            session.record_audit(AuditKind::UnlockSuccess, None).ok();
+        }
+        Ok(session)
     }
+
+    /// Record an [`AuditKind::UnlockFailure`] against the device identity stored
+    /// in the account store at `dir`, opening the store directly.
+    ///
+    /// This is the **no-session** failure path: on a wrong password/Secret Key
+    /// there is no [`Session`], so the append cannot go through one. The device
+    /// id is read from the plaintext `device_identity` row (a public, non-secret
+    /// column), the audit table is ensured, and one `UnlockFailure` record is
+    /// appended to this device's hash chain.
+    ///
+    /// Called automatically by [`unlock`](Self::unlock) on the auth-failure path;
+    /// exposed publicly so a caller (or a test) can record a failure explicitly.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NotFound`] if no account store exists at `dir`.
+    /// - [`Error::Sqlite`] on a DB failure.
+    pub fn record_unlock_failure(dir: &Path) -> Result<()> {
+        let path = dir.join(ACCOUNT_FILE);
+        if !path.exists() {
+            return Err(Error::NotFound("account store"));
+        }
+        let mut conn = db::open_connection(&path)?;
+        db::ensure_audit_table(&conn)?;
+        let device_id = read_device_id(&conn)?;
+        let tx = conn.transaction()?;
+        append_audit_record(&tx, &device_id, AuditKind::UnlockFailure, None)?;
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+/// Read this device's id from the plaintext `device_identity` row (non-secret).
+/// Used by the no-session unlock-failure audit path.
+fn read_device_id(conn: &Connection) -> Result<DeviceId> {
+    let bytes: Vec<u8> =
+        conn.query_row("SELECT device_id FROM device_identity LIMIT 1", [], |r| {
+            r.get(0)
+        })?;
+    Id::from_slice(&bytes)
+}
+
+/// Append one audit record to `audit_log` inside `tx` (PRD §4.9).
+///
+/// Computes the per-device gapless `seq` (`max(seq)+1`) and the `prev_hash` from
+/// this device's previous record's canonical bytes (genesis for the first), then
+/// inserts the fully-populated row. All within the caller's transaction, so the
+/// append is atomic with whatever else the caller commits.
+///
+/// # Errors
+///
+/// [`Error::Sqlite`] on a read/write failure, [`Error::Invalid`] on a corrupt
+/// stored row.
+fn append_audit_record(
+    tx: &Connection,
+    device_id: &DeviceId,
+    kind: AuditKind,
+    detail: Option<&str>,
+) -> Result<()> {
+    // seq = max(seq for this device) + 1 (gapless, 1-based).
+    let last_seq: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM audit_log WHERE device_id = ?1",
+            params![device_id.to_vec()],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let seq = u64::try_from(last_seq + 1).map_err(|_| Error::Invalid("audit seq out of range"))?;
+
+    // prev_hash = chain hash of this device's previous record, or genesis.
+    let prev_hash = match read_last_audit_record(tx, device_id)? {
+        Some(prev) => prev.chain_hash(),
+        None => audit::genesis_hash(device_id),
+    };
+
+    let record = AuditRecord {
+        seq,
+        prev_hash,
+        timestamp: db::now_millis(),
+        device_id: *device_id,
+        kind,
+        detail: detail.map(str::to_string),
+    };
+    insert_audit_record(tx, &record)
+}
+
+/// INSERT a fully-formed [`AuditRecord`] into `audit_log`, spreading the
+/// kind-specific ids/fields across the dedicated columns.
+fn insert_audit_record(tx: &Connection, record: &AuditRecord) -> Result<()> {
+    let (format, item_count) = match &record.kind {
+        AuditKind::Export { format, item_count } => (
+            Some(format.clone()),
+            i64::try_from(*item_count).unwrap_or(0),
+        ),
+        _ => (None, 0),
+    };
+    let field = match &record.kind {
+        AuditKind::ItemSecretRead { field, .. } => field.clone(),
+        _ => None,
+    };
+    tx.execute(
+        "INSERT INTO audit_log
+            (seq, device_id, prev_hash, timestamp, kind, item_id, vault_id,
+             peer_device_id, field, format, item_count, detail)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            i64::try_from(record.seq).map_err(|_| Error::Invalid("audit seq out of range"))?,
+            record.device_id.to_vec(),
+            record.prev_hash.as_slice(),
+            record.timestamp,
+            i64::from(record.kind.code()),
+            record.kind.item_id().map(Id::to_vec),
+            record.kind.vault_id().map(Id::to_vec),
+            record.kind.peer_device_id().map(Id::to_vec),
+            field,
+            format,
+            item_count,
+            record.detail,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Read this device's most recent audit record (highest `seq`), or `None` if the
+/// device has no records yet.
+fn read_last_audit_record(tx: &Connection, device_id: &DeviceId) -> Result<Option<AuditRecord>> {
+    let cols = tx
+        .query_row(
+            "SELECT seq, prev_hash, timestamp, kind, item_id, vault_id, peer_device_id,
+                    field, format, item_count, detail
+               FROM audit_log WHERE device_id = ?1 ORDER BY seq DESC LIMIT 1",
+            params![device_id.to_vec()],
+            audit_row_columns,
+        )
+        .optional()?;
+    match cols {
+        Some(cols) => Ok(Some(audit_record_from_columns(*device_id, cols)?)),
+        None => Ok(None),
+    }
+}
+
+/// The raw column tuple of an `audit_log` row (before decoding the kind).
+type AuditRowColumns = (
+    i64,             // seq
+    Vec<u8>,         // prev_hash
+    i64,             // timestamp
+    i64,             // kind code
+    Option<Vec<u8>>, // item_id
+    Option<Vec<u8>>, // vault_id
+    Option<Vec<u8>>, // peer_device_id
+    Option<String>,  // field
+    Option<String>,  // format
+    i64,             // item_count
+    Option<String>,  // detail
+);
+
+/// Extract the raw columns of an `audit_log` row (SQLite-error domain only).
+fn audit_row_columns(r: &rusqlite::Row<'_>) -> rusqlite::Result<AuditRowColumns> {
+    Ok((
+        r.get(0)?,
+        r.get(1)?,
+        r.get(2)?,
+        r.get(3)?,
+        r.get(4)?,
+        r.get(5)?,
+        r.get(6)?,
+        r.get(7)?,
+        r.get(8)?,
+        r.get(9)?,
+        r.get(10)?,
+    ))
+}
+
+/// Rebuild an [`AuditRecord`] from a decoded column tuple.
+fn audit_record_from_columns(device_id: DeviceId, cols: AuditRowColumns) -> Result<AuditRecord> {
+    let (
+        seq,
+        prev_hash,
+        timestamp,
+        code,
+        item_id,
+        vault_id,
+        peer_device_id,
+        field,
+        format,
+        item_count,
+        detail,
+    ) = cols;
+    let prev_hash: [u8; 32] = prev_hash
+        .as_slice()
+        .try_into()
+        .map_err(|_| Error::Invalid("stored audit prev_hash not 32 bytes"))?;
+    let kind = audit::kind_from_row(
+        code,
+        item_id.as_deref(),
+        vault_id.as_deref(),
+        peer_device_id.as_deref(),
+        field,
+        item_count,
+        format,
+    )?;
+    Ok(AuditRecord {
+        seq: u64::try_from(seq).map_err(|_| Error::Invalid("stored audit seq out of range"))?,
+        prev_hash,
+        timestamp,
+        device_id,
+        kind,
+        detail,
+    })
 }
 
 /// Read and rehydrate the stored [`KdfParams`] plus the Secret Key id.
@@ -754,6 +1023,10 @@ impl Session {
                 label,
             ],
         )?;
+        // Trusting a peer device is an audited action (PRD §4.9 "shares"): record
+        // the pinned peer id (non-secret). Best-effort — never fail the trust over
+        // an audit hiccup.
+        self.record_device_trust(device_id).ok();
         Ok(())
     }
 
@@ -962,6 +1235,9 @@ impl Session {
         blob.extend_from_slice(&sealed_key);
         blob.extend_from_slice(&u32::try_from(sealed_name.len()).unwrap().to_le_bytes());
         blob.extend_from_slice(&sealed_name);
+        // Sharing a vault key to a peer is an audited action (PRD §4.9 "shares"):
+        // record the vault id + recipient device id (both non-secret).
+        self.record_vault_share(vault_id, &peer.device_id).ok();
         Ok(blob)
     }
 
@@ -1077,6 +1353,183 @@ impl Session {
             ],
         )?;
         Ok(true)
+    }
+
+    // --- Audit log (device-local, hash-chained; PRD §4.9) ------------------
+
+    /// Append one audit record to this device's chain (PRD §4.9).
+    ///
+    /// Opens the account store, ensures the `audit_log` table exists (the
+    /// forward-only migration for pre-existing stores), and appends `kind` with
+    /// an optional non-secret `detail` string, in its own transaction. This is
+    /// the general hook behind the typed helpers
+    /// ([`record_secret_read`](Self::record_secret_read),
+    /// [`record_export`](Self::record_export),
+    /// [`record_vault_share`](Self::record_vault_share),
+    /// [`record_device_trust`](Self::record_device_trust)) and the vault
+    /// mutation paths.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sqlite`] on a DB failure; [`Error::Invalid`] on a corrupt chain.
+    pub fn record_audit(&self, kind: AuditKind, detail: Option<&str>) -> Result<()> {
+        let mut conn = db::open_connection(&self.account_path())?;
+        db::ensure_audit_table(&conn)?;
+        let device_id = self.device.device_id;
+        let tx = conn.transaction()?;
+        append_audit_record(&tx, &device_id, kind, detail)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Record an [`AuditKind::ItemSecretRead`] (PRD §4.9): a read that revealed a
+    /// secret value of `item_id` in `vault_id`. `field` names the single field
+    /// revealed (a non-secret label like `"password"`), or `None` for a
+    /// whole-item reveal. **Only** reveal paths call this — a masked `item get`,
+    /// `list`, and `search` must not.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sqlite`] / [`Error::Invalid`] on failure.
+    pub fn record_secret_read(
+        &self,
+        vault_id: &VaultId,
+        item_id: &crate::ids::ItemId,
+        field: Option<&str>,
+    ) -> Result<()> {
+        self.record_audit(
+            AuditKind::ItemSecretRead {
+                item_id: *item_id,
+                vault_id: *vault_id,
+                field: field.map(str::to_string),
+            },
+            None,
+        )
+    }
+
+    /// Record an [`AuditKind::Export`] (PRD §4.9): `item_count` items exported in
+    /// `format` (e.g. `"age"`, `"json"`). Never records item contents.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sqlite`] / [`Error::Invalid`] on failure.
+    pub fn record_export(&self, format: &str, item_count: u64) -> Result<()> {
+        self.record_audit(
+            AuditKind::Export {
+                format: format.to_string(),
+                item_count,
+            },
+            None,
+        )
+    }
+
+    /// Record an [`AuditKind::VaultShare`] (PRD §4.9): `vault_id`'s key was
+    /// shared to `peer_device_id`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sqlite`] / [`Error::Invalid`] on failure.
+    pub fn record_vault_share(&self, vault_id: &VaultId, peer_device_id: &DeviceId) -> Result<()> {
+        self.record_audit(
+            AuditKind::VaultShare {
+                vault_id: *vault_id,
+                peer_device_id: *peer_device_id,
+            },
+            None,
+        )
+    }
+
+    /// Record an [`AuditKind::DeviceTrust`] (PRD §4.9): `peer_device_id` was
+    /// trusted (its keys pinned).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sqlite`] / [`Error::Invalid`] on failure.
+    pub fn record_device_trust(&self, peer_device_id: &DeviceId) -> Result<()> {
+        self.record_audit(
+            AuditKind::DeviceTrust {
+                peer_device_id: *peer_device_id,
+            },
+            None,
+        )
+    }
+
+    /// The full audit log for **this device**, oldest first (ascending `seq`).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sqlite`] / [`Error::Invalid`] on a read/corrupt-row failure.
+    pub fn audit_iter(&self) -> Result<Vec<AuditRecord>> {
+        self.read_audit(None)
+    }
+
+    /// The audit records for this device with `timestamp >= since_millis`, oldest
+    /// first (`--since` on the CLI).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sqlite`] / [`Error::Invalid`] on a read/corrupt-row failure.
+    pub fn audit_since(&self, since_millis: i64) -> Result<Vec<AuditRecord>> {
+        self.read_audit(Some(since_millis))
+    }
+
+    /// Shared audit reader: all of this device's records (optionally filtered to
+    /// `timestamp >= since`), ordered by `seq` ascending.
+    fn read_audit(&self, since: Option<i64>) -> Result<Vec<AuditRecord>> {
+        let conn = db::open_connection(&self.account_path())?;
+        db::ensure_audit_table(&conn)?;
+        let device_id = self.device.device_id;
+        let mut stmt = conn.prepare(
+            "SELECT seq, prev_hash, timestamp, kind, item_id, vault_id, peer_device_id,
+                    field, format, item_count, detail
+               FROM audit_log
+              WHERE device_id = ?1 AND timestamp >= ?2
+              ORDER BY seq",
+        )?;
+        // A `None` filter is expressed as the minimum timestamp so the same SQL
+        // serves both (no dynamic query building).
+        let floor = since.unwrap_or(i64::MIN);
+        let rows = stmt.query_map(params![device_id.to_vec(), floor], audit_row_columns)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(audit_record_from_columns(device_id, row?)?);
+        }
+        Ok(out)
+    }
+
+    /// Re-verify this device's entire audit chain (PRD §4.9, mirrors
+    /// [`Vault::verify_local_chain`](crate::Vault::verify_local_chain)): check
+    /// that `seq` is gapless from 1 and that each record's `prev_hash` links to
+    /// the previous record's canonical hash (genesis for the first).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ChainVerification`] on any gap or broken link; [`Error::Sqlite`]
+    /// on a read failure.
+    pub fn verify_audit_chain(&self) -> Result<()> {
+        let records = self.audit_iter()?;
+        let device_id = self.device.device_id;
+        let mut prev_hash = audit::genesis_hash(&device_id);
+        for (expected_seq, record) in (1_u64..).zip(records.iter()) {
+            if record.seq != expected_seq {
+                return Err(Error::ChainVerification("audit seq is not gapless from 1"));
+            }
+            if record.prev_hash != prev_hash {
+                return Err(Error::ChainVerification("audit prev_hash does not chain"));
+            }
+            prev_hash = record.chain_hash();
+        }
+        Ok(())
+    }
+
+    /// Append an audit record from a [`Vault`](crate::Vault) mutation (create /
+    /// update / delete / restore). Crate-internal: the vault holds a `&Session`
+    /// and calls this immediately after committing the vault write, so the audit
+    /// record is written iff the mutation succeeded (no orphan audit rows on a
+    /// failed write). Best-effort ordering after the vault commit is documented
+    /// on the vault methods.
+    pub(crate) fn record_mutation(&self, kind: AuditKind) -> Result<()> {
+        self.record_audit(kind, None)
     }
 
     /// Path to the account-store file.

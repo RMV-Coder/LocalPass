@@ -185,6 +185,11 @@ pub enum Command {
     /// Print the current TOTP code for a `totp` item (PRD §4.1 / §4.4).
     Totp(TotpArgs),
 
+    /// Show the device-local audit log (PRD §4.9): unlocks, failed unlocks,
+    /// secret reveals, edits, exports, and shares — ids + timestamps, never a
+    /// secret value. `--verify` re-checks the tamper-evident hash chain.
+    Audit(AuditArgs),
+
     /// Register or unregister the browser autofill native-messaging host
     /// (PRD §4.7 / §6.7). Points Chrome/Firefox at the `localpass-native-host`
     /// binary via the per-OS manifest (+ HKCU registry key on Windows).
@@ -284,6 +289,40 @@ pub struct TotpArgs {
     /// Reprint the code on every new period until interrupted (Ctrl-C).
     #[arg(long, conflicts_with = "json")]
     pub watch: bool,
+}
+
+/// `localpass audit [--since <dur|ts>] [--json] [--verify]`
+#[derive(Debug, Args)]
+#[command(long_about = "Show this device's local audit log (PRD §4.9).\n\n\
+LocalPass keeps a per-device, append-only, tamper-evident (hash-chained) audit \
+log of security-relevant actions: successful and FAILED unlocks, reads that \
+REVEAL a secret value (item get --reveal / --field, localpass:// references, \
+autofill fills, TOTP codes), item edits (create/update/delete/restore), \
+exports, and device/vault shares.\n\n\
+The log holds ONLY non-secret metadata — item and vault IDs, kinds, and \
+timestamps. It NEVER contains a secret value, a password, or an item/vault NAME \
+(names are encrypted everywhere else; the log is plaintext). A masked `item \
+get` (no --reveal), `list`, and `search` are NOT logged as reads — only an \
+actual reveal is.\n\n\
+Records print oldest-first (chronological). --since filters to recent activity \
+(a duration like `7d`/`24h`/`30m`, or a unix-millis timestamp). --json emits a \
+stable array. --verify re-checks the hash chain and per-device sequence: it \
+exits 0 on an intact chain and NON-ZERO (with a clear message) if any record \
+was altered, deleted, or reordered.")]
+pub struct AuditArgs {
+    /// Only show records at or after this point: a duration back from now
+    /// (`7d`, `24h`, `30m`, `90s`) or an absolute unix-millis timestamp.
+    #[arg(long, value_name = "DURATION_OR_TS")]
+    pub since: Option<String>,
+
+    /// Emit machine-readable JSON (a stable array of records).
+    #[arg(long)]
+    pub json: bool,
+
+    /// Verify the tamper-evident hash chain instead of printing records. Exits 0
+    /// if intact, non-zero if any record was altered, deleted, or reordered.
+    #[arg(long)]
+    pub verify: bool,
 }
 
 /// `localpass ssh ...`

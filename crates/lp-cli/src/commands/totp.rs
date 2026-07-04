@@ -122,6 +122,11 @@ fn compute_direct(session: &lp_vault::Session, vault_ref: &str, target: &str) ->
     let (code, seconds_remaining) =
         result.map_err(|_| CliError::usage("could not compute TOTP code (bad parameters)"))?;
 
+    // Computing a TOTP code discloses a value derived from the secret: audit it as
+    // a secret read of the totp field (PRD §4.9). Best-effort. (The proxied path is
+    // audited in the daemon, which holds the session — no double-logging.)
+    vault.record_secret_read(&item.item_id, Some("totp")).ok();
+
     Ok(Computed {
         code,
         seconds_remaining,

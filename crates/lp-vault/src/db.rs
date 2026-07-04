@@ -143,6 +143,53 @@ CREATE TABLE settings (
 );
 "#;
 
+/// The DDL for the device-local audit log (`audit_log` table in the account
+/// store), PRD §4.9. **Plaintext metadata only** — ids, kinds, timestamps; never
+/// a secret value and never a vault/item name (see [`crate::audit`]). Integrity
+/// comes from the per-device BLAKE3 hash chain (`prev_hash` links each record to
+/// the previous one), not from confidentiality.
+///
+/// Created with `IF NOT EXISTS` so it is added idempotently both by
+/// [`ACCOUNT_STORE_DDL`]'s companion [`ensure_audit_table`] on a fresh store and,
+/// forward-only, on the first append against an account store created before this
+/// build (a purely additive migration — no `format_version` bump, since a v1
+/// reader that predates the table simply never queries it; vault-format.md §9).
+///
+/// `UNIQUE (device_id, seq)` mirrors the op log: per-device gapless sequencing.
+pub const AUDIT_LOG_DDL: &str = r#"
+CREATE TABLE IF NOT EXISTS audit_log (
+    seq               INTEGER NOT NULL,
+    device_id         BLOB    NOT NULL,
+    prev_hash         BLOB    NOT NULL,
+    timestamp         INTEGER NOT NULL,
+    kind              INTEGER NOT NULL,
+    item_id           BLOB,
+    vault_id          BLOB,
+    peer_device_id    BLOB,
+    field             TEXT,
+    format            TEXT,
+    item_count        INTEGER NOT NULL DEFAULT 0,
+    detail            TEXT,
+    PRIMARY KEY (device_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log (timestamp);
+"#;
+
+/// Idempotently create the `audit_log` table + index if absent
+/// ([`AUDIT_LOG_DDL`]). Safe to call on every unlock/append; a no-op once the
+/// table exists. This is the forward-only migration that gives an account store
+/// created before this build its audit table on first use (vault-format.md §9:
+/// forward-only, idempotent, single transaction — `execute_batch` runs the DDL
+/// as one implicit transaction).
+///
+/// # Errors
+///
+/// [`crate::Error::Sqlite`] if the DDL cannot be applied.
+pub fn ensure_audit_table(conn: &Connection) -> Result<()> {
+    conn.execute_batch(AUDIT_LOG_DDL)?;
+    Ok(())
+}
+
 /// The DDL for a vault file (`<vault_id>.vault`), verbatim from
 /// vault-format.md §3 (including indexes).
 pub const VAULT_DDL: &str = r#"

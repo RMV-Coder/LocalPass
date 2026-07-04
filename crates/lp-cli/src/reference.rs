@@ -143,12 +143,14 @@ pub fn resolve_value(session: &Session, r: &Reference) -> Result<String> {
     // case-insensitive) — an env-set's keys are the natural field names.
     if let TypeData::EnvSet { entries } = &item.payload.type_data {
         if let Some(e) = entries.iter().find(|e| e.key == r.field) {
+            audit_reference_read(&vault, &item.item_id, &e.key);
             return Ok(e.value.clone());
         }
         if let Some(e) = entries
             .iter()
             .find(|e| e.key.eq_ignore_ascii_case(&r.field))
         {
+            audit_reference_read(&vault, &item.item_id, &e.key);
             return Ok(e.value.clone());
         }
     }
@@ -156,6 +158,7 @@ pub fn resolve_value(session: &Session, r: &Reference) -> Result<String> {
     // Fall back to the flattened display fields (same source `item get` uses).
     let fields = output::display_fields(&item.payload);
     if let Some(f) = output::find_field(&fields, &r.field) {
+        audit_reference_read(&vault, &item.item_id, &f.name);
         return Ok(f.value.clone());
     }
 
@@ -164,6 +167,15 @@ pub fn resolve_value(session: &Session, r: &Reference) -> Result<String> {
         r.item, r.vault, r.field
     ))
     .into())
+}
+
+/// Audit a reference resolution as an [`ItemSecretRead`](lp_vault::AuditKind)
+/// (PRD §4.9): resolving a `localpass://`/`op://` reference discloses the
+/// field's plaintext value into a child process's environment, so it is a secret
+/// read. Records the field name (never its value). Best-effort — a reference
+/// resolution is never failed over an audit-append hiccup.
+fn audit_reference_read(vault: &lp_vault::Vault<'_>, item_id: &lp_vault::ItemId, field: &str) {
+    vault.record_secret_read(item_id, Some(field)).ok();
 }
 
 /// Parse **and** resolve a reference in one step.

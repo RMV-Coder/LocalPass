@@ -252,6 +252,15 @@ impl<'s> Vault<'s> {
         self.index.apply_upsert(&tx, &item_id, payload, &reader)?;
 
         tx.commit()?;
+        // Audit (PRD §4.9): record the create after the vault write commits, so a
+        // failed write leaves no orphan audit record. Best-effort — never fail the
+        // (already-committed) mutation over an audit-append hiccup.
+        self.session
+            .record_mutation(crate::audit::AuditKind::ItemCreate {
+                item_id,
+                vault_id: self.vault_id,
+            })
+            .ok();
         Ok(item_id)
     }
 
@@ -320,6 +329,13 @@ impl<'s> Vault<'s> {
         self.index.apply_upsert(&tx, &item_id, payload, &reader)?;
 
         tx.commit()?;
+        // Audit (PRD §4.9): record the edit after the vault write commits.
+        self.session
+            .record_mutation(crate::audit::AuditKind::ItemUpdate {
+                item_id,
+                vault_id: self.vault_id,
+            })
+            .ok();
         Ok(version)
     }
 
@@ -377,6 +393,13 @@ impl<'s> Vault<'s> {
         self.index.apply_delete(&tx, &item_id, &reader)?;
 
         tx.commit()?;
+        // Audit (PRD §4.9): record the delete after the vault write commits.
+        self.session
+            .record_mutation(crate::audit::AuditKind::ItemDelete {
+                item_id,
+                vault_id: self.vault_id,
+            })
+            .ok();
         Ok(())
     }
 
@@ -456,6 +479,13 @@ impl<'s> Vault<'s> {
             .apply_upsert(&tx, &item_id, &restored_payload, &reader)?;
 
         tx.commit()?;
+        // Audit (PRD §4.9): record the restore after the vault write commits.
+        self.session
+            .record_mutation(crate::audit::AuditKind::ItemRestore {
+                item_id,
+                vault_id: self.vault_id,
+            })
+            .ok();
         Ok(new_version)
     }
 
@@ -566,6 +596,26 @@ impl<'s> Vault<'s> {
             out.push(self.read_item(conn, &item_id)?);
         }
         Ok(out)
+    }
+
+    /// Record an [`AuditKind::ItemSecretRead`](crate::audit::AuditKind::ItemSecretRead)
+    /// against this vault (PRD §4.9): a read that **revealed** a secret value of
+    /// `item_id`. `field` is the single revealed field's non-secret name (e.g.
+    /// `"password"`), or `None` for a whole-item reveal.
+    ///
+    /// This is the explicit reveal-audit hook the CLI/daemon call **only** when
+    /// they actually disclose a secret (`item get --reveal` / `--field`, a
+    /// `localpass://` field resolution, an autofill fill, a TOTP code). Plain
+    /// [`get_item`](Self::get_item), [`list_items`](Self::list_items), and
+    /// [`search`](Self::search) do **not** call it — a masked read is not a secret
+    /// read.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sqlite`] / [`Error::Invalid`] on an audit-append failure.
+    pub fn record_secret_read(&self, item_id: &ItemId, field: Option<&str>) -> Result<()> {
+        self.session
+            .record_secret_read(&self.vault_id, item_id, field)
     }
 
     // --- Search (index-backed, linear fallback) ---------------------------

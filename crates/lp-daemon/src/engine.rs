@@ -411,6 +411,15 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
                 }
                 None => render::item_to_wire(&item, reveal),
             };
+            // Audit (PRD §4.9): a revealed GetItem discloses secret values — record
+            // a whole-item secret read when the item actually has a secret to
+            // reveal. A masked GetItem (reveal == false, used by e.g. the delete
+            // confirmation) discloses nothing and is NOT audited. The daemon holds
+            // the session, so it records here (the CLI proxied path does not — no
+            // double-logging). Best-effort.
+            if reveal && wire.fields.iter().any(|f| f.secret) {
+                v.record_secret_read(&item.item_id, None).ok();
+            }
             Ok(Response::Item {
                 item: Box::new(wire),
             })
@@ -453,13 +462,18 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
             let v = open_vault(session, &vault)?;
             let it = find_item(&v, &target)?;
             match render::totp_code(&it.payload) {
-                Ok(Some(t)) => Ok(Response::Totp {
-                    code: t.code,
-                    seconds_remaining: t.seconds_remaining,
-                    period: t.period,
-                    digits: t.digits,
-                    algo: t.algo,
-                }),
+                Ok(Some(t)) => {
+                    // Audit (PRD §4.9): a TOTP code is a disclosure derived from the
+                    // secret — record a secret read of the totp field. Best-effort.
+                    v.record_secret_read(&it.item_id, Some("totp")).ok();
+                    Ok(Response::Totp {
+                        code: t.code,
+                        seconds_remaining: t.seconds_remaining,
+                        period: t.period,
+                        digits: t.digits,
+                        algo: t.algo,
+                    })
+                }
                 Ok(None) => Err(usage(format!(
                     "item {target:?} is not a totp item (its type is {})",
                     it.payload.type_data.type_str()
@@ -474,7 +488,13 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
             let v = open_vault(session, &vault)?;
             let it = find_item(&v, &item)?;
             match render::resolve_field(&it.payload, &field) {
-                Some(value) => Ok(Response::Field { value }),
+                Some(value) => {
+                    // Audit (PRD §4.9): resolving a `localpass://` field discloses
+                    // its plaintext value — record a secret read naming the field
+                    // (never the value). Best-effort.
+                    v.record_secret_read(&it.item_id, Some(&field)).ok();
+                    Ok(Response::Field { value })
+                }
                 None => Err(usage(format!(
                     "item {item:?} in vault {vault:?} has no field {field:?}"
                 ))),
@@ -486,6 +506,12 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
             let it = find_item(&v, &target)?;
             let payload = serde_json::to_value(&it.payload)
                 .map_err(|e| usage(format!("could not serialize payload: {e}")))?;
+            // NOT audited as a secret read: GetRawPayload is the daemon-internal
+            // support call behind proxied `item edit` (fetch → overlay flags →
+            // UpdateItem). The direct-mode `item edit` reads the payload the same
+            // way without auditing a read (the ItemUpdate mutation is what gets
+            // logged). Auditing here would make proxied edit log a phantom read
+            // that direct edit does not — so we keep the two paths symmetric.
             Ok(Response::RawPayload {
                 id: it.item_id.to_hyphenated(),
                 payload,
@@ -748,15 +774,16 @@ fn fill_login(session: &Session, item_ref: &str, origin: &str) -> Result<Respons
         ));
     }
     let vaults = session.list_vaults().map_err(vault_err)?;
-    // Locate the item across vaults (by id first, else by unique title).
-    let mut found: Option<lp_vault::Item> = None;
+    // Locate the item across vaults (by id first, else by unique title). Track the
+    // owning vault id so the fill can be audited against the right vault.
+    let mut found: Option<(lp_vault::Item, lp_vault::VaultId)> = None;
     for (vault_id, _name) in &vaults {
         let v = session.open_vault(*vault_id).map_err(vault_err)?;
         // Try by id (`parse_id` yields an `lp_vault::Id`, which is `ItemId`).
         if let Some(id) = parse_id(item_ref) {
             match v.get_item(id) {
                 Ok(item) => {
-                    found = Some(item);
+                    found = Some((item, *vault_id));
                     break;
                 }
                 Err(lp_vault::Error::NotFound(_)) => {}
@@ -767,12 +794,13 @@ fn fill_login(session: &Session, item_ref: &str, origin: &str) -> Result<Respons
         if found.is_none() {
             let items = v.list_items().map_err(vault_err)?;
             if let Some(it) = items.iter().find(|it| it.payload.title == item_ref) {
-                found = Some(v.get_item(it.item_id).map_err(vault_err)?);
+                found = Some((v.get_item(it.item_id).map_err(vault_err)?, *vault_id));
                 break;
             }
         }
     }
-    let item = found.ok_or_else(|| usage(format!("no login item matching {item_ref:?}")))?;
+    let (item, vault_id) =
+        found.ok_or_else(|| usage(format!("no login item matching {item_ref:?}")))?;
 
     // Must be a login item.
     if !matches!(item.payload.type_data, lp_vault::TypeData::Login { .. }) {
@@ -788,6 +816,15 @@ fn fill_login(session: &Session, item_ref: &str, origin: &str) -> Result<Respons
             "the item's URL does not match the requested origin; refusing to fill",
         ));
     }
+
+    // Audit (PRD §4.9): a fill releases the password for autofill — a secret
+    // disclosure. Record it as a secret read of the password field (never the
+    // value), only after every check passed. Best-effort. A refused fill (bad
+    // origin / wrong type / mismatch above) returns before here and is NOT logged
+    // as a read — no secret left the vault.
+    session
+        .record_secret_read(&vault_id, &item.item_id, Some("password"))
+        .ok();
 
     Ok(Response::Fill {
         username: login_username(&item.payload),

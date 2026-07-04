@@ -99,6 +99,12 @@ fn export_age(session: &Session, args: &ExportArgs, src: PasswordSource) -> Resu
         .map_err(|e| CliError::internal(anyhow::anyhow!("{e}")))?;
 
     write_owner_only(&args.path, &bytes)?;
+    // Audit (PRD §4.9): a successful export leaves the vault — record the format
+    // and item count (never contents). Best-effort. Export always unlocks
+    // directly (never proxied), so the CLI holds the session and records here.
+    session
+        .record_export("age", u64::try_from(total).unwrap_or(0))
+        .ok();
     eprintln!(
         "wrote age archive with {total} item(s) to {} (decrypt with `age -d`)",
         args.path.display()
@@ -124,6 +130,16 @@ fn export_plaintext(session: &Session, args: &ExportArgs) -> Result<()> {
     .map_err(|e| CliError::internal(anyhow::anyhow!("{e}")))?;
 
     write_owner_only(&args.path, &bytes)?;
+    let format = match args.format {
+        ExportFormat::Json => "json",
+        ExportFormat::Csv => "csv",
+        _ => unreachable!("guarded caller only routes json/csv here"),
+    };
+    // Audit (PRD §4.9): a plaintext export leaves the vault — record format +
+    // count (never the contents). Best-effort.
+    session
+        .record_export(format, u64::try_from(total).unwrap_or(0))
+        .ok();
     eprintln!("wrote {} (PLAINTEXT)", args.path.display());
     Ok(())
 }
@@ -143,6 +159,9 @@ fn export_dotenv(session: &Session, args: &ExportArgs) -> Result<()> {
         .map_err(|e| CliError::usage(e.to_string()))?;
 
     write_owner_only(&args.path, rendered.as_bytes())?;
+    // Audit (PRD §4.9): a dotenv export renders one env-set item to a file.
+    // Best-effort.
+    session.record_export("dotenv", 1).ok();
     eprintln!("wrote env-set to {} (0600 on Unix)", args.path.display());
     Ok(())
 }
