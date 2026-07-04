@@ -680,6 +680,7 @@ dependencies = [
  "directories",
  "getrandom 0.3.4",
  "lp-crypto",
+ "lp-daemon",
  "lp-vault",
  "predicates",
  "rpassword",
@@ -706,6 +707,23 @@ dependencies = [
  "subtle",
  "thiserror 2.0.18",
  "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "lp-daemon"
+version = "0.1.0"
+dependencies = [
+ "assert_cmd",
+ "libc",
+ "lp-crypto",
+ "lp-vault",
+ "predicates",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "windows-sys 0.59.0",
  "zeroize",
 ]
 

@@ -1,0 +1,67 @@
+[package]
+name = "lp-daemon"
+description = "LocalPass per-user agent: a background process that holds an unlocked vault session behind an authenticated, same-user-only local IPC channel (Windows named pipe / Unix domain socket) so repeated CLI calls don't re-prompt for the master password."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "localpass-daemon"
+path = "src/bin/localpass-daemon.rs"
+
+[dependencies]
+# --- The storage/crypto core the daemon holds unlocked. The daemon is the ONLY
+# --- long-lived holder of an lp-vault Session; it consumes lp-vault's high-level
+# --- API and lp-crypto only for the SecretKey display-string type (crypto
+# --- boundary, LESSONS.md). ---
+lp-vault = { path = "../lp-vault" }
+lp-crypto = { path = "../lp-crypto" }
+# --- Length-prefixed JSON wire protocol (versioned {"v":1,...} envelopes). serde
+# --- derives the request/response model; serde_json is the on-wire encoding. No
+# --- secret ever appears in a Debug/log render — request Debug is kind-only. ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# --- One error enum; no secret leakage in messages (workspace-pinned). ---
+thiserror = { workspace = true }
+# --- Drop-zeroed transient buffers for the master password / secret-key display
+# --- string as they cross the (same-user-only) channel (workspace-pinned). ---
+zeroize = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# --- Windows named-pipe transport + access control. Feature flags are the
+# --- minimal set for: (1) creating a pipe whose SECURITY_DESCRIPTOR DACL grants
+# --- ONLY the current user's SID (the DACL is the authentication, PRD §8 T8),
+# --- and (2) reading/writing the pipe and identifying the calling process.
+windows-sys = { version = "0.59", features = [
+    # Named-pipe create/connect/disconnect + GetNamedPipeClientProcessId.
+    "Win32_System_Pipes",
+    # CreateFileW (client open) + ReadFile/WriteFile/CloseHandle + pipe flags.
+    "Win32_Storage_FileSystem",
+    # HANDLE, GetLastError, CloseHandle, generic Win32 foundation types.
+    "Win32_Foundation",
+    # SECURITY_ATTRIBUTES + SECURITY_DESCRIPTOR + SetSecurityDescriptorDacl.
+    "Win32_Security",
+    # ACL/ACE construction: InitializeAcl, AddAccessAllowedAce, ACL sizing.
+    "Win32_Security_Authorization",
+    # Current-user token → SID: OpenProcessToken, GetTokenInformation (TokenUser).
+    "Win32_System_Threading",
+    # WaitNamedPipeW / pipe-busy handling on the client connect path.
+    "Win32_System_IO",
+] }
+
+[target.'cfg(unix)'.dependencies]
+# --- Unix peer-credential check (SO_PEERCRED): the uid on the far end of the
+# --- socket MUST equal our euid, layered on top of 0700 dir / 0600 socket perms
+# --- (PRD §5.1 least privilege, §8 T8 IPC hijack). std::os::unix::net covers the
+# --- socket itself; libc is only for getsockopt(SO_PEERCRED) + geteuid. ---
+libc = "0.2"
+
+[dev-dependencies]
+# --- Black-box integration tests: spawn the built `localpass` binary end to end
+# --- (daemon start → unlock → reuse → lock → stop), asserting exit codes and
+# --- stdout/stderr. tempfile gives each test an isolated profile dir. ---
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"

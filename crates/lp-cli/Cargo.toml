@@ -17,6 +17,11 @@ path = "src/main.rs"
 # --- lp-crypto's high-level SecretKey type (crypto-boundary rule, LESSONS.md). ---
 lp-vault = { path = "../lp-vault" }
 lp-crypto = { path = "../lp-crypto" }
+# --- The daemon library: the CLI is a daemon CLIENT (probe/proxy) and the
+# --- launcher for `daemon start`. It never links the server loop into itself; it
+# --- spawns the separate `localpass-daemon` binary. Shares the wire protocol and
+# --- item-render model so proxied output matches direct-unlock output. ---
+lp-daemon = { path = "../lp-daemon" }
 # --- Argument parsing. clap v4 derive gives a typed command tree, generated
 # --- --help, and stable long-flag names — the documented CLI contract (PRD §4.4). ---
 clap = { version = "4", features = ["derive"] }

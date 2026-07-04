@@ -58,6 +58,11 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub password_stdin: bool,
 
+    /// Ignore any running daemon and unlock directly for this command (the
+    /// pre-daemon behaviour). Does not stop or affect a running daemon.
+    #[arg(long, global = true)]
+    pub no_daemon: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -124,6 +129,47 @@ pub enum Command {
     Env {
         #[command(subcommand)]
         command: EnvCommand,
+    },
+
+    /// Unlock the vault in the background daemon so later commands don't
+    /// re-prompt. Starts the daemon if it isn't running, then sends the
+    /// password to it (over the same-user-only local IPC channel).
+    Unlock,
+
+    /// Lock the background daemon now, dropping its unlocked keys from memory.
+    /// A no-op (still exits 0) if no daemon is running.
+    Lock,
+
+    /// Manage the background daemon (start / stop / status).
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
+    },
+}
+
+/// `localpass daemon ...`
+#[derive(Debug, Subcommand)]
+pub enum DaemonCommand {
+    /// Start the background daemon (detached) if it isn't already running.
+    /// Waits until it answers a Ping. A friendly no-op if already running.
+    Start {
+        /// Idle auto-lock timeout in seconds (0 = never). Overrides the
+        /// LOCALPASS_AUTOLOCK_SECS env var and the 600s default.
+        #[arg(long, value_name = "SECS")]
+        autolock: Option<u64>,
+        /// Ask the daemon to log request kinds + timings to its stderr (never
+        /// secrets). Mainly useful when running the daemon in the foreground.
+        #[arg(long)]
+        verbose: bool,
+    },
+    /// Stop the running daemon (drops keys, removes the socket/pipe). A friendly
+    /// no-op if none is running.
+    Stop,
+    /// Show whether the daemon is running and, if so, its lock state.
+    Status {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 

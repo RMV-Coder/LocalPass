@@ -15,19 +15,31 @@ use lp_vault::Session;
 use lp_vault::payload::{EnvEntry, ItemPayload, TypeData};
 
 use crate::cli::{EnvCommand, EnvFormat};
+use crate::daemonctl::{self, Route};
 use crate::dotenv;
 use crate::error::{CliError, map_vault_error};
 use crate::resolve;
 use crate::unlock::{self, PasswordSource};
 
-/// Run a `localpass env ...` subcommand.
+use lp_daemon::client::Client;
+use lp_daemon::protocol::{Request, Response};
+
+/// Run a `localpass env ...` subcommand (daemon-first, direct fallback).
 ///
 /// # Errors
 ///
 /// Propagates unlock, resolution, and storage failures with the documented exit
 /// codes. `diff` returns [`CliError::Usage`] (exit 1) when the file and item
 /// differ.
-pub fn run(profile_dir: &Path, src: PasswordSource, command: &EnvCommand) -> Result<()> {
+pub fn run(
+    profile_dir: &Path,
+    src: PasswordSource,
+    no_daemon: bool,
+    command: &EnvCommand,
+) -> Result<()> {
+    if let Route::Proxy(mut client) = daemonctl::route(profile_dir, no_daemon) {
+        return run_proxied(profile_dir, &mut client, command);
+    }
     let (session, _sk) = unlock::unlock(profile_dir, src)?;
     match command {
         EnvCommand::Export {
@@ -42,6 +54,94 @@ pub fn run(profile_dir: &Path, src: PasswordSource, command: &EnvCommand) -> Res
             env_set,
             vault,
         } => diff(&session, vault, path, env_set),
+    }
+}
+
+/// The proxied path: fetch env-set entries via `GetRawPayload`, or create via
+/// `CreateItem`, through the daemon's held session.
+fn run_proxied(profile_dir: &Path, client: &mut Client, command: &EnvCommand) -> Result<()> {
+    let profile = profile_dir.display().to_string();
+    match command {
+        EnvCommand::Export {
+            env_set,
+            vault,
+            format,
+            file,
+        } => {
+            let entries = load_entries_proxied(&profile, client, vault, env_set)?;
+            emit_export(&entries, *format, file.as_deref())
+        }
+        EnvCommand::Import { path, title, vault } => {
+            let parsed = dotenv::parse_file(path)?;
+            let entries: Vec<EnvEntry> = parsed
+                .into_iter()
+                .map(|e| EnvEntry {
+                    key: e.key,
+                    value: e.value,
+                })
+                .collect();
+            let count = entries.len();
+            let payload = ItemPayload::new(TypeData::EnvSet { entries }, title);
+            let value = serde_json::to_value(&payload)
+                .map_err(|e| CliError::internal(anyhow::anyhow!("serializing env-set: {e}")))?;
+            let resp = daemonctl::call(
+                client,
+                &Request::CreateItem {
+                    profile,
+                    vault: vault.clone(),
+                    payload: value,
+                },
+            )?;
+            daemonctl::check_error(&resp)?;
+            let id = match &resp {
+                Response::Ok { message } => message.clone().unwrap_or_default(),
+                _ => String::new(),
+            };
+            println!("imported {count} variable(s) into env-set {title:?} ({id})");
+            Ok(())
+        }
+        EnvCommand::Diff {
+            path,
+            env_set,
+            vault,
+        } => {
+            let item_entries = load_entries_proxied(&profile, client, vault, env_set)?;
+            diff_entries(path, env_set, &item_entries)
+        }
+    }
+}
+
+/// Fetch an env-set item's entries through the daemon (`GetRawPayload`).
+fn load_entries_proxied(
+    profile: &str,
+    client: &mut Client,
+    vault_ref: &str,
+    set_ref: &str,
+) -> Result<Vec<EnvEntry>> {
+    let resp = daemonctl::call(
+        client,
+        &Request::GetRawPayload {
+            profile: profile.to_string(),
+            vault: vault_ref.to_string(),
+            target: set_ref.to_string(),
+        },
+    )?;
+    daemonctl::check_error(&resp)?;
+    let Response::RawPayload { payload, .. } = resp else {
+        bail!(CliError::internal(anyhow::anyhow!(
+            "unexpected daemon response: {}",
+            resp.kind()
+        )));
+    };
+    let payload: ItemPayload = serde_json::from_value(payload)
+        .map_err(|e| CliError::internal(anyhow::anyhow!("parsing env-set payload: {e}")))?;
+    match payload.type_data {
+        TypeData::EnvSet { entries } => Ok(entries),
+        other => Err(CliError::usage(format!(
+            "{set_ref:?} is a {} item, not an env-set",
+            other.type_str()
+        ))
+        .into()),
     }
 }
 
@@ -69,8 +169,13 @@ fn export(
     file: Option<&Path>,
 ) -> Result<()> {
     let entries = load_entries(session, vault_ref, set_ref)?;
-    let rendered = render(&entries, format);
+    emit_export(&entries, format, file)
+}
 
+/// Render `entries` in `format` and write them to `file` (0600) or stdout.
+/// Shared by the direct and proxied export paths.
+fn emit_export(entries: &[EnvEntry], format: EnvFormat, file: Option<&Path>) -> Result<()> {
+    let rendered = render(entries, format);
     if let Some(path) = file {
         write_owner_only(path, rendered.as_bytes())?;
         // Confirm on stderr (not stdout) so `--file` output stays clean; do not
@@ -171,8 +276,14 @@ fn import(session: &Session, vault_ref: &str, path: &Path, title: &str) -> Resul
 // --- diff -----------------------------------------------------------------
 
 fn diff(session: &Session, vault_ref: &str, path: &Path, set_ref: &str) -> Result<()> {
-    let file_entries = dotenv::parse_file(path)?;
     let item_entries = load_entries(session, vault_ref, set_ref)?;
+    diff_entries(path, set_ref, &item_entries)
+}
+
+/// Compare a dotenv file at `path` against `item_entries` (from either the
+/// direct or proxied load), reporting drift by key only. Shared core.
+fn diff_entries(path: &Path, set_ref: &str, item_entries: &[EnvEntry]) -> Result<()> {
+    let file_entries = dotenv::parse_file(path)?;
 
     // Build sorted maps of key → value for a deterministic, value-free report.
     let file_map: std::collections::BTreeMap<&str, &str> = file_entries

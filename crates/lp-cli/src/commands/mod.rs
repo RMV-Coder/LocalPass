@@ -6,6 +6,7 @@
 //!
 //! [`PasswordSource`]: crate::unlock::PasswordSource
 
+pub mod daemon;
 pub mod env;
 pub mod generate;
 pub mod init;

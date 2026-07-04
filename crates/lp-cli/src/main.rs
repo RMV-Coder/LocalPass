@@ -1,14 +1,19 @@
 //! `localpass` — the LocalPass command-line interface.
 //!
-//! A fully local, offline password & secrets manager CLI. This binary talks
-//! **directly** to the `lp-vault` storage core: there is no daemon yet (the
-//! per-user agent that caches unlocked keys is a later wave), so every command
-//! that touches a vault performs its own unlock.
+//! A fully local, offline password & secrets manager CLI. Each vault-touching
+//! command tries the background daemon first (a fast Ping/Status probe); if the
+//! daemon is running and unlocked for this profile, the command **proxies**
+//! through it so no master-password re-prompt is needed. Otherwise — no daemon,
+//! a locked daemon, or `--no-daemon` — the command falls back to unlocking
+//! **directly** against the `lp-vault` storage core, exactly as it did before
+//! the daemon existed. See [`daemonctl`] for the full routing matrix.
 //!
 //! # Module map
 //!
 //! - [`cli`] — the `clap` command tree (the documented interface).
 //! - [`commands`] — one module per command; each returns `anyhow::Result<()>`.
+//! - [`daemonctl`] — the daemon-first / direct-fallback routing and daemon
+//!   lifecycle (start/stop/unlock/lock proxying).
 //! - [`unlock`] — the shared Secret-Key-load + password + unlock flow.
 //! - [`profile`] — profile-dir resolution and on-device Secret Key storage.
 //! - [`content`] / [`output`] / [`resolve`] — payload building, masked
@@ -27,6 +32,7 @@
 mod cli;
 mod commands;
 mod content;
+mod daemonctl;
 mod dotenv;
 mod envmap;
 mod error;
@@ -71,21 +77,33 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         no_input: cli.no_input,
         stdin: cli.password_stdin,
     };
+    let no_daemon = cli.no_daemon;
 
     match &cli.command {
         Command::Init => commands::init::run(&profile_dir, src),
-        Command::Status { json } => commands::status::run(&profile_dir, src, *json),
-        Command::Vault { command } => commands::vault::run(&profile_dir, src, command),
-        Command::Item { command } => commands::item::run(&profile_dir, src, command),
+        Command::Status { json } => commands::status::run(&profile_dir, src, no_daemon, *json),
+        Command::Vault { command } => commands::vault::run(&profile_dir, src, no_daemon, command),
+        Command::Item { command } => commands::item::run(&profile_dir, src, no_daemon, command),
         Command::Search {
             query,
             item_type,
             vault,
             json,
-        } => commands::search::run(&profile_dir, src, query, *item_type, vault, *json),
+        } => commands::search::run(
+            &profile_dir,
+            src,
+            no_daemon,
+            query,
+            *item_type,
+            vault,
+            *json,
+        ),
         Command::Generate(args) => commands::generate::run(args),
         Command::Password { command } => commands::password::run(&profile_dir, src, command),
-        Command::Run(args) => commands::run::run(&profile_dir, src, args),
-        Command::Env { command } => commands::env::run(&profile_dir, src, command),
+        Command::Run(args) => commands::run::run(&profile_dir, src, no_daemon, args),
+        Command::Env { command } => commands::env::run(&profile_dir, src, no_daemon, command),
+        Command::Unlock => commands::daemon::run_unlock(&profile_dir, src),
+        Command::Lock => commands::daemon::run_lock(&profile_dir),
+        Command::Daemon { command } => commands::daemon::run(&profile_dir, command),
     }
 }
