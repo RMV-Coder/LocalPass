@@ -36,6 +36,7 @@ use crate::account::Session;
 use crate::db;
 use crate::error::{Error, Result};
 use crate::ids::{FolderId, Id, ItemId, VaultId};
+use crate::index::SearchIndex;
 use crate::op::{ItemTarget, OpFields, OpKind, chain_hash, genesis_hash};
 use crate::payload::ItemPayload;
 
@@ -55,6 +56,10 @@ pub struct Vault<'s> {
     path: std::path::PathBuf,
     vault_id: VaultId,
     vault_key: VaultKey,
+    /// The encrypted search index handle (holds the derived IndexKey).
+    /// Constructed at open; drops with the vault, so lock/unlock never touches
+    /// the index (search-index.md §7).
+    index: SearchIndex,
     session: &'s Session,
 }
 
@@ -84,6 +89,21 @@ pub struct VersionInfo {
     pub payload: ItemPayload,
 }
 
+/// Per-vault storage statistics (PRD §4.10 visible stats). Returned by
+/// [`Vault::storage_stats`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StorageStats {
+    /// Number of live (non-tombstoned) items.
+    pub live_items: u64,
+    /// Total immutable version rows across all items.
+    pub total_versions: u64,
+    /// Number of items currently in trash (tombstoned).
+    pub trashed: u64,
+    /// Number of encrypted data segments in the search index (excludes the
+    /// manifest segment 0).
+    pub index_segments: u64,
+}
+
 /// A trash entry (tombstoned item).
 #[derive(Debug)]
 pub struct TrashEntry {
@@ -108,12 +128,33 @@ impl<'s> Vault<'s> {
     ) -> Result<Self> {
         let conn = db::open_connection(&path)?;
         db::check_format_version(&conn)?;
+        let index = SearchIndex::new(vault_id, &vault_key)?;
         Ok(Self {
             path,
             vault_id,
             vault_key,
+            index,
             session,
         })
+    }
+
+    /// Build a [`PayloadReader`](crate::index::PayloadReader) closure the index
+    /// uses to decrypt an item's current version over a given connection. This
+    /// is the read path the index rebuilds on; it decrypts through the same
+    /// per-item-key mechanism as [`get_item`](Self::get_item).
+    fn payload_reader(&self) -> impl Fn(&Connection, &ItemId) -> Result<ItemPayload> + '_ {
+        move |conn: &Connection, item_id: &ItemId| -> Result<ItemPayload> {
+            let current: i64 = conn
+                .query_row(
+                    "SELECT current_version FROM items WHERE item_id = ?1",
+                    params![item_id.to_vec()],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .ok_or(Error::NotFound("item"))?;
+            let plaintext = self.read_version_plaintext(conn, item_id, current)?;
+            ItemPayload::from_canonical(&plaintext)
+        }
     }
 
     /// This vault's id.
@@ -181,6 +222,13 @@ impl<'s> Vault<'s> {
             params![item_id.to_vec(), version, now],
         )?;
 
+        // Update the encrypted index IN THE SAME TRANSACTION (search-index.md
+        // §4): bumps meta.index_generation once and re-encrypts the owning
+        // segment + manifest at the new generation. Rolls back with the item
+        // write on any failure.
+        let reader = self.payload_reader();
+        self.index.apply_upsert(&tx, &item_id, payload, &reader)?;
+
         tx.commit()?;
         Ok(item_id)
     }
@@ -245,6 +293,10 @@ impl<'s> Vault<'s> {
             params![item_id.to_vec(), version, now],
         )?;
 
+        // Index update in the same transaction (search-index.md §4/§5 update).
+        let reader = self.payload_reader();
+        self.index.apply_upsert(&tx, &item_id, payload, &reader)?;
+
         tx.commit()?;
         Ok(version)
     }
@@ -295,6 +347,12 @@ impl<'s> Vault<'s> {
                 op_id.to_vec(),
             ],
         )?;
+
+        // Remove the item from the index in the same transaction (search-index.md
+        // §5 delete). The tombstone above is already visible, so any lazy segment
+        // rebuild triggered here correctly excludes the deleted item.
+        let reader = self.payload_reader();
+        self.index.apply_delete(&tx, &item_id, &reader)?;
 
         tx.commit()?;
         Ok(())
@@ -366,6 +424,14 @@ impl<'s> Vault<'s> {
             "DELETE FROM tombstones WHERE item_id = ?1",
             params![item_id.to_vec()],
         )?;
+
+        // Re-index the restored item as an update to its current fields
+        // (search-index.md §5 restore). The tombstone is already dropped, so the
+        // item is live for the index.
+        let restored_payload = ItemPayload::from_canonical(&plaintext)?;
+        let reader = self.payload_reader();
+        self.index
+            .apply_upsert(&tx, &item_id, &restored_payload, &reader)?;
 
         tx.commit()?;
         Ok(new_version)
@@ -480,24 +546,65 @@ impl<'s> Vault<'s> {
         Ok(out)
     }
 
-    // --- Search (linear placeholder) --------------------------------------
+    // --- Search (index-backed, linear fallback) ---------------------------
 
-    /// Linear substring search over decrypted live items — the documented
-    /// fallback path (see module docs). Matches `query` (case-insensitive)
-    /// against the title, tags, and item type string; `type_filter` restricts to
-    /// one type string (e.g. `"ssh_key"`) when set.
+    /// Search live items by `query`, optionally restricted to one `type_filter`
+    /// (e.g. `"ssh_key"`), returning the matching items in rank order
+    /// (exact > prefix > trigram; search-index.md §6).
     ///
-    /// This decrypts every live item; the encrypted index (search-index.md) will
-    /// replace it with a token index over the same [`iter_items`](Self::iter_items)
-    /// read path. Not performance-tuned by design.
+    /// Index-backed: the encrypted index resolves candidate item ids
+    /// (AND-intersected across query tokens, filters applied, tombstoned ids
+    /// dropped), then the matched items are decrypted for return. If the index
+    /// is absent or unreadable, this **falls back to a linear scan** (correct,
+    /// just slower) and lazily rebuilds the index in the background of the same
+    /// call — never as an unlock precondition (search-index.md §7). Supports the
+    /// `type:`/`tag:`/`folder:`/`fav:` filter syntax inside `query`.
+    ///
+    /// The signature and semantics are unchanged from the previous linear
+    /// implementation (additive index backing); an empty query with no filter
+    /// still returns all live items.
     ///
     /// # Errors
     ///
     /// [`Error::Sqlite`] / [`Error::DecryptionFailed`].
     pub fn search(&self, query: &str, type_filter: Option<&str>) -> Result<Vec<Item>> {
+        let mut conn = self.connect()?;
+        let reader = self.payload_reader();
+
+        // Try the index. Any structural failure (not a wrong-key failure) falls
+        // back to the linear scan — the index is a cache, never a hard dep.
+        match self.index.query(&mut conn, query, type_filter, &reader) {
+            Ok(ids) => {
+                let mut out = Vec::with_capacity(ids.len());
+                for id in ids {
+                    // An item could have been concurrently removed; skip misses.
+                    if let Ok(item) = self.read_item(&conn, &id) {
+                        out.push(item);
+                    }
+                }
+                Ok(out)
+            }
+            Err(Error::DecryptionFailed) => {
+                // A wrong/rotated IndexKey (or unrecoverable AEAD state) → serve
+                // via linear fallback (search-index.md §7 rung 3).
+                self.search_linear(&conn, query, type_filter)
+            }
+            Err(other) => Err(other),
+        }
+    }
+
+    /// The linear-scan fallback: decrypt every live item and match `query`
+    /// (NFKC-insensitive substring on title/tags/type plus the structural
+    /// filters). Correct but O(n); used only when the index cannot be read
+    /// (search-index.md §7 rung 3).
+    fn search_linear(
+        &self,
+        conn: &Connection,
+        query: &str,
+        type_filter: Option<&str>,
+    ) -> Result<Vec<Item>> {
         let needle = query.to_lowercase();
-        let conn = self.connect()?;
-        let all = self.iter_items(&conn)?;
+        let all = self.iter_items(conn)?;
         Ok(all
             .into_iter()
             .filter(|item| {
@@ -519,6 +626,51 @@ impl<'s> Vault<'s> {
                 title_hit || tag_hit || type_hit
             })
             .collect())
+    }
+
+    /// Rebuild the entire encrypted search index from the items (maintenance;
+    /// search-index.md §7). The index is a cache, so this is always safe: it
+    /// re-derives every segment + the manifest at a bumped generation in one
+    /// transaction. Useful after a format change, a restore, or to reclaim a
+    /// fragmented index.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sqlite`] / [`Error::DecryptionFailed`].
+    pub fn rebuild_index(&self) -> Result<()> {
+        let mut conn = self.connect()?;
+        let reader = self.payload_reader();
+        self.index.rebuild(&mut conn, &reader)
+    }
+
+    /// Per-vault storage statistics (PRD §4.10 visible stats): live item count,
+    /// total version count, trashed item count, and index segment count.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sqlite`].
+    pub fn storage_stats(&self) -> Result<StorageStats> {
+        let conn = self.connect()?;
+        let live_items: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM items i
+             WHERE NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.item_id = i.item_id)",
+            [],
+            |r| r.get(0),
+        )?;
+        let total_versions: i64 =
+            conn.query_row("SELECT COUNT(*) FROM item_versions", [], |r| r.get(0))?;
+        let trashed: i64 = conn.query_row("SELECT COUNT(*) FROM tombstones", [], |r| r.get(0))?;
+        let index_segments: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM index_segments WHERE segment_id > 0",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(StorageStats {
+            live_items: u64::try_from(live_items).unwrap_or(0),
+            total_versions: u64::try_from(total_versions).unwrap_or(0),
+            trashed: u64::try_from(trashed).unwrap_or(0),
+            index_segments: u64::try_from(index_segments).unwrap_or(0),
+        })
     }
 
     // --- Folders -----------------------------------------------------------

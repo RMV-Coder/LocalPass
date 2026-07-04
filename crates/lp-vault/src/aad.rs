@@ -110,6 +110,20 @@ pub fn op_payload(vault_id: &Id, op_id: &Id) -> Vec<u8> {
     join(&["localpass/v1/op/payload", &id_hex(vault_id), &id_hex(op_id)])
 }
 
+/// `index_segments.payload_env` — an index segment encrypted under the IndexKey
+/// (vault-format.md §3; search-index.md §1). Binding `generation` means a stale
+/// segment ciphertext cannot be replayed as current: the AEAD tag fails against
+/// the current generation's AAD.
+#[must_use]
+pub fn index_segment(vault_id: &Id, segment_id: i64, generation: u64) -> Vec<u8> {
+    join(&[
+        "localpass/v1/index/segment",
+        &id_hex(vault_id),
+        &segment_id.to_string(),
+        &generation.to_string(),
+    ])
+}
+
 /// Join AAD components with a single `|` and return UTF-8 bytes.
 fn join(parts: &[&str]) -> Vec<u8> {
     parts.join("|").into_bytes()
