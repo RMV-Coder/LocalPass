@@ -110,7 +110,7 @@ db credential) are reserved in the payload schema but not implemented
 |--------------|--------|-------|------|
 | Emergency Kit | ✅ | `localpass init` (auto), `localpass kit`; `lp-cli/commands/kit.rs` | Text or HTML; contains the Secret Key + recovery instructions + no-recovery doctrine; refuses to write inside the profile dir. |
 | Automatic local backups | ◑ | `localpass backup create --to --keep`; `lp-vault/backup.rs` | Rotating encrypted snapshots with `--keep` (default 30) pruning **exist**, but they are **on-demand / user-or-scheduler-driven** — there is no built-in daily scheduler/timer. PRD §4.11 "automatic (default: daily)" scheduling is not implemented in-process; the mechanism is present, the automatic cadence is not. |
-| Local audit log (hash-chained: unlocks, failed unlocks, item reads, edits, exports, shares, token uses) | ⛔ | — | **Not implemented.** The only hash-chained, append-only log in the system is the **sync op log** (`ops` table), which records item **mutations** (create/update/delete/restore/rewrap) for sync — *not* reads, unlocks, failed unlocks, or exports. There is no `audit` module anywhere in the workspace, and no daemon request/event records access. **This is a clear gap vs. PRD §4.9 / §9.1** (see §3). |
+| Local audit log (hash-chained: unlocks, failed unlocks, item reads, edits, exports, shares, token uses) | ✅ | `localpass audit [--since --json --verify]`; `lp-vault/audit.rs` (`audit_log` table in the account store) | Device-local, append-only, BLAKE3-chained log of unlock success/failure, item create/update/delete/restore, secret reads (reveal/`--field`/`localpass://`/totp/daemon reveal/resolve/fill), export, vault-share, and device-trust. Plaintext **metadata only** — ids, kinds, timestamps, field *names*; never a secret value or vault/item name (verified by dumping the table after a real reveal). `--verify` checks the chain + sequence for tamper. **`TokenUse` is the one §4.9 event with no source yet** (scoped API tokens are P2/unbuilt). |
 
 ### 1.9 Signed releases + published format specs
 
@@ -159,11 +159,12 @@ tracked follow-ups. They are the real content of this document.
    repo. So browser autofill/save does not function end-to-end. The host is the
    secure primitive; the extension is a separate unbuilt deliverable.
 
-4. **Local audit log (PRD §4.9 / §9.1).** Not implemented. No dedicated
-   hash-chained audit log of reads/unlocks/failed-unlocks/exports exists; the
-   only hash-chained log is the **sync op log**, which covers item mutations for
-   sync, not access events. **This is the audit-log gap flagged for
-   verification — confirmed missing.**
+4. **Local audit log (PRD §4.9 / §9.1). — RESOLVED.** Implemented in
+   `lp-vault/audit.rs` (`localpass audit`): a device-local, append-only,
+   BLAKE3-chained log of unlocks/failed-unlocks/secret-reads/edits/exports/
+   shares/device-trust, holding metadata only (never secret values or names),
+   with `--verify` tamper detection. The one §4.9 event still unsourced is
+   `TokenUse` (scoped API tokens are P2/unbuilt).
 
 5. **KDBX (KeePass) import (PRD §9.1 / §4.6).** Stubbed (returns `Unsupported`)
    for dependency-weight / crypto-boundary reasons; a clean single integration
