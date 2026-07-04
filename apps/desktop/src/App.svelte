@@ -8,7 +8,7 @@
   region. No secret state lives here.
 -->
 <script lang="ts">
-  import { status as statusApi, lock as lockApi } from "./lib/api";
+  import { ensureService, status as statusApi, lock as lockApi } from "./lib/api";
   import type { SessionState } from "./lib/types";
   import Unlock from "./components/Unlock.svelte";
   import Vault from "./components/Vault.svelte";
@@ -16,6 +16,22 @@
 
   let session = $state<SessionState | null>(null);
   let loading = $state(true);
+  // True only for the very first load, while the background service starts.
+  let starting = $state(true);
+
+  // On launch, start the background service if needed (the GUI is a client and
+  // cannot hold keys itself). After that, plain status refreshes are enough.
+  async function boot() {
+    loading = true;
+    try {
+      session = await ensureService();
+    } catch (err) {
+      session = { state: "error", message: typeof err === "string" ? err : "Backend error." };
+    } finally {
+      starting = false;
+      loading = false;
+    }
+  }
 
   async function refresh() {
     loading = true;
@@ -41,7 +57,7 @@
   }
 
   $effect(() => {
-    refresh();
+    boot();
   });
 </script>
 
@@ -50,7 +66,9 @@
 </svelte:head>
 
 {#if loading && !session}
-  <div class="center"><p class="muted">Connecting…</p></div>
+  <div class="center">
+    <p class="muted">{starting ? "Starting the LocalPass service…" : "Connecting…"}</p>
+  </div>
 {:else if session && session.state === "unlocked"}
   <header class="topbar">
     <div class="left">

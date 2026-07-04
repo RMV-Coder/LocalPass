@@ -21,6 +21,13 @@ import type {
   VaultView,
 } from "./types";
 
+/** Start the LocalPass background service if it isn't running, then report the
+ *  session state. The UI calls this on launch so a first-run user never has to
+ *  start a daemon by hand. Never rejects for the "no daemon" case. */
+export function ensureService(): Promise<SessionState> {
+  return invoke<SessionState>("ensure_service");
+}
+
 /** Current lock/availability state. Never rejects for the "no daemon" case —
  *  that is a normal state returned in the payload. */
 export function status(): Promise<SessionState> {

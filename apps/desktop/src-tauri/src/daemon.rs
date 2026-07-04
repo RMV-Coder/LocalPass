@@ -17,9 +17,18 @@
 //! crash (PRD §4.7 "never blocks").
 
 use std::path::PathBuf;
+use std::time::Duration;
 
-use lp_daemon::client::Client;
+use lp_daemon::client::{self, Client};
 use lp_daemon::protocol::{Request, Response};
+use lp_daemon::spawn::{self, DaemonExe};
+
+/// Idle auto-lock the GUI-started daemon uses (seconds). Mirrors the CLI's
+/// `daemon start` default (10 minutes); the daemon zeroizes keys on timeout.
+const DEFAULT_AUTOLOCK_SECS: u64 = 600;
+
+/// How long to wait for a freshly-spawned daemon to answer a Ping.
+const READY_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// A daemon-call failure the command layer can map to a UI state.
 #[derive(Debug)]
@@ -69,6 +78,49 @@ pub fn resolve_profile() -> Result<PathBuf, String> {
 /// Propagates [`resolve_profile`]'s error.
 pub fn profile_string() -> Result<String, String> {
     Ok(resolve_profile()?.display().to_string())
+}
+
+/// Ensure a daemon is running for this profile, spawning one if needed.
+///
+/// This is what lets the GUI "just work" for a first-time user: the desktop app
+/// is a daemon *client* and cannot hold keys itself, so if no daemon is up it
+/// starts one detached — exactly as `localpass unlock` does on the CLI
+/// (`crates/lp-cli` `daemonctl`). Idempotent: if a daemon is already listening
+/// this is a cheap probe and returns immediately.
+///
+/// The daemon executable is located next to the app (a bundled release ships
+/// `localpass-daemon` beside the GUI binary), falling back to `localpass-daemon`
+/// on `PATH` (a `cargo install`ed dev setup) — see [`DaemonExe::Auto`].
+///
+/// # Errors
+///
+/// A human-readable, secret-free message if the service binary cannot be found
+/// or does not become ready in time. The caller surfaces it as UI guidance.
+pub fn ensure_running() -> Result<(), String> {
+    // Already listening? (A different-profile daemon is handled later by the
+    // per-request `WrongProfile` response, not here.)
+    if client::probe().unwrap_or(false) {
+        return Ok(());
+    }
+    let profile = resolve_profile()?;
+    spawn::spawn_detached(
+        &DaemonExe::Auto,
+        &profile,
+        DEFAULT_AUTOLOCK_SECS,
+        false,
+        READY_TIMEOUT,
+    )
+    .map_err(|e| match e {
+        lp_daemon::Error::NotRunning => {
+            "the LocalPass service was started but did not become ready in time — try again"
+                .to_string()
+        }
+        other => format!(
+            "could not start the LocalPass service ({other}). \
+             Ensure `localpass-daemon` is installed (it ships beside the app, \
+             or run `cargo install --path crates/lp-daemon`)."
+        ),
+    })
 }
 
 /// Send one request to the daemon and return the response.

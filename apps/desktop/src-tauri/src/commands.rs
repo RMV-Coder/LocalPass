@@ -60,6 +60,22 @@ fn check_response_error(resp: &Response) -> Result<(), String> {
     }
 }
 
+/// Start the LocalPass background service if it isn't running, then report the
+/// session state. This is the command the UI calls **on launch** so a first-run
+/// user never has to start a daemon by hand.
+///
+/// Returns `Ok(status)` once a daemon is up (freshly started or already
+/// running); returns [`SessionState::Error`] with secret-free guidance if the
+/// service binary cannot be found or fails to become ready. Never returns a
+/// secret; never blocks the UI beyond the short readiness wait.
+#[tauri::command]
+pub fn ensure_service() -> SessionState {
+    match daemon::ensure_running() {
+        Ok(()) => status(),
+        Err(message) => SessionState::Error { message },
+    }
+}
+
 /// Report the current session state (locked / unlocked / no-daemon / …).
 ///
 /// This is the command the UI polls to decide which screen to show. It never
@@ -89,6 +105,13 @@ pub fn status() -> SessionState {
 /// the error region (aria-live).
 #[tauri::command]
 pub fn unlock(mut password: String) -> Result<SessionState, String> {
+    // Make unlock self-sufficient: if the service isn't up (or died), start it
+    // first, so the user never sees a "no daemon" failure on the unlock path.
+    // On failure the password is still zeroized below (we return before use).
+    if let Err(message) = daemon::ensure_running() {
+        password.zeroize();
+        return Err(message);
+    }
     let profile = daemon::profile_string()?;
     let req = Request::Unlock {
         profile,

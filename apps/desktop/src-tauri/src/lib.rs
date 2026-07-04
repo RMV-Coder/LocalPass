@@ -30,6 +30,7 @@ mod wordlist;
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
+            commands::ensure_service,
             commands::status,
             commands::unlock,
             commands::lock,

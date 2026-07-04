@@ -36,13 +36,21 @@
       } else if (next.state === "error") {
         error = next.message;
       } else if (next.state === "no_daemon") {
-        error = "The LocalPass daemon stopped. Start it and try again.";
+        error = "The LocalPass service isn't running. Reconnect to start it.";
       } else {
-        error = "Unlock did not succeed. Check your master password.";
+        // Locked/other: the daemon is up but the session isn't — almost always
+        // a wrong password (the backend auto-starts the service before unlock).
+        error = "Incorrect master password or Secret Key.";
       }
     } catch (err) {
+      // The backend rejects with a plain, secret-free string (a wrong password,
+      // or guidance if the service can't start). Show it verbatim; only fall
+      // back generically if a non-string somehow reaches us.
       password = "";
-      error = typeof err === "string" ? err : "Unlock failed.";
+      error =
+        typeof err === "string"
+          ? err
+          : "Could not reach the LocalPass service. Try reconnecting.";
     } finally {
       busy = false;
       passwordInput?.focus();
