@@ -22,6 +22,9 @@ Living log for the LocalPass build. [PRD.md](PRD.md) is the *what*; this file re
 - **2026-07-04 — Durability:** uniform `PRAGMA synchronous=FULL` (WAL) on the account store AND vault files. NORMAL could lose the last committed write on power loss — unacceptable for a just-saved credential; human-scale write rates make the fsync cost irrelevant.
 - **2026-07-04 — Plaintext minimization:** `item_type`, `favorite`, `folder_id` live INSIDE the encrypted item payload, not as plaintext columns (spec-review tightening). PRD §6.3 fixes plaintext to ids/counters/timestamps; type distribution is targeting info. Type/folder/favorite filters run via the encrypted index.
 - **2026-07-04 — Sync MVP boundary confirmed:** single-user multi-device only; team membership-change ops are a named P2 extension point (new signed op_kind gated on admin keys), not designed now.
+- **2026-07-04 — Index prefix matching at query time**, not stored prefix tokens (BTreeMap range scan over posting keys). Stored prefixes bloated segments ~4×; query-time scan gives identical results at far lower write amplification. Spec §2/§6 semantics preserved.
+- **2026-07-04 — Index segment tuning knobs** (`LP_INDEX_SPLIT`/`TARGET`/`MERGE` env vars) exist for tests only; production uses spec constants (256/512/256). Tuning is explicitly non-format-fixed per spec §3.
+- **2026-07-04 — CLI secret-key storage:** `<profile>/secret-key` file (0600 on Unix) is the MVP stand-in for OS-keychain storage (keychain is P2). Documented in `--help` and the Emergency Kit output.
 
 ## Environment notes
 
