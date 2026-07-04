@@ -45,15 +45,16 @@
 //! ingest — PRD §8 T5/T13). The `manifest.json` is advisory only and can never
 //! inject state.
 //!
-//! ## Known boundary gap (documented)
+//! ## Cross-device VaultKey sharing
 //!
-//! Cross-device **VaultKey sharing** (`vault share-to-device`, sync-protocol.md
-//! §D) seals the VaultKey to a peer's X25519 key. That requires moving raw
-//! symmetric-key bytes, which the `lp-crypto` boundary deliberately withholds
-//! (no public key-bytes accessor / constructor). The blob shipping, CLI, and
-//! detection are fully implemented; the final unseal→register step returns
-//! [`Error::KeySharingUnavailable`] until a small `lp-crypto` key-transport
-//! primitive is added. Op sync + pairing are fully functional without it.
+//! `vault share-to-device` seals the VaultKey (and the vault name) to a peer's
+//! X25519 key through `lp-crypto`'s **typed key transport**
+//! (`seal_key_for` → `SealingKeyPair::open_key`) — raw key bytes never cross
+//! any public API. The blob ships via the channel's `keys/` dir; the peer
+//! imports it with `sync adopt` (or automatically during `pull` when already
+//! enrolled), which registers the vault locally and re-wraps the key under the
+//! peer's own AccountKey. AADs bind vault id + recipient device id, so a blob
+//! cannot be replayed for a different vault or presented to a different device.
 
 pub mod engine;
 pub mod error;

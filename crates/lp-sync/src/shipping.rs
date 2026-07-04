@@ -214,6 +214,27 @@ impl SyncDir {
         }
     }
 
+    /// Remove the sealed VaultKey blob addressed to `me` after a successful
+    /// import (the blob is per-recipient, so removal affects no other device).
+    /// Missing file is a no-op.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] on a removal failure other than not-found.
+    pub fn remove_key_blob(&self, me: &DeviceId) -> Result<()> {
+        let name = format!(
+            "{}-{}.wrapped",
+            me.to_hyphenated(),
+            self.vault_id.to_hyphenated()
+        );
+        let path = self.root.join(KEYS_DIR).join(name);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(Error::Io(e)),
+        }
+    }
+
     // --- Reader (§7.3) ----------------------------------------------------
 
     /// Discover every segment file under `ops/`, grouped and sorted per device

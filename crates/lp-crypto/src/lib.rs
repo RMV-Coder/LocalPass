@@ -93,6 +93,6 @@ pub use keys::{
 };
 pub use muk::derive_master_unlock_key;
 pub use params::KdfParams;
-pub use seal::{PublicSealingKey, SealingKeyPair, seal_for};
+pub use seal::{PublicSealingKey, SealingKeyPair, seal_for, seal_key_for};
 pub use sign::{SigningKeyPair, VerifyingKey};
 pub use wrap::{unwrap_key, wrap_key};

@@ -50,6 +50,7 @@ use zeroize::Zeroize;
 
 use crate::envelope::Envelope;
 use crate::error::{Error, Result};
+use crate::keys::{SYMMETRIC_KEY_LEN, SymmetricKey};
 use crate::symmetric;
 
 /// The HKDF domain-separation label for asymmetric sealing (fixed contract).
@@ -112,6 +113,32 @@ impl SealingKeyPair {
     #[must_use]
     pub fn public_key(&self) -> PublicSealingKey {
         self.public.clone()
+    }
+
+    /// Open a key-transport blob produced by [`seal_key_for`], returning the
+    /// key as a typed [`SymmetricKey`].
+    ///
+    /// This is the receiving half of cross-device key sharing (PRD §4.5): the
+    /// raw key bytes never surface to the caller — the heap plaintext is
+    /// zeroized after the typed key is constructed.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::MalformedEnvelope`] if the outer bytes are truncated or carry
+    ///   a wrong version byte.
+    /// - [`Error::DecryptionFailed`] if this keypair is not the recipient, the
+    ///   bytes were tampered, the `aad` differs, or the sealed payload is not
+    ///   exactly one key long (collapsed indistinguishably — no oracle).
+    pub fn open_key(&self, sealed: &[u8], aad: &[u8]) -> Result<SymmetricKey> {
+        let mut plain = self.open(sealed, aad)?;
+        if plain.len() != SYMMETRIC_KEY_LEN {
+            plain.zeroize();
+            return Err(Error::DecryptionFailed);
+        }
+        let mut arr = [0u8; SYMMETRIC_KEY_LEN];
+        arr.copy_from_slice(&plain);
+        plain.zeroize();
+        Ok(SymmetricKey::from_bytes(arr))
     }
 
     /// Export the 32-byte X25519 secret — for **encrypted persistence only**.
@@ -227,6 +254,29 @@ pub fn seal_for(recipient: &PublicSealingKey, plaintext: &[u8], aad: &[u8]) -> R
     Ok(out)
 }
 
+/// Seal a symmetric key to a recipient — the key-transport primitive behind
+/// cross-device VaultKey sharing (PRD §4.5).
+///
+/// This exists so higher layers can move a key between devices without raw
+/// key bytes ever crossing the crate's public API: the bytes are read
+/// internally and sealed immediately. The receiving side is
+/// [`SealingKeyPair::open_key`], which likewise returns a typed key.
+///
+/// Callers must bind context via `aad` (vault id + recipient device id) so a
+/// sealed key cannot be replayed for a different vault or recipient intent.
+///
+/// # Errors
+///
+/// [`Error::InvalidPublicKey`] for a low-order recipient point; otherwise
+/// effectively infallible for in-memory input.
+pub fn seal_key_for(
+    recipient: &PublicSealingKey,
+    key: &SymmetricKey,
+    aad: &[u8],
+) -> Result<Vec<u8>> {
+    seal_for(recipient, key.as_bytes(), aad)
+}
+
 /// Derive the one-time symmetric key from an ECDH shared secret plus the
 /// ephemeral/recipient public-key transcript.
 ///
@@ -259,6 +309,35 @@ mod tests {
         let recipient = PublicSealingKey::from_bytes(LOW_ORDER_PK);
         let err = seal_for(&recipient, b"secret", b"aad").unwrap_err();
         assert!(matches!(err, Error::InvalidPublicKey(_)));
+    }
+
+    #[test]
+    fn key_transport_roundtrip_wrong_recipient_and_wrong_length() {
+        let recipient = SealingKeyPair::generate();
+        let key = SymmetricKey::generate();
+        let sealed = seal_key_for(&recipient.public_key(), &key, b"aad").unwrap();
+
+        // Round trip: the typed key comes back equal (constant-time eq).
+        let opened = recipient.open_key(&sealed, b"aad").unwrap();
+        assert!(opened == key);
+
+        // Wrong recipient and wrong AAD both collapse to DecryptionFailed.
+        let other = SealingKeyPair::generate();
+        assert!(matches!(
+            other.open_key(&sealed, b"aad"),
+            Err(Error::DecryptionFailed)
+        ));
+        assert!(matches!(
+            recipient.open_key(&sealed, b"other-aad"),
+            Err(Error::DecryptionFailed)
+        ));
+
+        // A sealed blob that is not exactly one key long is rejected the same way.
+        let not_a_key = seal_for(&recipient.public_key(), b"short", b"aad").unwrap();
+        assert!(matches!(
+            recipient.open_key(&not_a_key, b"aad"),
+            Err(Error::DecryptionFailed)
+        ));
     }
 
     #[test]

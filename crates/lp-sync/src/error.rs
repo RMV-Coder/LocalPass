@@ -110,13 +110,6 @@ pub enum Error {
     /// not trusted, an identity string is malformed, etc.
     #[error("invalid operation: {0}")]
     Invalid(&'static str),
-
-    /// Cross-device VaultKey sharing (`vault share-to-device`) is not available
-    /// in this build: it requires a raw-key transport primitive that lives
-    /// behind the `lp-crypto` boundary and is not exposed. See the crate docs
-    /// for the exact gap. Pairing + op sync are fully functional.
-    #[error("vault key sharing is unavailable in this build: {0}")]
-    KeySharingUnavailable(&'static str),
 }
 
 impl From<serde_json::Error> for Error {

@@ -108,34 +108,23 @@ pub fn run(
 }
 
 /// `localpass vault share-to-device` — seal this vault's key to a trusted peer
-/// device and ship it via the sync `keys/` dir. In this build the seal
-/// transport + shipping are wired but the final unwrap needs a key-transport
-/// primitive held behind the crypto boundary; we report that clearly rather
-/// than silently no-op.
+/// device (typed key transport; raw key bytes never surface) and ship it via
+/// the sync `keys/` dir. The peer picks it up with `localpass sync adopt`.
 fn share_to_device(session: &lp_vault::Session, vault_ref: &str, device_ref: &str) -> Result<()> {
     // Resolve + validate the vault exists and the target is a trusted peer.
-    let _vault = crate::resolve::open_vault(session, vault_ref)?;
+    let vault = crate::resolve::open_vault(session, vault_ref)?;
+    let vault_id = vault.vault_id();
     let device_id = uuid::Uuid::parse_str(device_ref)
         .map(|u| lp_vault::Id::from_bytes(*u.as_bytes()))
         .map_err(|_| CliError::usage(format!("device id {device_ref:?} is not a valid UUID")))?;
-    session
-        .peer_device(&device_id)
-        .map_err(map_vault_error)?
-        .ok_or_else(|| {
-            CliError::usage(format!(
-                "device {device_ref} is not a trusted peer — run `device trust` first"
-            ))
-        })?;
 
-    // Sealing + shipping live at the sync layer, but importing the sealed
-    // VaultKey on the peer needs a raw-key transport primitive that this build
-    // holds behind the lp-crypto boundary. Report it plainly (exit 1) rather
-    // than ship a blob the peer cannot open.
-    bail!(CliError::usage(
-        "vault key sharing is not available in this build: sealing/unwrapping a VaultKey to a \
-         peer needs a key-transport primitive held behind the crypto boundary. Device pairing \
-         and op sync are fully functional; see `vault share-to-device --help`."
-    ));
+    lp_sync::engine::share_vault_to_device(session, vault_id, &device_id)
+        .map_err(crate::commands::sync::map_sync_error)?;
+    println!(
+        "sealed the \"{vault_ref}\" vault key to device {device_ref} and shipped it via the \
+         sync channel. On that device, run: localpass sync adopt --dir <sync-root>"
+    );
+    Ok(())
 }
 
 /// `localpass vault stats` — the PRD's "very visible storage statistics"

@@ -25,6 +25,7 @@ pub fn run(profile_dir: &Path, src: PasswordSource, command: &SyncCommand) -> Re
         SyncCommand::Push { vault, json } => push(&session, vault, *json),
         SyncCommand::Pull { vault, json } => pull(&session, vault, *json),
         SyncCommand::Status { vault, json } => status(&session, vault, *json),
+        SyncCommand::Adopt { dir } => adopt(&session, dir),
     }
 }
 
@@ -91,7 +92,7 @@ fn pull(session: &lp_vault::Session, vault_ref: &str, json_out: bool) -> Result<
                 "applied": report.applied,
                 "skipped": report.skipped,
                 "pending": report.pending,
-                "key_blob_present": report.key_blob_present,
+                "key_imported": report.key_imported,
                 "alarms": alarms,
             }))?
         );
@@ -100,11 +101,8 @@ fn pull(session: &lp_vault::Session, vault_ref: &str, json_out: bool) -> Result<
             "applied {}, skipped {}, pending {}",
             report.applied, report.skipped, report.pending
         );
-        if report.key_blob_present {
-            println!(
-                "note: a shared-vault key addressed to this device is waiting \
-                 (import is not available in this build; see `vault share-to-device --help`)"
-            );
+        if report.key_imported {
+            println!("imported a shared vault key addressed to this device");
         }
         for q in &report.quarantines {
             eprintln!(
@@ -208,14 +206,39 @@ fn status(session: &lp_vault::Session, vault_ref: &str, json_out: bool) -> Resul
     Ok(())
 }
 
+/// `localpass sync adopt` — join vaults shared to this device: scan the root
+/// for key blobs addressed to us, import + enroll each, then pull its items.
+fn adopt(session: &lp_vault::Session, dir: &Path) -> Result<()> {
+    let adopted = engine::adopt(session, dir).map_err(map_sync_error)?;
+    if adopted.is_empty() {
+        println!(
+            "no shared vaults addressed to this device under {}",
+            dir.display()
+        );
+        return Ok(());
+    }
+    let names = session.list_vaults().map_err(map_vault_error)?;
+    for vault_id in adopted {
+        let vault = session.open_vault(vault_id).map_err(map_vault_error)?;
+        let report = engine::pull(session, &vault).map_err(map_sync_error)?;
+        let name = names
+            .iter()
+            .find(|(id, _)| *id == vault_id)
+            .map_or_else(|| vault_id.to_hyphenated(), |(_, n)| n.clone());
+        println!(
+            "adopted vault \"{name}\" ({}): applied {} ops",
+            vault_id.to_hyphenated(),
+            report.applied
+        );
+    }
+    Ok(())
+}
+
 /// Map an `lp_sync::Error` to a [`CliError`] with a sensible exit code.
 pub fn map_sync_error(e: lp_sync::Error) -> CliError {
     match e {
         lp_sync::Error::Vault(v) => map_vault_error(v),
         lp_sync::Error::Invalid(m) => CliError::Usage(m.to_string()),
-        lp_sync::Error::KeySharingUnavailable(m) => CliError::Usage(format!(
-            "vault key sharing is unavailable in this build: {m}"
-        )),
         other => CliError::Internal(anyhow::anyhow!("{other}")),
     }
 }

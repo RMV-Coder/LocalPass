@@ -257,6 +257,29 @@ fn open_secret_32(
     Ok(out)
 }
 
+/// Split a cross-device share blob: `u32 LE len || sealed_key || u32 LE len ||
+/// sealed_name` (see [`Session::share_vault_key_to_peer`]). Structural only —
+/// no crypto; both segments are still sealed.
+fn split_share_blob(blob: &[u8]) -> Result<(&[u8], &[u8])> {
+    fn take(b: &[u8]) -> Result<(&[u8], &[u8])> {
+        if b.len() < 4 {
+            return Err(Error::Invalid("share blob truncated (length prefix)"));
+        }
+        let (len_bytes, rest) = b.split_at(4);
+        let n = u32::from_le_bytes(len_bytes.try_into().expect("4 bytes")) as usize;
+        if rest.len() < n {
+            return Err(Error::Invalid("share blob truncated (segment)"));
+        }
+        Ok(rest.split_at(n))
+    }
+    let (sealed_key, rest) = take(blob)?;
+    let (sealed_name, tail) = take(rest)?;
+    if !tail.is_empty() {
+        return Err(Error::Invalid("share blob has trailing bytes"));
+    }
+    Ok((sealed_key, sealed_name))
+}
+
 /// This device's identity: the live keypairs and their public bytes.
 ///
 /// Private keypairs are held in memory for the [`Session`] lifetime and dropped
@@ -868,6 +891,121 @@ impl Session {
             .sealing
             .open(sealed, aad)
             .map_err(Error::from_crypto)
+    }
+
+    /// Seal this vault's key and name to a trusted peer device for
+    /// cross-device sharing (PRD §4.5, single-user multi-device). Returns the
+    /// opaque share blob shipped via the sync channel's `keys/` dir.
+    ///
+    /// Blob layout: `u32 LE len || sealed_key || u32 LE len || sealed_name`.
+    /// The key travels through lp-crypto's typed key transport
+    /// ([`lp_crypto::seal_key_for`] → [`lp_crypto::SealingKeyPair::open_key`])
+    /// so raw key bytes never surface; both AADs bind the vault id AND the
+    /// recipient device id (no cross-vault or cross-recipient replay).
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NotFound`] if the vault is not in the registry (or is
+    ///   soft-deleted).
+    /// - [`Error::Crypto`] on a seal failure (e.g. a low-order peer key).
+    pub fn share_vault_key_to_peer(
+        &self,
+        vault_id: &VaultId,
+        peer: &PeerDevice,
+    ) -> Result<Vec<u8>> {
+        // Unwrap the VaultKey + name exactly as open_vault / list_vaults do.
+        let conn = db::open_connection(&self.account_path())?;
+        let (wrapped, name_env, deleted): (Vec<u8>, Vec<u8>, Option<i64>) = conn
+            .query_row(
+                "SELECT wrapped_vault_key, name_env, deleted_at FROM vault_registry
+                  WHERE vault_id = ?1",
+                params![vault_id.to_vec()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Error::NotFound("vault"),
+                other => Error::Sqlite(other),
+            })?;
+        if deleted.is_some() {
+            return Err(Error::NotFound("vault (soft-deleted)"));
+        }
+        let envelope = lp_crypto::Envelope::from_bytes(&wrapped).map_err(Error::from_crypto)?;
+        let vault_key = unwrap_key(
+            self.account_key.inner(),
+            &envelope,
+            aad_str(&aad::vault_key(vault_id)),
+        )
+        .map_err(Error::from_crypto)?;
+        let name_envelope =
+            lp_crypto::Envelope::from_bytes(&name_env).map_err(Error::from_crypto)?;
+        let name = self
+            .account_key
+            .open(&name_envelope, &aad::vault_name(vault_id))
+            .map_err(Error::from_crypto)?;
+
+        let recipient = lp_crypto::PublicSealingKey::from_bytes(peer.x25519_pub);
+        let sealed_key = lp_crypto::seal_key_for(
+            &recipient,
+            &vault_key,
+            &aad::share_vault_key(vault_id, &peer.device_id),
+        )
+        .map_err(Error::from_crypto)?;
+        let sealed_name = lp_crypto::seal_for(
+            &recipient,
+            &name,
+            &aad::share_vault_name(vault_id, &peer.device_id),
+        )
+        .map_err(Error::from_crypto)?;
+
+        let mut blob = Vec::with_capacity(8 + sealed_key.len() + sealed_name.len());
+        blob.extend_from_slice(&u32::try_from(sealed_key.len()).unwrap().to_le_bytes());
+        blob.extend_from_slice(&sealed_key);
+        blob.extend_from_slice(&u32::try_from(sealed_name.len()).unwrap().to_le_bytes());
+        blob.extend_from_slice(&sealed_name);
+        Ok(blob)
+    }
+
+    /// Import a share blob addressed to **this** device: unseal the VaultKey
+    /// and name (typed key transport — raw bytes never surface), re-wrap them
+    /// under this account's AccountKey, and register the vault locally
+    /// (creating an empty vault file for ops to sync into).
+    ///
+    /// Idempotent: returns `Ok(false)` if the vault is already registered,
+    /// `Ok(true)` on a fresh import.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Invalid`] on a malformed blob.
+    /// - [`Error::DecryptionFailed`] if this device is not the recipient, the
+    ///   blob was tampered, or it was sealed for a different vault id.
+    pub fn import_shared_vault_key(&self, vault_id: &VaultId, blob: &[u8]) -> Result<bool> {
+        let (sealed_key, sealed_name) = split_share_blob(blob)?;
+        let me = self.device.device_id;
+
+        let key = self
+            .device
+            .sealing
+            .open_key(sealed_key, &aad::share_vault_key(vault_id, &me))
+            .map_err(Error::from_crypto)?;
+        let vault_key = VaultKey::from_inner(key);
+        let name = self
+            .device
+            .sealing
+            .open(sealed_name, &aad::share_vault_name(vault_id, &me))
+            .map_err(Error::from_crypto)?;
+
+        let wrapped = wrap_key(
+            self.account_key.inner(),
+            vault_key.inner(),
+            aad_str(&aad::vault_key(vault_id)),
+        )
+        .map_err(Error::from_crypto)?;
+        let name_env = self
+            .account_key
+            .seal(&name, &aad::vault_name(vault_id))
+            .map_err(Error::from_crypto)?;
+
+        self.register_shared_vault(vault_id, &wrapped.to_bytes(), &name_env.to_bytes())
     }
 
     /// Import a VaultKey (already unwrapped to its registry-storable

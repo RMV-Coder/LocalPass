@@ -70,6 +70,32 @@ pub fn setting(key: &str) -> Vec<u8> {
     join(&["localpass/v1/meta/setting", key])
 }
 
+// --- Cross-device key-share AADs (PRD §4.5, sync keys/ channel) ------------
+
+/// A VaultKey sealed to a peer device's X25519 key for cross-device sharing.
+/// Binds the vault AND the intended recipient so a sealed key cannot be
+/// replayed for a different vault or presented to a different device.
+#[must_use]
+pub fn share_vault_key(vault_id: &Id, recipient_device: &Id) -> Vec<u8> {
+    join(&[
+        "localpass/v1/share/vault-key",
+        &id_hex(vault_id),
+        &id_hex(recipient_device),
+    ])
+}
+
+/// The vault's display name sealed alongside the shared VaultKey (the peer
+/// needs it for its own registry entry; names are never plaintext on the
+/// sync channel).
+#[must_use]
+pub fn share_vault_name(vault_id: &Id, recipient_device: &Id) -> Vec<u8> {
+    join(&[
+        "localpass/v1/share/vault-name",
+        &id_hex(vault_id),
+        &id_hex(recipient_device),
+    ])
+}
+
 // --- Vault-file AADs (vault-format.md §3) ----------------------------------
 
 /// `wrapped_keys.envelope` — ItemKey wrapped under the VaultKey.

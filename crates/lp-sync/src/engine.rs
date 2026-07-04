@@ -133,9 +133,9 @@ pub struct PullReport {
     pub pending: usize,
     /// Quarantines (typed alarms) raised during ingest.
     pub quarantines: Vec<Quarantine>,
-    /// Whether a shared-VaultKey blob addressed to this device was found (Part D
-    /// key import; the actual unwrap is gated — see [`import_shared_key`]).
-    pub key_blob_present: bool,
+    /// Whether a shared-VaultKey blob addressed to this device was found and
+    /// imported during this pull (Part D key sharing).
+    pub key_imported: bool,
 }
 
 impl PullReport {
@@ -231,8 +231,13 @@ pub fn pull(session: &Session, vault: &Vault<'_>) -> Result<PullReport> {
         report.applied = vreport.accepted.len();
     }
 
-    // 5) A shared-VaultKey blob addressed to us? (Part D — import is gated.)
-    report.key_blob_present = dir.read_key_blob(&self_id)?.is_some();
+    // 5) A shared-VaultKey blob addressed to us? Import it (idempotent) and
+    //    clear the per-recipient blob.
+    if let Some(blob) = dir.read_key_blob(&self_id)? {
+        session.import_shared_vault_key(&vault_id, &blob)?;
+        dir.remove_key_blob(&self_id)?;
+        report.key_imported = true;
+    }
 
     Ok(report)
 }
@@ -395,24 +400,84 @@ pub fn status(session: &Session, vault: &Vault<'_>) -> Result<SyncStatus> {
     })
 }
 
-/// Check whether a shared-VaultKey blob addressed to this device is waiting on
-/// the channel, and report the gap: importing it requires a raw-key transport
-/// primitive not exposed across the `lp-crypto` boundary in this build.
-///
-/// The blob shipping (`vault share-to-device`) and this detection are fully
-/// wired; only the final unseal→register step is gated (see [`Error::KeySharingUnavailable`]).
+/// Seal this vault's key to a trusted peer device and ship it via the sync
+/// channel's `keys/` dir (`localpass vault share-to-device`). The peer imports
+/// it with [`adopt`] (or [`import_shared_key`] once enrolled).
 ///
 /// # Errors
 ///
-/// Always returns [`Error::KeySharingUnavailable`] when a blob is present (the
-/// documented boundary gap); `Ok(false)` when no blob is present.
+/// [`Error::Invalid`] if the device is not a trusted peer or the vault is not
+/// enrolled for sync; [`Error::Vault`] on a seal failure.
+pub fn share_vault_to_device(
+    session: &Session,
+    vault_id: VaultId,
+    peer_device_id: &DeviceId,
+) -> Result<()> {
+    let peer = session.peer_device(peer_device_id)?.ok_or(Error::Invalid(
+        "device is not a trusted peer (run `device trust` first)",
+    ))?;
+    let dir = open_dir(session, vault_id)?;
+    let blob = session.share_vault_key_to_peer(&vault_id, &peer)?;
+    dir.write_key_blob(peer_device_id, &blob)
+}
+
+/// Import a shared-VaultKey blob addressed to this device, if one is waiting
+/// on the (already enrolled) channel: unseal + register the vault locally and
+/// remove the per-recipient blob. Returns whether a fresh import happened.
+///
+/// # Errors
+///
+/// [`Error::Invalid`] if the vault is not enrolled; [`Error::Vault`] on a
+/// malformed/tampered blob (fails closed, nothing registered).
 pub fn import_shared_key(session: &Session, vault_id: VaultId) -> Result<bool> {
     let dir = open_dir(session, vault_id)?;
     let self_id = session.device_id();
-    if dir.read_key_blob(&self_id)?.is_some() {
-        return Err(Error::KeySharingUnavailable(
-            "unwrapping a peer-sealed VaultKey needs a raw-key bridge behind the lp-crypto boundary",
-        ));
+    match dir.read_key_blob(&self_id)? {
+        None => Ok(false),
+        Some(blob) => {
+            let fresh = session.import_shared_vault_key(&vault_id, &blob)?;
+            dir.remove_key_blob(&self_id)?;
+            Ok(fresh)
+        }
     }
-    Ok(false)
+}
+
+/// Adopt shared vaults from a sync root (`localpass sync adopt`): scan every
+/// `<root>/<vault_id>/keys/` for blobs addressed to this device, import each
+/// (registering the vault + creating its empty local file), and enroll the
+/// vault to this root so a following `sync pull` materializes its items.
+///
+/// Returns the vault ids adopted (empty when nothing was addressed to us).
+///
+/// # Errors
+///
+/// [`Error::Io`] on an unreadable root; [`Error::Vault`] on a tampered blob.
+pub fn adopt(session: &Session, sync_root: &std::path::Path) -> Result<Vec<VaultId>> {
+    let mut adopted = Vec::new();
+    let self_id = session.device_id();
+    let entries = std::fs::read_dir(sync_root).map_err(Error::Io)?;
+    for entry in entries {
+        let entry = entry.map_err(Error::Io)?;
+        if !entry.path().is_dir() {
+            continue;
+        }
+        // Per-vault dirs are hyphenated UUIDs (sync-protocol.md §7.1); skip
+        // anything else a dumb channel may have dropped in.
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Ok(uuid) = uuid::Uuid::parse_str(&name) else {
+            continue;
+        };
+        let vault_id = VaultId::from_bytes(*uuid.as_bytes());
+
+        let dir = SyncDir::open(sync_root, vault_id)?;
+        if let Some(blob) = dir.read_key_blob(&self_id)? {
+            session.import_shared_vault_key(&vault_id, &blob)?;
+            dir.remove_key_blob(&self_id)?;
+            session.set_setting(&sync_root_key(&vault_id), &sync_root.to_string_lossy())?;
+            adopted.push(vault_id);
+        }
+    }
+    Ok(adopted)
 }

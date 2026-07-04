@@ -242,6 +242,17 @@ always wins over a concurrent delete."
         #[arg(long)]
         json: bool,
     },
+    /// Join vaults another of your devices shared to this one.
+    #[command(long_about = "Adopt shared vaults from a sync root.\n\n\
+Scans <DIR>/<vault-id>/keys/ for VaultKey blobs sealed to THIS device (shipped \
+by `vault share-to-device` on the sharing device), imports each one (registering \
+the vault locally), enrolls the vault for sync under <DIR>, and pulls its items. \
+Run this on a second device after it has been trusted by the first.")]
+    Adopt {
+        /// The shared sync-root directory.
+        #[arg(long, value_name = "DIR")]
+        dir: PathBuf,
+    },
 }
 
 /// `localpass device ...`
