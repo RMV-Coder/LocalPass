@@ -377,6 +377,7 @@ mod tests {
             target_item: Some(Id::from_bytes([4u8; 16])),
             target_version: 1,
             payload_env: vec![1, 2, 3],
+            observed: lp_vault::op::ObservedHeads::new(),
             signature: [9u8; 64],
             created_at: 0,
         }

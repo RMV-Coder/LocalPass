@@ -11,7 +11,7 @@
 #![allow(dead_code)]
 
 use lp_crypto::{SigningKeyPair, blake3_256};
-use lp_vault::op::{ItemTarget, OpFields, OpKind, chain_hash, genesis_hash};
+use lp_vault::op::{ItemTarget, ObservedHeads, OpFields, OpKind, chain_hash, genesis_hash};
 use lp_vault::payload::{ItemPayload, TypeData};
 use lp_vault::{AccountStore, Id, Session, StoredOp, Vault, VaultId};
 
@@ -39,13 +39,18 @@ pub fn new_vault() -> TestVault {
 }
 
 /// A simulated peer device: a signing identity plus a rolling per-device chain
-/// (seq, prev_hash, lamport) so authored ops form a valid §5 chain.
+/// (seq, prev_hash, lamport, observed-heads) so authored ops form a valid §5
+/// chain carrying a correct §3 causal summary.
 pub struct PeerDevice {
     pub device_id: lp_vault::DeviceId,
     pub signing: SigningKeyPair,
     seq: u64,
     prev_full: Option<Vec<u8>>,
     lamport: u64,
+    /// The observed-heads causal summary this device would stamp on its next
+    /// op: the highest seq it has applied from every device (itself included).
+    /// A test drives causality explicitly with [`PeerDevice::observe`].
+    observed: ObservedHeads,
 }
 
 impl PeerDevice {
@@ -58,7 +63,15 @@ impl PeerDevice {
             seq: 0,
             prev_full: None,
             lamport: 0,
+            observed: ObservedHeads::new(),
         }
+    }
+
+    /// Mark that this device has observed `op` (applied it), so its subsequent
+    /// authored ops record `op` in their causal past. This is how a test makes
+    /// one op *causally-after* another across devices (sync-protocol.md §3).
+    pub fn observe(&mut self, op: &StoredOp) {
+        self.observed.observe(&op.device_id, op.seq);
     }
 
     /// This peer's Ed25519 public key bytes.
@@ -102,6 +115,12 @@ impl PeerDevice {
             |b| chain_hash(b),
         );
 
+        // Stamp the causal summary that reflects everything observed BEFORE this
+        // op, plus this device's own prior head (seq-1). Same-device chain order
+        // is exact from `seq`, so the self-entry is informational.
+        let mut observed = self.observed.clone();
+        observed.observe(&self.device_id, self.seq - 1);
+
         let fields = OpFields {
             op_id,
             vault_id: vault.vault_id(),
@@ -113,9 +132,12 @@ impl PeerDevice {
             target_item: ItemTarget::item(&item),
             target_version,
             payload_env: payload_env.clone(),
+            observed: observed.clone(),
         };
         let signature = fields.sign(&self.signing).unwrap();
         self.prev_full = Some(fields.full_bytes(&signature));
+        // This device has now applied its own new op.
+        self.observed.observe(&self.device_id, self.seq);
 
         StoredOp {
             op_id,
@@ -128,6 +150,7 @@ impl PeerDevice {
             target_item: Some(item),
             target_version,
             payload_env,
+            observed,
             signature,
             created_at: lp_vault::db::now_millis(),
         }

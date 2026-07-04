@@ -247,6 +247,7 @@ CREATE TABLE ops (
     signature         BLOB    NOT NULL,
     seq               INTEGER NOT NULL,
     prev_hash         BLOB    NOT NULL,
+    observed          BLOB    NOT NULL DEFAULT X'00000000',
     created_at        INTEGER NOT NULL,
     UNIQUE (device_id, seq)
 );

@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use lp_crypto::SigningKeyPair;
 use lp_sync::Alarm;
 use lp_sync::verify::{self, ChainState, DeviceChainState};
-use lp_vault::op::{ItemTarget, OpFields, OpKind, chain_hash, genesis_hash};
+use lp_vault::op::{ItemTarget, ObservedHeads, OpFields, OpKind, chain_hash, genesis_hash};
 use lp_vault::{Id, StoredOp};
 
 /// A tiny signer that produces a valid §5 chain for one device.
@@ -41,6 +41,8 @@ impl Signer {
             |b| chain_hash(b),
         );
         let payload_env = vec![0xAB, 0xCD, self.seq as u8];
+        // A self-consistent causal summary: this device's own prior head.
+        let observed = ObservedHeads::from_pairs([(*self.device_id.as_bytes(), self.seq - 1)]);
         let fields = OpFields {
             op_id,
             vault_id: self.vault_id,
@@ -52,6 +54,7 @@ impl Signer {
             target_item: ItemTarget::item(&Id::from_bytes([4u8; 16])),
             target_version: 1,
             payload_env: payload_env.clone(),
+            observed: observed.clone(),
         };
         let signature = fields.sign(&self.kp).unwrap();
         self.prev_full = Some(fields.full_bytes(&signature));
@@ -66,6 +69,7 @@ impl Signer {
             target_item: Some(Id::from_bytes([4u8; 16])),
             target_version: 1,
             payload_env,
+            observed,
             signature,
             created_at: 0,
         }
@@ -204,6 +208,7 @@ fn chain_mismatch_alarms_on_forked_prev_hash() {
         target_item: ItemTarget::item(&op2.target_item.unwrap()),
         target_version: op2.target_version,
         payload_env: op2.payload_env.clone(),
+        observed: op2.observed.clone(),
     };
     op2.signature = fields.sign(&s.kp).unwrap();
 

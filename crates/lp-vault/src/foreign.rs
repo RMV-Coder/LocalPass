@@ -49,7 +49,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::aad;
 use crate::error::{Error, Result};
 use crate::ids::{DeviceId, Id, ItemId, OpId, VaultId};
-use crate::op::OpKind;
+use crate::op::{ObservedHeads, OpKind};
 use crate::payload::ItemPayload;
 use crate::vault::Vault;
 
@@ -82,10 +82,24 @@ pub struct StoredOp {
     pub target_version: u32,
     /// Field 10: the encrypted op payload (Envelope-v1 wire bytes).
     pub payload_env: Vec<u8>,
-    /// Field 11: Ed25519 signature over fields 1..10.
+    /// Field 11: the observed-heads causal summary (sync-protocol.md §3) — the
+    /// version vector the merge derives true happens-before from. Authenticated
+    /// metadata (covered by the signature and the hash chain).
+    pub observed: ObservedHeads,
+    /// Field 12: Ed25519 signature over the version byte + fields 1..11.
     pub signature: [u8; 64],
     /// Local wall-clock insert time (plaintext; not part of the signed region).
     pub created_at: i64,
+}
+
+impl StoredOp {
+    /// The canonical bytes of this op's observed-heads causal summary (field
+    /// 11), for the `ops.observed` column. Thin adapter over
+    /// [`crate::op::OpFields::observed_bytes`].
+    #[must_use]
+    pub fn observed_bytes(&self) -> Vec<u8> {
+        self.observed.to_bytes()
+    }
 }
 
 /// One item's fully-resolved materialized state, as decided by the merge
@@ -398,8 +412,8 @@ fn insert_stored_op(tx: &Connection, op: &StoredOp) -> Result<()> {
     tx.execute(
         "INSERT INTO ops
             (op_id, vault_id, lamport, device_id, op_kind, target_item_id, target_version,
-             payload_env, signature, seq, prev_hash, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             payload_env, signature, seq, prev_hash, observed, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             op.op_id.to_vec(),
             op.vault_id.to_vec(),
@@ -412,6 +426,7 @@ fn insert_stored_op(tx: &Connection, op: &StoredOp) -> Result<()> {
             op.signature.as_slice(),
             i64::try_from(op.seq).map_err(|_| Error::Invalid("seq out of range"))?,
             op.prev_hash.as_slice(),
+            op.observed_bytes(),
             op.created_at,
         ],
     )?;
@@ -424,13 +439,13 @@ fn read_ops(conn: &Connection, device: Option<&DeviceId>) -> Result<Vec<StoredOp
     let (sql, filter): (&str, Option<Vec<u8>>) = match device {
         Some(d) => (
             "SELECT op_id, vault_id, device_id, seq, prev_hash, lamport, op_kind,
-                    target_item_id, target_version, payload_env, signature, created_at
+                    target_item_id, target_version, payload_env, signature, observed, created_at
                FROM ops WHERE device_id = ?1 ORDER BY seq",
             Some(d.to_vec()),
         ),
         None => (
             "SELECT op_id, vault_id, device_id, seq, prev_hash, lamport, op_kind,
-                    target_item_id, target_version, payload_env, signature, created_at
+                    target_item_id, target_version, payload_env, signature, observed, created_at
                FROM ops ORDER BY lamport, device_id, seq",
             None,
         ),
@@ -449,7 +464,8 @@ fn read_ops(conn: &Connection, device: Option<&DeviceId>) -> Result<Vec<StoredOp
             target_version: r.get(8)?,
             payload_env: r.get(9)?,
             signature: r.get(10)?,
-            created_at: r.get(11)?,
+            observed: r.get(11)?,
+            created_at: r.get(12)?,
         })
     };
     let rows: Vec<RawOpRow> = match filter {
@@ -476,6 +492,7 @@ struct RawOpRow {
     target_version: i64,
     payload_env: Vec<u8>,
     signature: Vec<u8>,
+    observed: Vec<u8>,
     created_at: i64,
 }
 
@@ -515,6 +532,7 @@ impl RawOpRow {
             target_version: u32::try_from(self.target_version)
                 .map_err(|_| Error::Invalid("target_version out of range"))?,
             payload_env: self.payload_env,
+            observed: ObservedHeads::decode(&self.observed)?,
             signature,
             created_at: self.created_at,
         })

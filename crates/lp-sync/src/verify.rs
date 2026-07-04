@@ -279,6 +279,7 @@ fn op_fields(op: &StoredOp) -> OpFields {
         target_item: target,
         target_version: op.target_version,
         payload_env: op.payload_env.clone(),
+        observed: op.observed.clone(),
     }
 }
 

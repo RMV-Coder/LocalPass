@@ -112,5 +112,6 @@ pub use backup::{
 };
 pub use ids::{DeviceId, FolderId, Id, ItemId, OpId, VaultId};
 pub use lp_crypto::SecretKey;
+pub use op::{OP_WIRE_VERSION, ObservedHeads};
 pub use payload::{Field, FieldKind, ItemPayload, TypeData};
 pub use vault::{Item, PruneReport, StorageStats, TrashEntry, Vault, VersionInfo};

@@ -5,12 +5,13 @@
 //! later crate. Every item mutation writes exactly one op row in the same
 //! transaction as the state change (vault-format.md §7).
 //!
-//! # Canonical serialization (sync-protocol.md §1)
+//! # Canonical serialization (sync-protocol.md §1, **wire version 2**)
 //!
-//! An op is 11 fields in a fixed order. Integers are fixed-width little-endian;
-//! `payload_env` is `u32`-length-prefixed:
+//! An op is a version byte plus 12 fields in a fixed order. Integers are
+//! fixed-width little-endian; `payload_env` and `observed` are length-prefixed:
 //!
 //! ```text
+//!  0 wire_ver    u8         = 2  (op-format version; §1)
 //!  1 op_id       16 bytes
 //!  2 vault_id    16 bytes
 //!  3 device_id   16 bytes
@@ -21,26 +22,45 @@
 //!  8 target_item 16 bytes (zero if vault-scope)
 //!  9 target_ver  u32 LE
 //! 10 payload_env u32 length prefix || Envelope v1 bytes
-//! 11 signature   64 bytes  (Ed25519 over canonical bytes of fields 1..10)
+//! 11 observed    u32 count prefix || count × (device_id 16 bytes || seq u64 LE),
+//!                entries ascending by device_id  -- the causal summary (§3)
+//! 12 signature   64 bytes  (Ed25519 over canonical bytes of fields 0..11)
 //! ```
 //!
-//! - The **signed region** is fields 1..10; the signature (field 11) is made
-//!   with `lp-crypto`'s Ed25519 [`sign`](lp_crypto::SigningKeyPair::sign) under
-//!   the mandatory namespaced context [`OP_SIGN_CONTEXT`].
+//! - The **signed region** is the version byte + fields 1..11; the signature
+//!   (field 12) is made with `lp-crypto`'s Ed25519
+//!   [`sign`](lp_crypto::SigningKeyPair::sign) under the mandatory namespaced
+//!   context [`OP_SIGN_CONTEXT`].
 //! - **Sign-after-encrypt**: the signature covers the ciphertext `payload_env`,
 //!   not plaintext (sync-protocol.md §1).
+//! - **`observed` (the causal summary, sync-protocol.md §3):** the highest
+//!   `seq` this device had applied from every device (itself included) at
+//!   author time. It is authenticated metadata: covered by both the signature
+//!   and the hash chain. The merge (sync-protocol.md §4.3) derives **true
+//!   happens-before** from it (`A → B` iff `A.seq <= B.observed[A.device]`),
+//!   replacing the old scalar-Lamport approximation. The Lamport clock stays
+//!   only as the LWW total-order tiebreak (§4.1).
 //!
 //! # Hash chain (sync-protocol.md §5)
 //!
-//! `prev_hash(op) = blake3_256(canonical bytes fields 1..11 of this device's
-//! previous op)`. The chain covers the *signature* too, so a peer cannot swap a
-//! validly-signed but different prior op. The genesis (first op by a device) is
+//! `prev_hash(op) = blake3_256(canonical bytes fields 0..12 of this device's
+//! previous op)`. The chain covers the *signature* and the *observed vector*
+//! too, so a peer cannot swap a validly-signed but different prior op nor
+//! rewrite its causal summary. The genesis (first op by a device) is
 //! `blake3_256("localpass/v1/chain-genesis" || vault_id(16) || device_id(16))`,
 //! **raw-byte framed** (LESSONS 2026-07-04) — not the `|`-joined AAD encoding.
+
+use std::collections::BTreeMap;
 
 use lp_crypto::{SigningKeyPair, VerifyingKey, blake3_256};
 
 use crate::ids::{DeviceId, Id, OpId, VaultId};
+
+/// The op canonical-wire format version (sync-protocol.md §1). Bumped from the
+/// implicit v1 to **2** when the [`ObservedHeads`] causal summary (field 11)
+/// was added; a decoder reads this leading byte to detect the layout. There are
+/// no released v1 ops in the wild, so v2 is the only accepted version.
+pub const OP_WIRE_VERSION: u8 = 2;
 
 /// Ed25519 signing context for ops (sync-protocol.md §1; the task fixes this
 /// exact string). Namespaced per the `localpass/v1/` contract.
@@ -74,11 +94,156 @@ impl OpKind {
     }
 }
 
+/// The per-op **observed-heads causal summary** (sync-protocol.md §3): for each
+/// device this op's author had ever applied an op from (itself included), the
+/// highest `seq` it had applied at author time.
+///
+/// This is the exact version vector that makes cross-device happens-before
+/// precise. Given ops `A` (by device `d`, seq `s`) and `B`:
+///
+/// - if `A.device == B.device`, `A → B` iff `A.seq < B.seq` (same-device chain
+///   order);
+/// - otherwise `A → B` iff `B.observed[A.device] >= A.seq` (B had applied A, or
+///   a later op from A's device, when it was authored).
+///
+/// Two ops are **concurrent** iff neither observes the other. Because `observed`
+/// is authored deterministically from applied state and is signed + chained, the
+/// relation is identical on every device and cannot be forged.
+///
+/// # Canonical bytes
+///
+/// `u32` entry count, then each entry as `device_id(16) || seq(u64 LE)`, with
+/// entries in **ascending `device_id`** order. The `BTreeMap` guarantees that
+/// order, so the encoding is reproducible byte-for-byte on any device.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ObservedHeads {
+    /// device_id bytes → highest observed `seq`. A `BTreeMap` so iteration is
+    /// deterministically ascending by device_id (canonical-bytes requirement).
+    heads: BTreeMap<[u8; 16], u64>,
+}
+
+impl ObservedHeads {
+    /// An empty summary (a device's very first op observes nothing).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Build from an iterator of `(device_id_bytes, seq)` pairs; on a duplicate
+    /// device the greater `seq` is kept (the "highest observed" invariant).
+    pub fn from_pairs(pairs: impl IntoIterator<Item = ([u8; 16], u64)>) -> Self {
+        let mut heads = BTreeMap::new();
+        for (dev, seq) in pairs {
+            let e = heads.entry(dev).or_insert(0);
+            *e = (*e).max(seq);
+        }
+        Self { heads }
+    }
+
+    /// Record that `seq` (or higher) from `device` has been observed. Monotone:
+    /// a lower `seq` never lowers a recorded head.
+    pub fn observe(&mut self, device: &DeviceId, seq: u64) {
+        let e = self.heads.entry(*device.as_bytes()).or_insert(0);
+        *e = (*e).max(seq);
+    }
+
+    /// The highest observed `seq` from `device`, or `0` if none observed.
+    #[must_use]
+    pub fn get(&self, device: &DeviceId) -> u64 {
+        self.heads.get(device.as_bytes()).copied().unwrap_or(0)
+    }
+
+    /// The number of devices in the summary.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.heads.len()
+    }
+
+    /// Whether the summary is empty (no device observed).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.heads.is_empty()
+    }
+
+    /// Iterate `(device_id_bytes, seq)` in ascending device_id order.
+    pub fn iter(&self) -> impl Iterator<Item = (&[u8; 16], &u64)> {
+        self.heads.iter()
+    }
+
+    /// Serialize to canonical bytes: `u32` count then sorted
+    /// `device_id(16) || seq(u64 LE)` entries. Appended to `out`.
+    pub fn encode_bytes_into(&self, out: &mut Vec<u8>) {
+        let count = u32::try_from(self.heads.len()).expect("device count fits in u32");
+        out.extend_from_slice(&count.to_le_bytes());
+        for (dev, seq) in &self.heads {
+            out.extend_from_slice(dev);
+            out.extend_from_slice(&seq.to_le_bytes());
+        }
+    }
+
+    /// The canonical bytes of this summary (`u32` count + sorted entries).
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.encoded_len());
+        self.encode_bytes_into(&mut out);
+        out
+    }
+
+    /// The serialized byte length (count prefix + fixed-width entries).
+    #[must_use]
+    fn encoded_len(&self) -> usize {
+        4 + self.heads.len() * (16 + 8)
+    }
+
+    /// Parse canonical bytes back into an [`ObservedHeads`] — the inverse of
+    /// [`encode_bytes_into`](Self::encode_bytes_into). Accepts empty input as an
+    /// empty summary (a device's first op, or an absent column).
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Invalid`] on truncation, a length that overruns the
+    /// buffer, or trailing bytes (a corrupt / non-canonical encoding).
+    pub fn decode(bytes: &[u8]) -> crate::Result<Self> {
+        if bytes.is_empty() {
+            return Ok(Self::new());
+        }
+        if bytes.len() < 4 {
+            return Err(crate::Error::Invalid("observed-heads: truncated count"));
+        }
+        let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+        let entry_len = 16 + 8;
+        let expected = 4 + count * entry_len;
+        if bytes.len() != expected {
+            return Err(crate::Error::Invalid("observed-heads: bad length"));
+        }
+        let mut heads = BTreeMap::new();
+        let mut prev_dev: Option<[u8; 16]> = None;
+        for i in 0..count {
+            let base = 4 + i * entry_len;
+            let dev: [u8; 16] = bytes[base..base + 16].try_into().unwrap();
+            let seq = u64::from_le_bytes(bytes[base + 16..base + 24].try_into().unwrap());
+            // Enforce the canonical ascending-device_id ordering (no dupes), so
+            // a re-encode is byte-identical and a forged reordering is rejected.
+            if let Some(p) = prev_dev
+                && dev <= p
+            {
+                return Err(crate::Error::Invalid(
+                    "observed-heads: entries not strictly ascending",
+                ));
+            }
+            prev_dev = Some(dev);
+            heads.insert(dev, seq);
+        }
+        Ok(Self { heads })
+    }
+}
+
 /// The fixed-order fields of an op, before signing.
 ///
-/// Field 5 (`prev_hash`) and field 11 (`signature`) are filled in during
-/// authoring; this struct carries fields 1..10 plus `prev_hash`, and is signed
-/// to produce the signature.
+/// Field 5 (`prev_hash`) and field 12 (`signature`) are filled in during
+/// authoring; this struct carries the version byte + fields 1..11 (including
+/// `prev_hash` and the `observed` causal summary), and is signed to produce the
+/// signature.
 #[derive(Clone)]
 pub struct OpFields {
     /// Field 1: the op's own id.
@@ -101,6 +266,9 @@ pub struct OpFields {
     pub target_version: u32,
     /// Field 10: the encrypted op payload (Envelope v1 wire bytes).
     pub payload_env: Vec<u8>,
+    /// Field 11: the observed-heads causal summary (sync-protocol.md §3), the
+    /// version vector the merge derives true happens-before from.
+    pub observed: ObservedHeads,
 }
 
 /// Field 8: the op's target item, or the all-zero sentinel for vault-scope ops.
@@ -129,12 +297,23 @@ impl ItemTarget {
 }
 
 impl OpFields {
-    /// Serialize the signed region (fields 1..10) to canonical wire bytes.
+    /// Serialize the signed region (version byte + fields 1..11) to canonical
+    /// wire bytes (sync-protocol.md §1 wire version 2).
     ///
     /// This is exactly the byte string the Ed25519 signature is computed over.
     #[must_use]
     pub fn signed_region_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(16 * 4 + 8 * 2 + 1 + 4 + 4 + self.payload_env.len() + 32);
+        let mut out = Vec::with_capacity(
+            1 + 16 * 4
+                + 8 * 2
+                + 1
+                + 4
+                + 4
+                + self.payload_env.len()
+                + 32
+                + self.observed.encoded_len(),
+        );
+        out.push(OP_WIRE_VERSION); // 0: wire-format version discriminator
         out.extend_from_slice(self.op_id.as_bytes()); // 1
         out.extend_from_slice(self.vault_id.as_bytes()); // 2
         out.extend_from_slice(self.device_id.as_bytes()); // 3
@@ -148,18 +327,30 @@ impl OpFields {
         let len = u32::try_from(self.payload_env.len()).expect("payload_env fits in u32");
         out.extend_from_slice(&len.to_le_bytes());
         out.extend_from_slice(&self.payload_env);
+        // 11: the observed-heads causal summary (u32 count + sorted entries).
+        self.observed.encode_bytes_into(&mut out);
         out
     }
 
-    /// Serialize the full canonical op (fields 1..11), appending the signature.
+    /// Serialize the full canonical op (version byte + fields 1..12), appending
+    /// the signature.
     ///
     /// This is the byte string the *next* op's `prev_hash` is the BLAKE3 of
-    /// (sync-protocol.md §5, chain covers fields 1..11).
+    /// (sync-protocol.md §5, chain covers the whole canonical form).
     #[must_use]
     pub fn full_bytes(&self, signature: &[u8; 64]) -> Vec<u8> {
         let mut out = self.signed_region_bytes();
-        out.extend_from_slice(signature); // 11
+        out.extend_from_slice(signature); // 12
         out
+    }
+
+    /// The standalone canonical bytes of the observed-heads causal summary
+    /// (field 11): `u32` count then sorted `device_id(16) || seq(u64 LE)`
+    /// entries. This is what the `ops.observed` column stores, so the vector is
+    /// reconstructable for chain verification and merge.
+    #[must_use]
+    pub fn observed_bytes(&self) -> Vec<u8> {
+        self.observed.to_bytes()
     }
 
     /// Sign the signed region under [`OP_SIGN_CONTEXT`].
@@ -225,6 +416,7 @@ mod tests {
             target_item: ItemTarget::item(&Id::from_bytes([4u8; 16])),
             target_version: 1,
             payload_env: vec![0xAB, 0xCD, 0xEF],
+            observed: ObservedHeads::new(),
         }
     }
 
@@ -232,11 +424,52 @@ mod tests {
     fn signed_region_layout_is_fixed_width() {
         let f = fields(1, 1, [0u8; 32]);
         let bytes = f.signed_region_bytes();
-        // 16*4 + 8 (seq) + 32 (prev) + 8 (lamport) + 1 (kind) + 4 (ver) + 4 (len) + 3 (payload)
-        let expected = 64 + 8 + 32 + 8 + 1 + 4 + 4 + 3;
+        // 1 (wire_ver) + 16*4 + 8 (seq) + 32 (prev) + 8 (lamport) + 1 (kind)
+        // + 4 (ver) + 4 (payload len) + 3 (payload) + 4 (observed count, empty).
+        let expected = 1 + 64 + 8 + 32 + 8 + 1 + 4 + 4 + 3 + 4;
         assert_eq!(bytes.len(), expected);
-        // seq is at offset 48 (after 3 ids), little-endian.
-        assert_eq!(&bytes[48..56], &1u64.to_le_bytes());
+        // Version byte leads.
+        assert_eq!(bytes[0], OP_WIRE_VERSION);
+        // seq is at offset 1 + 48 = 49 (after the version byte and 3 ids), LE.
+        assert_eq!(&bytes[49..57], &1u64.to_le_bytes());
+    }
+
+    #[test]
+    fn observed_heads_canonical_bytes_are_sorted_and_stable() {
+        // Insertion order must not affect canonical bytes (BTreeMap-sorted).
+        let a = ObservedHeads::from_pairs([([9u8; 16], 3), ([1u8; 16], 7)]);
+        let b = ObservedHeads::from_pairs([([1u8; 16], 7), ([9u8; 16], 3)]);
+        let ba = a.to_bytes();
+        let bb = b.to_bytes();
+        assert_eq!(ba, bb, "observed-heads bytes are order-independent");
+        // First entry is the smaller device_id ([1;16]), seq 7.
+        assert_eq!(&ba[0..4], &2u32.to_le_bytes());
+        assert_eq!(&ba[4..20], &[1u8; 16]);
+        assert_eq!(&ba[20..28], &7u64.to_le_bytes());
+    }
+
+    #[test]
+    fn observe_is_monotone() {
+        let mut o = ObservedHeads::new();
+        let d = Id::from_bytes([5u8; 16]);
+        o.observe(&d, 4);
+        o.observe(&d, 2); // lower seq must not lower the head
+        assert_eq!(o.get(&d), 4);
+        o.observe(&d, 9);
+        assert_eq!(o.get(&d), 9);
+    }
+
+    #[test]
+    fn changing_observed_breaks_signature() {
+        let kp = SigningKeyPair::generate();
+        let mut f = fields(1, 1, [7u8; 32]);
+        f.observed.observe(&Id::from_bytes([2u8; 16]), 1);
+        let sig = f.sign(&kp).unwrap();
+        f.verify(&kp.verifying_key(), &sig).unwrap();
+        // Mutating the causal summary invalidates the signature (it is signed).
+        let mut f2 = f.clone();
+        f2.observed.observe(&Id::from_bytes([3u8; 16]), 5);
+        assert!(f2.verify(&kp.verifying_key(), &sig).is_err());
     }
 
     #[test]

@@ -37,7 +37,7 @@ use crate::db;
 use crate::error::{Error, Result};
 use crate::ids::{FolderId, Id, ItemId, VaultId};
 use crate::index::SearchIndex;
-use crate::op::{ItemTarget, OpFields, OpKind, chain_hash, genesis_hash};
+use crate::op::{ItemTarget, ObservedHeads, OpFields, OpKind, chain_hash, genesis_hash};
 use crate::payload::ItemPayload;
 
 /// The ItemKey wrap purpose/AAD as a `&str` (the full `|`-joined row-binding
@@ -1059,7 +1059,7 @@ impl<'s> Vault<'s> {
 
         let mut stmt = conn.prepare(
             "SELECT op_id, lamport, op_kind, target_item_id, target_version, payload_env,
-                    signature, seq, prev_hash
+                    signature, seq, prev_hash, observed
              FROM ops WHERE device_id = ?1 ORDER BY seq",
         )?;
         let rows = stmt.query_map(params![device_id.to_vec()], |r| {
@@ -1073,6 +1073,7 @@ impl<'s> Vault<'s> {
                 signature: r.get(6)?,
                 seq: r.get(7)?,
                 prev_hash: r.get(8)?,
+                observed: r.get(9)?,
             })
         })?;
 
@@ -1286,7 +1287,7 @@ impl<'s> Vault<'s> {
         let prev_full: Option<Vec<u8>> = tx
             .query_row(
                 "SELECT op_id, lamport, op_kind, target_item_id, target_version, payload_env,
-                        signature, seq, prev_hash
+                        signature, seq, prev_hash, observed
                  FROM ops WHERE device_id = ?1 ORDER BY seq DESC LIMIT 1",
                 params![device_id.to_vec()],
                 |r| {
@@ -1300,6 +1301,7 @@ impl<'s> Vault<'s> {
                         signature: r.get(6)?,
                         seq: r.get(7)?,
                         prev_hash: r.get(8)?,
+                        observed: r.get(9)?,
                     };
                     Ok(row)
                 },
@@ -1321,6 +1323,13 @@ impl<'s> Vault<'s> {
             None => genesis_hash(&self.vault_id, &device_id),
         };
 
+        // Observed-heads causal summary (sync-protocol.md §3): the highest seq
+        // this vault has applied from EVERY device (including this device's own
+        // prior op at `last_seq`). This is the exact version vector the merge
+        // uses for true happens-before — computed from applied state, so it is
+        // deterministic and, once signed + chained, unforgeable.
+        let observed = self.read_observed_heads(tx)?;
+
         // Encrypt the op payload under the VaultKey with the op AAD.
         let payload_env = self
             .vault_key
@@ -1340,14 +1349,16 @@ impl<'s> Vault<'s> {
             target_item: target,
             target_version,
             payload_env: payload_env_bytes.clone(),
+            observed,
         };
         let signature = fields.sign(&self.session.device.signing)?;
+        let observed_bytes = fields.observed_bytes();
 
         tx.execute(
             "INSERT INTO ops
                 (op_id, vault_id, lamport, device_id, op_kind, target_item_id, target_version,
-                 payload_env, signature, seq, prev_hash, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 payload_env, signature, seq, prev_hash, observed, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 op_id.to_vec(),
                 self.vault_id.to_vec(),
@@ -1360,10 +1371,27 @@ impl<'s> Vault<'s> {
                 signature.as_slice(),
                 seq,
                 prev_hash.as_slice(),
+                observed_bytes,
                 db::now_millis(),
             ],
         )?;
         Ok(op_id)
+    }
+
+    /// Read the observed-heads causal summary from applied state
+    /// (sync-protocol.md §3): `device_id → MAX(seq)` over every op this vault
+    /// holds. This is the version vector stamped on the next authored op; a
+    /// device's own prior head is included (self-entry = its `last_seq`).
+    fn read_observed_heads(&self, tx: &Connection) -> Result<ObservedHeads> {
+        let mut stmt = tx.prepare("SELECT device_id, MAX(seq) FROM ops GROUP BY device_id")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut observed = ObservedHeads::new();
+        for row in rows {
+            let (dev_bytes, max_seq) = row?;
+            let dev = Id::from_slice(&dev_bytes)?;
+            observed.observe(&dev, u64::try_from(max_seq).unwrap_or(0));
+        }
+        Ok(observed)
     }
 }
 
@@ -1378,6 +1406,7 @@ struct OpRow {
     signature: Vec<u8>,
     seq: i64,
     prev_hash: Vec<u8>,
+    observed: Vec<u8>,
 }
 
 impl OpRow {
@@ -1414,6 +1443,7 @@ impl OpRow {
             target_version: u32::try_from(self.target_version)
                 .map_err(|_| Error::Invalid("stored target_version out of range"))?,
             payload_env: self.payload_env.clone(),
+            observed: ObservedHeads::decode(&self.observed)?,
         })
     }
 }

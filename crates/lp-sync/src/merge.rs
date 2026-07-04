@@ -34,10 +34,21 @@
 //!
 //! # Delete / restore / edit interactions (§4.3)
 //!
-//! "Concurrent" = neither op is in the other's Lamport causal past (we use the
-//! standard scalar-Lamport happens-before: `a → b` iff `a.lamport < b.lamport`;
-//! same-device ops always have strictly increasing lamports, so their chain
-//! order is preserved, and equal-lamport cross-device ops are concurrent).
+//! "Concurrent" = neither op is in the other's causal past, decided by the
+//! per-op **observed-heads version vector** (sync-protocol.md §3) — *true*
+//! happens-before, not the old scalar-Lamport approximation:
+//!
+//! - if `a.device == b.device`, `a → b` iff `a.seq < b.seq` (same-device chain
+//!   order — a device totally orders its own ops);
+//! - otherwise `a → b` iff `b.observed[a.device] >= a.seq` (b's author had
+//!   applied a, or a later op from a's device, when b was authored);
+//! - `a` and `b` are **concurrent** iff neither `a → b` nor `b → a`.
+//!
+//! This is exact: `observed` records, at author time, the highest seq applied
+//! from every device, so it captures the real causal past. The scalar Lamport
+//! clock is retained **only** as the LWW total-order tiebreak (§4.1) — it no
+//! longer decides concurrency (a higher-Lamport concurrent op no longer looks
+//! causal). The two roles are now cleanly split.
 //!
 //! An item is **deleted** iff it has at least one delete op **and every**
 //! snapshot op happens-before the greatest-total-order delete (i.e. no edit is
@@ -45,7 +56,8 @@
 //! yields:
 //!
 //! - concurrent update vs delete → **edit wins** (the update is not before the
-//!   delete), item live, conflict badge derivable;
+//!   delete), item live, conflict badge derivable — even when the delete has
+//!   the higher Lamport (the case the old scalar rule got wrong);
 //! - delete then causally-later update → **update wins** (revived);
 //! - update then causally-later delete → **delete wins** (tombstone stands);
 //! - concurrent delete vs delete → a single tombstone from the
@@ -58,7 +70,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use lp_vault::ids::{DeviceId, ItemId, OpId};
-use lp_vault::op::OpKind;
+use lp_vault::op::{ObservedHeads, OpKind};
 use lp_vault::payload::ItemPayload;
 use lp_vault::{
     ItemMaterialization, Materialization, StoredOp, TombstoneMaterialization,
@@ -78,12 +90,18 @@ pub const DEFAULT_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 /// closure over `Vault::decrypt_op_payload` so `merge` holds no key material.
 pub type PayloadDecryptor<'a> = dyn Fn(&OpId, &[u8]) -> Result<Vec<u8>> + 'a;
 
-/// One op lifted into merge form: its ordering key, kind, target, and — for
-/// snapshot ops — its decoded payload.
+/// One op lifted into merge form: its ordering key, causal summary, kind,
+/// target, and — for snapshot ops — its decoded payload.
 struct MergeOp {
     op_id: OpId,
     device_id: DeviceId,
+    /// Per-device sequence number (sync-protocol.md §5). Together with
+    /// `observed` this decides true happens-before ([`MergeOp::happens_before`]).
+    seq: u64,
     lamport: u64,
+    /// The observed-heads causal summary this op was authored with
+    /// (sync-protocol.md §3) — the version vector for happens-before.
+    observed: ObservedHeads,
     kind: OpKind,
     created_at: i64,
     /// The decoded full item snapshot for create/update/restore; `None` for
@@ -93,7 +111,9 @@ struct MergeOp {
 
 impl MergeOp {
     /// The total-order key `(lamport, device_id big-endian bytes, op_id bytes)`
-    /// (sync-protocol.md §4.1).
+    /// (sync-protocol.md §4.1). This decides the LWW winner among *concurrent*
+    /// writers; it is **not** used to decide whether two ops are concurrent
+    /// (that is [`happens_before`](Self::happens_before)).
     fn order_key(&self) -> (u64, [u8; 16], [u8; 16]) {
         (
             self.lamport,
@@ -105,6 +125,21 @@ impl MergeOp {
     /// Total-order comparison (§4.1).
     fn cmp_total(&self, other: &Self) -> Ordering {
         self.order_key().cmp(&other.order_key())
+    }
+
+    /// True happens-before (sync-protocol.md §3/§4.3): does `self → other`?
+    ///
+    /// - same device: chain order (`self.seq < other.seq`);
+    /// - cross device: `other` observed `self` (or a later op from `self`'s
+    ///   device) at author time — `other.observed[self.device] >= self.seq`.
+    ///
+    /// Neither `self → other` nor `other → self` ⇒ the two are **concurrent**.
+    fn happens_before(&self, other: &MergeOp) -> bool {
+        if self.device_id.as_bytes() == other.device_id.as_bytes() {
+            self.seq < other.seq
+        } else {
+            other.observed.get(&self.device_id) >= self.seq
+        }
     }
 }
 
@@ -144,7 +179,9 @@ pub fn materialize(
             .push(MergeOp {
                 op_id: op.op_id,
                 device_id: op.device_id,
+                seq: op.seq,
                 lamport: op.lamport,
+                observed: op.observed.clone(),
                 kind: op.op_kind,
                 created_at: op.created_at,
                 payload,
@@ -218,35 +255,41 @@ fn materialize_item(item_id: ItemId, ops: &[MergeOp], now: i64) -> Option<ItemMa
 
 /// Resolve whether the item is deleted, and if so the canonical tombstone
 /// (§4.3). `snapshots` are the item's content ops (ascending total order).
+///
+/// The item is deleted iff there is a delete op **and every** snapshot
+/// *happens-before* the canonical delete under true happens-before
+/// ([`MergeOp::happens_before`]) — so a snapshot that is concurrent-with or
+/// causally-after the delete keeps the item live (edit-wins / revive; §4.3
+/// rows 1 & 2). The canonical delete is the greatest-total-order delete that is
+/// **not** happens-before any snapshot: a delete the winning edit already
+/// observed (an earlier causal delete that a later edit revived) must not be
+/// resurrected as the tombstone. When several deletes are mutually concurrent
+/// with the edits, the greatest-total-order delete is canonical (idempotent
+/// delete-vs-delete).
 fn resolve_tombstone(
     ops: &[MergeOp],
     snapshots: &[&MergeOp],
     now: i64,
 ) -> Option<TombstoneMaterialization> {
-    // The greatest-total-order delete, if any (ops are ascending, so scan back).
-    let last_delete = ops.iter().rev().find(|o| o.kind == OpKind::Delete)?;
-
-    // Edit wins unless *every* snapshot happens-before this delete. A snapshot
-    // that is concurrent-with or after the delete keeps the item live
-    // (edit-wins / revive; §4.3 rows 1 & 2).
-    let all_edits_before_delete = snapshots
+    // Candidate deletes = deletes that are NOT causally before some snapshot
+    // (a delete a later edit observed has been superseded — revive, §4.3 row 2).
+    // Among the survivors, the greatest-total-order one is canonical.
+    let canonical_delete = ops
         .iter()
-        .all(|s| happens_before(s.lamport, last_delete.lamport));
+        .filter(|o| o.kind == OpKind::Delete)
+        .filter(|d| !snapshots.iter().any(|s| d.happens_before(s)))
+        .max_by(|a, b| a.cmp_total(b))?;
+
+    // Edit wins unless *every* snapshot happens-before this delete.
+    let all_edits_before_delete = snapshots.iter().all(|s| s.happens_before(canonical_delete));
     if !all_edits_before_delete {
-        return None; // live
+        return None; // live (concurrent edit-vs-delete, or edit-after-delete)
     }
 
     Some(TombstoneMaterialization {
         deleted_at: now,
         purge_after: now.saturating_add(DEFAULT_RETENTION_MS),
-        deleted_by_device: last_delete.device_id,
-        op_id: last_delete.op_id,
+        deleted_by_device: canonical_delete.device_id,
+        op_id: canonical_delete.op_id,
     })
-}
-
-/// Scalar-Lamport happens-before (§4.3): `a → b` iff `a.lamport < b.lamport`.
-/// Equal lamports (from different devices) are concurrent. Same-device ops
-/// always have strictly increasing lamports, so their chain order is respected.
-fn happens_before(a_lamport: u64, b_lamport: u64) -> bool {
-    a_lamport < b_lamport
 }
