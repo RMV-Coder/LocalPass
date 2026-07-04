@@ -22,4 +22,5 @@ pub mod search;
 pub mod ssh;
 pub mod status;
 pub mod sync;
+pub mod totp;
 pub mod vault;

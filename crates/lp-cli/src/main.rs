@@ -37,6 +37,7 @@ mod dotenv;
 mod envmap;
 mod error;
 mod generate;
+mod otpauth;
 mod output;
 mod profile;
 mod reference;
@@ -112,5 +113,6 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Sync { command } => commands::sync::run(&profile_dir, src, command),
         Command::Device { command } => commands::device::run(&profile_dir, src, command),
         Command::Ssh { command } => commands::ssh::run(&profile_dir, src, no_daemon, command),
+        Command::Totp(args) => commands::totp::run(&profile_dir, src, no_daemon, args),
     }
 }

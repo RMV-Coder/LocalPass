@@ -18,6 +18,15 @@ argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 # --- Key mixing / subkey derivation: HKDF-SHA256 (PRD §5.2). ---
 hkdf = "0.12"
 sha2 = "0.10"
+# --- TOTP HMAC (RFC 6238) ONLY. `hmac` is the generic RustCrypto HMAC over any
+# --- digest; `sha1` supplies SHA-1 for RFC-6238 / Google-Authenticator
+# --- compatibility. SHA-1 is REQUIRED there and used ONLY by the `totp` module —
+# --- it is NOT a general hash and MUST NEVER be used elsewhere in the workspace
+# --- (see the `totp` module docs). Both are on the digest-0.10 line already in
+# --- the tree (hmac 0.12 + sha1 0.10 + sha2 0.10 all consume `digest` 0.10), so
+# --- no parallel crypto stack is introduced. X/SHA-256/512 also come via `sha2`.
+hmac = { version = "0.12", default-features = false }
+sha1 = { version = "0.10", default-features = false }
 # --- Asymmetric sealing: X25519 ECDH, age-style recipient model (PRD §5.2). ---
 # `static_secrets` gives us long-term recipient keys; `getrandom` enables OsRng
 # constructors on both static and ephemeral secrets; `zeroize` wipes secrets.

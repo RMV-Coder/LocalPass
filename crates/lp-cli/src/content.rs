@@ -245,15 +245,49 @@ fn upsert_field(payload: &mut ItemPayload, name: &str, kind: FieldKind, value: s
 
 /// Build a brand-new payload for `item add`.
 ///
+/// When `otpauth_uri` is `Some` (only valid for `--type totp`), the item's
+/// [`TypeData::Totp`] fields are populated by parsing that `otpauth://totp/...`
+/// URI; the per-field flags do not apply to a URI-sourced totp item.
+///
 /// # Errors
 ///
-/// Fails on malformed `key=value` flags, an unreadable env file, or a
-/// generation failure.
+/// Fails on malformed `key=value` flags, an unreadable env file, a generation
+/// failure, an `--otpauth-uri` on a non-totp item, or a malformed URI.
 pub fn build_new(
     item_type: ItemType,
     title: &str,
     args: &ContentArgs,
+    otpauth_uri: Option<&str>,
 ) -> Result<(ItemPayload, BuiltContent)> {
+    // otpauth URI import: only meaningful for a totp item; parse it into the
+    // type data and skip the generic per-field content flags (a URI is a
+    // complete, self-contained specification of the secret).
+    if let Some(uri) = otpauth_uri {
+        if item_type != ItemType::Totp {
+            bail!(crate::error::CliError::usage(
+                "--otpauth-uri is only valid with --type totp"
+            ));
+        }
+        let type_data = crate::otpauth::parse(uri)?.into_type_data();
+        let mut payload = ItemPayload::new(type_data, title);
+        // Still honour non-secret organizational flags (tags, notes) so a URI
+        // import can be tagged in one command.
+        for tag in &args.tags {
+            if !payload.tags.contains(tag) {
+                payload.tags.push(tag.clone());
+            }
+        }
+        if let Some(note) = &args.note {
+            payload.notes = note.clone();
+        }
+        return Ok((
+            payload,
+            BuiltContent {
+                generated_password: None,
+            },
+        ));
+    }
+
     let type_data = build_type_data(item_type, args)?;
     let mut payload = ItemPayload::new(type_data, title);
     let generated_password = apply_common(&mut payload, item_type, args)?;
@@ -334,7 +368,7 @@ mod tests {
         args.username = Some("alice".into());
         args.password = Some("hunter2".into());
         args.url = Some("https://example.com".into());
-        let (p, built) = build_new(ItemType::Login, "Example", &args).unwrap();
+        let (p, built) = build_new(ItemType::Login, "Example", &args, None).unwrap();
         assert!(built.generated_password.is_none());
         let f = crate::output::display_fields(&p);
         assert_eq!(
@@ -350,7 +384,7 @@ mod tests {
     fn generate_flag_yields_a_password() {
         let mut args = empty_args();
         args.generate = true;
-        let (p, built) = build_new(ItemType::Login, "Gen", &args).unwrap();
+        let (p, built) = build_new(ItemType::Login, "Gen", &args, None).unwrap();
         let pw = built.generated_password.expect("a password was generated");
         assert_eq!(pw.chars().count(), 24);
         // The generated password is stored in the payload's hidden field.
@@ -366,7 +400,7 @@ mod tests {
         let mut args = empty_args();
         args.from_env_file = Some(path);
         args.env = vec!["BAZ=3".into()];
-        let (p, _) = build_new(ItemType::EnvSet, "env", &args).unwrap();
+        let (p, _) = build_new(ItemType::EnvSet, "env", &args, None).unwrap();
         if let TypeData::EnvSet { entries } = &p.type_data {
             assert_eq!(entries.len(), 3);
             assert_eq!(entries[0].key, "FOO");
@@ -383,7 +417,7 @@ mod tests {
     fn malformed_kv_never_contains_value() {
         let mut args = empty_args();
         args.fields = vec!["novalue".into()];
-        let err = build_new(ItemType::Login, "x", &args).unwrap_err();
+        let err = build_new(ItemType::Login, "x", &args, None).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("field"));
         assert!(!msg.contains("novalue") || msg.contains("KEY=VALUE"));

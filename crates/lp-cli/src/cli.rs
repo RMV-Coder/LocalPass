@@ -181,6 +181,44 @@ pub enum Command {
         #[command(subcommand)]
         command: SshCommand,
     },
+
+    /// Print the current TOTP code for a `totp` item (PRD §4.1 / §4.4).
+    Totp(TotpArgs),
+}
+
+/// `localpass totp <title-or-id> [flags]`
+#[derive(Debug, Args)]
+#[command(
+    long_about = "Print the current TOTP (RFC 6238) code for a totp item.\n\n\
+The code is computed LOCALLY from the item's stored base32 secret — nothing \
+leaves your machine. The 6-8 digit CODE is printed to STDOUT and the human hint \
+`expires in Ns` to STDERR, so a pipe (`localpass totp GitHub | clip`) captures \
+only the code.\n\n\
+The target must be a `totp`-type item; any other type is a clear usage error \
+(pass an otpauth:// URI to `item add --type totp` to create one).\n\n\
+DAEMON: when the background daemon is unlocked, the code is computed inside the \
+daemon and only the finished digits cross the IPC channel — the secret never \
+does. Otherwise LocalPass unlocks directly, decodes the secret, computes, and \
+zeroizes it.\n\n\
+--json prints {code, seconds_remaining, period, digits, algo}. --watch reprints \
+the code each time the period rolls over (Ctrl-C to stop); it polls the clock \
+on a short sleep rather than busy-waiting."
+)]
+pub struct TotpArgs {
+    /// The totp item (title or id).
+    pub target: String,
+
+    /// Vault to look in (name or id).
+    #[arg(long, default_value = "personal", value_name = "NAME_OR_ID")]
+    pub vault: String,
+
+    /// Emit machine-readable JSON ({code, seconds_remaining, period, digits, algo}).
+    #[arg(long)]
+    pub json: bool,
+
+    /// Reprint the code on every new period until interrupted (Ctrl-C).
+    #[arg(long, conflicts_with = "json")]
+    pub watch: bool,
 }
 
 /// `localpass ssh ...`
@@ -1030,6 +1068,14 @@ pub struct ItemAddArgs {
     /// Item title (required).
     #[arg(long)]
     pub title: String,
+
+    /// For `--type totp`: populate the item from an `otpauth://totp/...` URI
+    /// (the string a 2FA QR code encodes). The secret, issuer, account,
+    /// algorithm, digits, and period are parsed from the URI; `otpauth://hotp`
+    /// is rejected (counter-based HOTP is not supported). Overrides the
+    /// per-field flags for a totp item.
+    #[arg(long, value_name = "URI")]
+    pub otpauth_uri: Option<String>,
 
     #[command(flatten)]
     pub content: ContentArgs,

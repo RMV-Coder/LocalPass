@@ -76,6 +76,15 @@ pub enum Error {
     /// [`Error::DecryptionFailed`] like every other authentication failure.
     #[error("invalid public key: {0}")]
     InvalidPublicKey(&'static str),
+
+    /// A TOTP parameter was out of range (digit count outside `6..=10`, a zero
+    /// period), or a base32 secret failed to decode.
+    ///
+    /// A caller/input error kept distinct from the crypto-failure variants: it
+    /// depends only on caller-supplied structure (parameters, encoding), never
+    /// on secret key material, so it is safe to describe.
+    #[error("invalid TOTP input: {0}")]
+    InvalidTotp(&'static str),
 }
 
 /// Convenience alias for `Result<T, `[`Error`]`>`.

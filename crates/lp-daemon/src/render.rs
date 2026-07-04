@@ -265,6 +265,72 @@ pub fn item_to_summary(item: &Item) -> WireItemSummary {
     }
 }
 
+/// The result of computing a TOTP code from a `totp` item: the code, seconds
+/// remaining in the window, and the item's (non-secret) metadata. The base32
+/// secret is decoded, used, and zeroized inside [`totp_code`] — it is never part
+/// of this value.
+pub struct TotpResult {
+    /// The current zero-padded code.
+    pub code: String,
+    /// Whole seconds remaining in the current window.
+    pub seconds_remaining: u32,
+    /// The time step in seconds.
+    pub period: u32,
+    /// The digit count.
+    pub digits: u32,
+    /// The algorithm token (`SHA1` / `SHA256` / `SHA512`).
+    pub algo: String,
+}
+
+/// Compute the current TOTP code for a `totp` item's payload.
+///
+/// Decodes the base32 secret, computes the code with [`lp_crypto::totp`], and
+/// **zeroizes the decoded secret bytes** before returning — the secret never
+/// leaves this function. Returns `Ok(None)` if the item is not a `totp` item (so
+/// the caller can produce a clear "wrong type" usage error).
+///
+/// # Errors
+///
+/// A descriptive `String` if the secret is missing / not valid base32, or the
+/// stored digits/period/algorithm are out of range.
+pub fn totp_code(payload: &ItemPayload) -> Result<Option<TotpResult>, String> {
+    use zeroize::Zeroize;
+
+    let TypeData::Totp {
+        secret_b32,
+        algo,
+        digits,
+        period,
+        ..
+    } = &payload.type_data
+    else {
+        return Ok(None);
+    };
+
+    // RFC 6238 defaults for stored-zero / empty legacy fields.
+    let digits = if *digits == 0 { 6 } else { *digits };
+    let period = if *period == 0 { 30 } else { *period };
+    let algo = lp_crypto::TotpAlgo::parse(algo)
+        .map_err(|_| "item has an unknown TOTP algorithm".to_string())?;
+    let digits_u8 =
+        u8::try_from(digits).map_err(|_| "item TOTP digits out of range".to_string())?;
+
+    let mut secret = lp_crypto::decode_base32(secret_b32.trim())
+        .map_err(|_| "item TOTP secret is not valid base32".to_string())?;
+    let result = lp_crypto::totp::code_now(&secret, algo, digits_u8, period);
+    secret.zeroize();
+    let (code, seconds_remaining) =
+        result.map_err(|_| "could not compute TOTP code (bad parameters)".to_string())?;
+
+    Ok(Some(TotpResult {
+        code,
+        seconds_remaining,
+        period,
+        digits,
+        algo: algo.as_str().to_string(),
+    }))
+}
+
 /// Resolve one field of an item to its plaintext value, for `ResolveField`.
 ///
 /// Matches the CLI's reference-resolution rule: for an env-set, look the field

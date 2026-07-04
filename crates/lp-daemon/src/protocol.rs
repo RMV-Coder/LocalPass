@@ -131,6 +131,21 @@ pub enum Request {
         /// Optional item-type filter (e.g. `"login"`).
         type_filter: Option<String>,
     },
+    /// Compute the **current TOTP code** for a `totp` item (PRD §4.1 / §4.4).
+    ///
+    /// The daemon decodes the item's base32 secret and computes the code
+    /// **inside the daemon**; the response ([`Response::Totp`]) carries only the
+    /// finished digits and the (non-secret) metadata. **The secret never crosses
+    /// this channel** — only the 6-8 digit code does. A non-`totp` target is a
+    /// usage error.
+    Totp {
+        /// The profile directory being operated on.
+        profile: String,
+        /// Vault name or id.
+        vault: String,
+        /// Item title or id (must be a `totp` item).
+        target: String,
+    },
     /// Resolve one field of one item to its plaintext value (for `run`/`env`
     /// reference resolution). Returns [`Response::Field`].
     ResolveField {
@@ -216,6 +231,7 @@ impl Request {
             Request::GetItem { .. } => "GetItem",
             Request::History { .. } => "History",
             Request::Search { .. } => "Search",
+            Request::Totp { .. } => "Totp",
             Request::ResolveField { .. } => "ResolveField",
             Request::GetRawPayload { .. } => "GetRawPayload",
             Request::CreateItem { .. } => "CreateItem",
@@ -387,6 +403,22 @@ pub enum Response {
         /// The item.
         item: Box<WireItem>,
     },
+    /// The current TOTP code plus its (non-secret) metadata (answer to
+    /// [`Request::Totp`]). **This carries no secret** — the base32 secret stayed
+    /// inside the daemon; only the finished 6-8 digit `code` and the display
+    /// metadata cross the channel.
+    Totp {
+        /// The current zero-padded code.
+        code: String,
+        /// Whole seconds remaining in the current time window.
+        seconds_remaining: u32,
+        /// The time step in seconds (e.g. 30).
+        period: u32,
+        /// The digit count (6-10).
+        digits: u32,
+        /// The algorithm token (`SHA1` / `SHA256` / `SHA512`).
+        algo: String,
+    },
     /// A single resolved field value (ResolveField). Carries a plaintext secret
     /// value — same exposure as the CLI's own `--field` / reference path.
     Field {
@@ -431,6 +463,7 @@ impl Response {
             Response::Items { .. } => "Items",
             Response::Versions { .. } => "Versions",
             Response::Item { .. } => "Item",
+            Response::Totp { .. } => "Totp",
             Response::Field { .. } => "Field",
             Response::RawPayload { .. } => "RawPayload",
             Response::Locked => "Locked",

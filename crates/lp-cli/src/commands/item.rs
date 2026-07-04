@@ -128,7 +128,12 @@ fn run_proxied(
 
 fn add(session: &lp_vault::Session, args: &ItemAddArgs) -> Result<()> {
     let vault = resolve::open_vault(session, &args.content.vault)?;
-    let (payload, built) = content::build_new(args.item_type, &args.title, &args.content)?;
+    let (payload, built) = content::build_new(
+        args.item_type,
+        &args.title,
+        &args.content,
+        args.otpauth_uri.as_deref(),
+    )?;
     let id = vault.create_item(&payload).map_err(map_vault_error)?;
     println!("added {:?} ({})", args.title, id.to_hyphenated());
     if let Some(pw) = built.generated_password {
@@ -395,7 +400,12 @@ fn expect_ok_message(resp: &Response) -> Result<Option<String>> {
 }
 
 fn add_proxied(profile: &str, client: &mut Client, args: &ItemAddArgs) -> Result<()> {
-    let (payload, built) = content::build_new(args.item_type, &args.title, &args.content)?;
+    let (payload, built) = content::build_new(
+        args.item_type,
+        &args.title,
+        &args.content,
+        args.otpauth_uri.as_deref(),
+    )?;
     let value = payload_to_value(&payload)?;
     let resp = daemonctl::call(
         client,

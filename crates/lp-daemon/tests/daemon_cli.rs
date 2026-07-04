@@ -334,6 +334,77 @@ fn daemon_absent_behaves_as_before() {
         .stdout(contains("not running"));
 }
 
+/// `localpass totp` works through the daemon with NO password (proving the
+/// proxied path), the printed code matches `lp_crypto` at the same second, and
+/// the base32 secret never appears on stdout/stderr (it stays inside the daemon).
+#[test]
+fn totp_proxied_through_daemon_without_password() {
+    // The RFC 6238 SHA-1 seed "12345678901234567890" in base32, and raw.
+    const RFC_SEED_B32: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+    const RFC_SEED: &[u8] = b"12345678901234567890";
+
+    let p = DaemonProfile::initialized("totp");
+
+    // Seed a totp item via the otpauth URI (direct path; daemon not up yet).
+    p.cmd()
+        .args([
+            "item",
+            "add",
+            "--type",
+            "totp",
+            "--title",
+            "RFC",
+            "--otpauth-uri",
+        ])
+        .arg(format!(
+            "otpauth://totp/x?secret={RFC_SEED_B32}&digits=8&period=30"
+        ))
+        .assert()
+        .success();
+
+    // Start + unlock the daemon.
+    p.cmd().args(["daemon", "start"]).assert().success();
+    p.cmd().arg("unlock").assert().success();
+
+    // `localpass totp` with NO password under --no-input: only the daemon's held
+    // session makes this succeed. Retry once on a period-boundary straddle.
+    let mut matched = false;
+    for _ in 0..3 {
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let out = p
+            .cmd_no_password()
+            .args(["--no-input", "totp", "RFC"])
+            .output()
+            .expect("run totp");
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(out.status.success(), "proxied totp exited non-zero");
+
+        let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // The secret must never appear anywhere in the output.
+        assert!(!code.contains(RFC_SEED_B32));
+        assert!(!stderr.contains(RFC_SEED_B32));
+        assert_eq!(code.len(), 8);
+
+        if before / 30 == after / 30 {
+            let expected =
+                lp_crypto::totp::code(RFC_SEED, lp_crypto::TotpAlgo::Sha1, 8, 30, before).unwrap();
+            assert_eq!(code, expected, "proxied code matches lp_crypto at {before}");
+            matched = true;
+            break;
+        }
+    }
+    assert!(matched, "could not land inside one period after retries");
+
+    p.cmd().args(["daemon", "stop"]).assert().success();
+}
+
 /// Sanity that the built daemon binary exists next to the CLI (the sibling the
 /// launcher resolves). Guards against a packaging regression.
 #[test]

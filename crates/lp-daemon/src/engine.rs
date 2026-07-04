@@ -449,6 +449,25 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
             })
         }),
 
+        Request::Totp { vault, target, .. } => with_session(state, |session| {
+            let v = open_vault(session, &vault)?;
+            let it = find_item(&v, &target)?;
+            match render::totp_code(&it.payload) {
+                Ok(Some(t)) => Ok(Response::Totp {
+                    code: t.code,
+                    seconds_remaining: t.seconds_remaining,
+                    period: t.period,
+                    digits: t.digits,
+                    algo: t.algo,
+                }),
+                Ok(None) => Err(usage(format!(
+                    "item {target:?} is not a totp item (its type is {})",
+                    it.payload.type_data.type_str()
+                ))),
+                Err(msg) => Err(usage(msg)),
+            }
+        }),
+
         Request::ResolveField {
             vault, item, field, ..
         } => with_session(state, |session| {
@@ -539,6 +558,7 @@ fn request_profile(request: &Request) -> Option<&str> {
         | Request::GetItem { profile, .. }
         | Request::History { profile, .. }
         | Request::Search { profile, .. }
+        | Request::Totp { profile, .. }
         | Request::ResolveField { profile, .. }
         | Request::GetRawPayload { profile, .. }
         | Request::CreateItem { profile, .. }

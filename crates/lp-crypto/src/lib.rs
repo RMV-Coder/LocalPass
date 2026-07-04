@@ -63,7 +63,12 @@
 //! | Symmetric AEAD | XChaCha20-Poly1305 (`chacha20poly1305`) |
 //! | Asymmetric sealing | X25519 (`x25519-dalek`) + XChaCha20-Poly1305 |
 //! | Signatures | Ed25519 (`ed25519-dalek`) |
+//! | TOTP (RFC 6238) | HMAC-SHA1/256/512 (`hmac` + `sha1`/`sha2`) — see [`totp`] |
 //! | RNG | OS CSPRNG only (`getrandom` / `OsRng`) |
+//!
+//! **SHA-1 is confined to [`totp`]**, where RFC 6238 / authenticator-app
+//! compatibility require it. It is used there only as the HMAC PRF for one-time
+//! codes — never as a general hash, KDF, or signature primitive anywhere else.
 
 // --- Modules -------------------------------------------------------------
 
@@ -75,6 +80,7 @@ pub mod keys;
 pub mod params;
 pub mod seal;
 pub mod sign;
+pub mod totp;
 pub mod wrap;
 
 // Internal-only implementation modules (not part of the public surface).
@@ -95,4 +101,5 @@ pub use muk::derive_master_unlock_key;
 pub use params::KdfParams;
 pub use seal::{PublicSealingKey, SealingKeyPair, seal_for, seal_key_for};
 pub use sign::{SigningKeyPair, VerifyingKey};
+pub use totp::{TotpAlgo, decode_base32};
 pub use wrap::{unwrap_key, wrap_key};
