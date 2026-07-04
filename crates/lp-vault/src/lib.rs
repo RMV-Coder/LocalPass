@@ -86,14 +86,19 @@ pub mod backup;
 pub mod canonical;
 pub mod db;
 pub mod error;
+pub mod foreign;
 pub mod ids;
 mod index;
 pub mod op;
 pub mod payload;
 pub mod vault;
 
-pub use account::{AccountStore, Session};
+pub use account::{AccountStore, DeviceIdentityInfo, PeerDevice, Session};
 pub use error::{Error, Result};
+pub use foreign::{
+    ItemMaterialization, Materialization, StoredOp, TombstoneMaterialization,
+    VersionMaterialization,
+};
 // Re-export the `SecretKey` type: it is part of `AccountStore::create`'s public
 // return and `unlock`'s public signature, so callers (and tests) need it without
 // reaching into `lp-crypto` directly.

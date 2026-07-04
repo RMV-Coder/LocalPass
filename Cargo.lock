@@ -1082,6 +1082,7 @@ dependencies = [
  "lp-crypto",
  "lp-daemon",
  "lp-porter",
+ "lp-sync",
  "lp-vault",
  "predicates",
  "rpassword",
@@ -1144,6 +1145,20 @@ dependencies = [
  "thiserror 2.0.18",
  "zeroize",
  "zip",
+]
+
+[[package]]
+name = "lp-sync"
+version = "0.1.0"
+dependencies = [
+ "lp-crypto",
+ "lp-vault",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]

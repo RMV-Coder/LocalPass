@@ -1058,6 +1058,57 @@ impl<'s> Vault<'s> {
         Ok(())
     }
 
+    // --- Foreign-op application seams (additive; see `crate::foreign`) ------
+
+    /// Open a fresh connection for the foreign-op paths (thin re-export of the
+    /// private [`connect`](Self::connect) so [`crate::foreign`] — a sibling
+    /// module — can reach the same durability-configured connection without
+    /// making `connect` crate-public).
+    pub(crate) fn connect_foreign(&self) -> Result<Connection> {
+        self.connect()
+    }
+
+    /// Borrow the live [`VaultKey`] for foreign-op payload decryption
+    /// ([`Vault::decrypt_op_payload`]). Crate-internal so the key never escapes
+    /// the storage layer; only VaultKey `open`/`seal` results cross the boundary.
+    pub(crate) fn vault_key_ref(&self) -> &VaultKey {
+        &self.vault_key
+    }
+
+    /// Seal a materialized foreign version's payload under a fresh local ItemKey
+    /// — identical mechanics to the local [`seal_version`](Self::seal_version),
+    /// re-exported for [`crate::foreign`]. A fresh per-version ItemKey means the
+    /// on-disk ciphertext differs per device while the decrypted payload is
+    /// byte-identical (per-version key hygiene, vault-format.md §5.3).
+    pub(crate) fn seal_version_foreign(
+        &self,
+        item_id: &ItemId,
+        version: i64,
+        plaintext: &[u8],
+    ) -> Result<(Vec<u8>, Vec<u8>)> {
+        self.seal_version(item_id, version, plaintext)
+    }
+
+    /// Route a foreign-op item change through the encrypted search index inside
+    /// the caller's transaction (search-index.md §4/§5): remove a tombstoned
+    /// item, else upsert the live item to its current fields. Decrypts the
+    /// just-written head version via the same per-item-key read path the local
+    /// write paths use, so the index stays consistent with materialized state.
+    pub(crate) fn index_apply_foreign(
+        &self,
+        tx: &Connection,
+        item_id: &ItemId,
+        tombstoned: bool,
+    ) -> Result<()> {
+        let reader = self.payload_reader();
+        if tombstoned {
+            self.index.apply_delete(tx, item_id, &reader)
+        } else {
+            let payload = reader(tx, item_id)?;
+            self.index.apply_upsert(tx, item_id, &payload, &reader)
+        }
+    }
+
     // --- Internal helpers --------------------------------------------------
 
     /// Seal a version's payload: generate a fresh ItemKey, wrap it under the

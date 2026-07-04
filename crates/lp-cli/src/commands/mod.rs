@@ -8,6 +8,7 @@
 
 pub mod backup;
 pub mod daemon;
+pub mod device;
 pub mod env;
 pub mod export;
 pub mod generate;
@@ -19,4 +20,5 @@ pub mod password;
 pub mod run;
 pub mod search;
 pub mod status;
+pub mod sync;
 pub mod vault;

@@ -23,7 +23,7 @@ use lp_crypto::{
     AccountKey, KdfParams, SealingKeyPair, SecretKey, SigningKeyPair, VaultKey,
     derive_master_unlock_key, unwrap_key, wrap_key,
 };
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 
 use crate::aad;
@@ -265,10 +265,9 @@ pub(crate) struct DeviceIdentity {
     pub(crate) device_id: DeviceId,
     pub(crate) signing: SigningKeyPair,
     // The X25519 sealing half of the device identity. Generated and persisted
-    // per vault-format.md §2, but not yet *consumed* here: device pairing and
-    // team sharing (which seal to peer X25519 keys) are P2 / a later crate.
-    // Held so the live identity is complete and lock() zeroizes it too.
-    #[allow(dead_code)]
+    // per vault-format.md §2; consumed by the sync key-sharing path
+    // ([`Session::open_sealed_to_me`]). Held so the live identity is complete
+    // and lock() zeroizes it too.
     pub(crate) sealing: SealingKeyPair,
     pub(crate) ed25519_pub: [u8; 32],
     pub(crate) x25519_pub: [u8; 32],
@@ -381,6 +380,41 @@ impl DeviceIdentity {
             x25519_pub,
         })
     }
+}
+
+/// This device's public identity, as pinned by a peer at pairing
+/// (sync-protocol.md §6). All fields are plaintext / non-secret.
+#[derive(Clone, Copy, Debug)]
+pub struct DeviceIdentityInfo {
+    /// This device's id (16 bytes).
+    pub device_id: DeviceId,
+    /// The Ed25519 signing public key (op-signature verification anchor).
+    pub ed25519_pub: [u8; 32],
+    /// The X25519 sealing public key (key-share recipient).
+    pub x25519_pub: [u8; 32],
+}
+
+/// A trusted peer device's pinned public keys (a `peer_devices` row,
+/// vault-format.md §2).
+#[derive(Clone, Debug)]
+pub struct PeerDevice {
+    /// The peer's device id (16 bytes).
+    pub device_id: DeviceId,
+    /// The peer's Ed25519 signing public key (op-author verification anchor;
+    /// sync-protocol.md §5 step 1).
+    pub ed25519_pub: [u8; 32],
+    /// The peer's X25519 sealing public key (key-share recipient).
+    pub x25519_pub: [u8; 32],
+    /// When the SAS confirmation recorded this trust (unix millis).
+    pub verified_at: i64,
+    /// An optional user label ("laptop").
+    pub label: Option<String>,
+}
+
+/// Coerce a byte slice into a fixed 32-byte array, erroring with a static,
+/// secret-free message if the stored blob is the wrong width.
+fn to_32(bytes: &[u8], err: &'static str) -> Result<[u8; 32]> {
+    bytes.try_into().map_err(|_| Error::Invalid(err))
 }
 
 /// An unlocked account session.
@@ -649,6 +683,262 @@ impl Session {
     #[must_use]
     pub fn vault_file_path(&self, vault_id: &VaultId) -> PathBuf {
         self.vault_path(vault_id)
+    }
+
+    // --- Sync integration (additive; sync-protocol.md §5/§6/§7) ------------
+
+    /// This device's public identity: `device_id`, Ed25519 signing pub, and
+    /// X25519 sealing pub (all plaintext, non-secret). The trust anchor a peer
+    /// pins when pairing (`localpass device export-identity`).
+    #[must_use]
+    pub fn device_public_identity(&self) -> DeviceIdentityInfo {
+        DeviceIdentityInfo {
+            device_id: self.device.device_id,
+            ed25519_pub: self.device.ed25519_pub,
+            x25519_pub: self.device.x25519_pub,
+        }
+    }
+
+    /// Trust a peer device: insert (or replace) its public keys in
+    /// `peer_devices` (sync-protocol.md §6 — SAS is at the CLI layer; this
+    /// records the confirmed anchor). Only devices recorded here are accepted
+    /// as op authors on ingest (sync-protocol.md §5 step 1).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sqlite`] on a write failure.
+    pub fn trust_peer_device(
+        &self,
+        device_id: &DeviceId,
+        ed25519_pub: &[u8; 32],
+        x25519_pub: &[u8; 32],
+        label: Option<&str>,
+    ) -> Result<()> {
+        let conn = db::open_connection(&self.account_path())?;
+        conn.execute(
+            "INSERT INTO peer_devices (device_id, ed25519_pub, x25519_pub, verified_at, label)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(device_id) DO UPDATE SET
+                ed25519_pub = excluded.ed25519_pub,
+                x25519_pub = excluded.x25519_pub,
+                verified_at = excluded.verified_at,
+                label = excluded.label",
+            params![
+                device_id.to_vec(),
+                ed25519_pub.as_slice(),
+                x25519_pub.as_slice(),
+                db::now_millis(),
+                label,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// List all trusted peer devices (their pinned public keys).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sqlite`] / [`Error::Invalid`] on a corrupt row.
+    pub fn peer_devices(&self) -> Result<Vec<PeerDevice>> {
+        let conn = db::open_connection(&self.account_path())?;
+        let mut stmt = conn.prepare(
+            "SELECT device_id, ed25519_pub, x25519_pub, verified_at, label
+               FROM peer_devices ORDER BY verified_at",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, Vec<u8>>(1)?,
+                r.get::<_, Vec<u8>>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, Option<String>>(4)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, ed, x, verified_at, label) = row?;
+            out.push(PeerDevice {
+                device_id: Id::from_slice(&id)?,
+                ed25519_pub: to_32(&ed, "stored peer ed25519_pub was not 32 bytes")?,
+                x25519_pub: to_32(&x, "stored peer x25519_pub was not 32 bytes")?,
+                verified_at,
+                label,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Look up one trusted peer device by id (the verifier's author lookup;
+    /// sync-protocol.md §5 step 1). `None` for an unknown device → reject.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sqlite`] / [`Error::Invalid`] on a corrupt row.
+    pub fn peer_device(&self, device_id: &DeviceId) -> Result<Option<PeerDevice>> {
+        let conn = db::open_connection(&self.account_path())?;
+        let row = conn
+            .query_row(
+                "SELECT ed25519_pub, x25519_pub, verified_at, label
+                   FROM peer_devices WHERE device_id = ?1",
+                params![device_id.to_vec()],
+                |r| {
+                    Ok((
+                        r.get::<_, Vec<u8>>(0)?,
+                        r.get::<_, Vec<u8>>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        match row {
+            None => Ok(None),
+            Some((ed, x, verified_at, label)) => Ok(Some(PeerDevice {
+                device_id: *device_id,
+                ed25519_pub: to_32(&ed, "stored peer ed25519_pub was not 32 bytes")?,
+                x25519_pub: to_32(&x, "stored peer x25519_pub was not 32 bytes")?,
+                verified_at,
+                label,
+            })),
+        }
+    }
+
+    /// Read a plaintext setting value from the account store `settings` table.
+    /// Used for per-vault sync enrollment (the sync-root dir) — a non-sensitive
+    /// scalar (vault-format.md §2 allows plaintext for non-secret settings).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sqlite`] on a read failure.
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        let conn = db::open_connection(&self.account_path())?;
+        let v = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(v)
+    }
+
+    /// Write a plaintext setting value (upsert) — see [`get_setting`](Self::get_setting).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sqlite`] on a write failure.
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        let conn = db::open_connection(&self.account_path())?;
+        conn.execute(
+            "INSERT INTO settings (key, value, value_env) VALUES (?1, ?2, NULL)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, value_env = NULL",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// Seal `plaintext` to a peer device's X25519 public key via
+    /// [`lp_crypto::seal_for`] (the recipient model behind `vault
+    /// share-to-device`). A thin, additive bridge so the sync layer can ship a
+    /// sealed blob without holding a crypto primitive itself.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Crypto`] on a seal failure (e.g. a low-order recipient key).
+    pub fn seal_to_peer(
+        &self,
+        peer_x25519_pub: &[u8; 32],
+        plaintext: &[u8],
+        aad: &[u8],
+    ) -> Result<Vec<u8>> {
+        let recipient = lp_crypto::PublicSealingKey::from_bytes(*peer_x25519_pub);
+        lp_crypto::seal_for(&recipient, plaintext, aad).map_err(Error::from_crypto)
+    }
+
+    /// Open a blob sealed to **this** device's X25519 key (the counterpart of
+    /// [`seal_to_peer`](Self::seal_to_peer)).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::DecryptionFailed`] if this device is not the recipient or the
+    /// bytes were tampered; [`Error::Crypto`] on a malformed sealed message.
+    pub fn open_sealed_to_me(&self, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+        self.device
+            .sealing
+            .open(sealed, aad)
+            .map_err(Error::from_crypto)
+    }
+
+    /// Import a VaultKey (already unwrapped to its registry-storable
+    /// AccountKey-wrapped form by the caller) into the local registry so this
+    /// device can open a shared vault, creating an empty vault file if missing.
+    ///
+    /// Idempotent: a vault already registered returns `Ok(false)`; a freshly
+    /// imported one returns `Ok(true)`.
+    ///
+    /// The caller supplies the AccountKey-`wrap_key`ped VaultKey envelope bytes
+    /// and the AccountKey-sealed name envelope (both produced through the public
+    /// crypto API), so this method holds no key primitive itself.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sqlite`] / [`Error::Io`] on failure.
+    pub fn register_shared_vault(
+        &self,
+        vault_id: &VaultId,
+        wrapped_vault_key_env: &[u8],
+        name_env: &[u8],
+    ) -> Result<bool> {
+        let conn = db::open_connection(&self.account_path())?;
+        let present: bool = conn
+            .query_row(
+                "SELECT 1 FROM vault_registry WHERE vault_id = ?1",
+                params![vault_id.to_vec()],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if present {
+            return Ok(false);
+        }
+        let now = db::now_millis();
+
+        // Create the local vault file if missing (ops arrive via sync pull and
+        // materialize into it).
+        let vault_path = self.vault_path(vault_id);
+        if !vault_path.exists() {
+            let mut vconn = db::open_connection(&vault_path)?;
+            db::restrict_permissions(&vault_path)?;
+            let tx = vconn.transaction()?;
+            tx.execute_batch(db::VAULT_DDL)?;
+            tx.execute(
+                "INSERT INTO meta (id, format_version, file_kind, vault_id, cipher_suite, created_at, index_generation)
+                 VALUES (1, ?1, ?2, ?3, ?4, ?5, 0)",
+                params![
+                    db::FORMAT_VERSION,
+                    db::FILE_KIND_VAULT,
+                    vault_id.to_vec(),
+                    db::CIPHER_SUITE_XCHACHA,
+                    now,
+                ],
+            )?;
+            tx.commit()?;
+        }
+
+        conn.execute(
+            "INSERT INTO vault_registry
+                (vault_id, name_env, wrapped_vault_key, cipher_suite, created_at, deleted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
+            params![
+                vault_id.to_vec(),
+                name_env,
+                wrapped_vault_key_env,
+                db::CIPHER_SUITE_XCHACHA,
+                now,
+            ],
+        )?;
+        Ok(true)
     }
 
     /// Path to the account-store file.

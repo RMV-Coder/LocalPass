@@ -162,6 +162,121 @@ pub enum Command {
     /// instructions — anytime (PRD §4.11). Requires unlock; never writes into
     /// the profile directory (that would defeat the kit's purpose).
     Kit(KitArgs),
+
+    /// Sync a vault's op log over a shared file channel (setup / push / pull /
+    /// status). File-based log shipping is the MVP-default sync (PRD §11 #6).
+    Sync {
+        #[command(subcommand)]
+        command: SyncCommand,
+    },
+
+    /// Device pairing: export this device's identity and trust a peer device.
+    Device {
+        #[command(subcommand)]
+        command: DeviceCommand,
+    },
+}
+
+/// `localpass sync ...`
+#[derive(Debug, Subcommand)]
+#[command(
+    long_about = "Sync a vault's encrypted op log over a shared file channel.\n\n\
+LocalPass's default sync ships the op log as immutable, end-to-end-encrypted \
+segment files under a directory you replicate with any \"dumb\" channel \
+(Syncthing, a USB drive, a network share). There is NO networking in the \
+critical path and the channel is fully untrusted: every op is Ed25519-signed \
+and hash-chained, so a malicious channel cannot forge, drop, replay, or reorder \
+ops without detection (PRD §8 T5/T13).\n\n\
+WORKFLOW: `sync setup --dir <shared-dir>` enrolls a vault (once per device); \
+`sync push` publishes this device's ops; `sync pull` verifies + merges peers' \
+ops into your vault; `sync status` shows per-device progress.\n\n\
+PAIRING: only devices you have trusted (`device trust`) are accepted as op \
+authors. Live mDNS/SAS pairing is a LATER wave; today you exchange identity \
+strings out-of-band (`device export-identity` / `device trust`)."
+)]
+pub enum SyncCommand {
+    /// Enroll a vault for file-based sync under a shared directory.
+    Setup {
+        /// The shared sync-root directory (replicated by Syncthing/USB/etc.).
+        #[arg(long, value_name = "DIR")]
+        dir: PathBuf,
+        /// The vault to enroll (name or id).
+        #[arg(long, default_value = "personal", value_name = "NAME_OR_ID")]
+        vault: String,
+    },
+    /// Publish this device's ops (and re-publishable peer ops) to the channel.
+    Push {
+        /// The vault to push (name or id).
+        #[arg(long, default_value = "personal", value_name = "NAME_OR_ID")]
+        vault: String,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify and merge peers' ops from the channel into this vault.
+    #[command(
+        long_about = "Pull peers' ops from the shared channel into this vault.\n\n\
+Every incoming op is verified (signature, per-device sequence gaplessness, \
+hash-chain link, Lamport monotonicity) before it is merged. A genuine gap (an \
+earlier segment not yet delivered) holds later ops PENDING and is not an alarm; \
+a replay/rollback/tamper QUARANTINES the offending device (and everything after \
+it) and is surfaced as an alarm, while other devices keep syncing.\n\n\
+The merge is deterministic and never loses data: concurrent edits resolve by a \
+total order and the losing edit is preserved as a retrievable version; an edit \
+always wins over a concurrent delete."
+    )]
+    Pull {
+        /// The vault to pull into (name or id).
+        #[arg(long, default_value = "personal", value_name = "NAME_OR_ID")]
+        vault: String,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show per-device sequence high-water marks + pending/quarantined counts.
+    Status {
+        /// The vault to report on (name or id).
+        #[arg(long, default_value = "personal", value_name = "NAME_OR_ID")]
+        vault: String,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// `localpass device ...`
+#[derive(Debug, Subcommand)]
+#[command(long_about = "Device pairing groundwork.\n\n\
+Exchange device identities out-of-band and trust a peer so its ops are accepted \
+on sync. Full live pairing (mDNS discovery + a spoken 6-word SAS phrase) is a \
+LATER wave; today you copy an identity string between devices and confirm its \
+fingerprint by hand.")]
+pub enum DeviceCommand {
+    /// Print this device's public identity string (share it with a peer).
+    ExportIdentity {
+        /// Emit machine-readable JSON (identity string + fingerprint).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Trust a peer device from its identity string (after confirming its
+    /// fingerprint). Only trusted devices are accepted as op authors on sync.
+    #[command(
+        long_about = "Trust a peer device so its ops are accepted on sync.\n\n\
+Paste the peer's `device export-identity` string. LocalPass shows the peer's \
+FINGERPRINT and asks you to confirm it matches what the peer sees \
+out-of-band (defeats a man-in-the-middle). Type 'yes' to confirm, or pass \
+--fingerprint <fp> to confirm non-interactively (it must match)."
+    )]
+    Trust {
+        /// The peer's identity string (from `device export-identity`).
+        identity: String,
+        /// A human label for the peer ("laptop").
+        #[arg(long)]
+        label: Option<String>,
+        /// Confirm the fingerprint non-interactively (must match the peer's).
+        #[arg(long, value_name = "FP")]
+        fingerprint: Option<String>,
+    },
 }
 
 /// `localpass backup ...`
@@ -614,6 +729,23 @@ unless --force."
         /// Emit machine-readable JSON.
         #[arg(long)]
         json: bool,
+    },
+    /// Share this vault's key to one of your other (trusted) devices via the
+    /// sync channel, so that device can open the vault after `sync pull`.
+    #[command(long_about = "Share a vault to another of your devices.\n\n\
+Seals this vault's key to the target device's public key and ships it through \
+the vault's sync directory (`keys/`); the peer imports it on `sync pull`. This \
+is single-user multi-device (PRD §4.5 team sharing is P2).\n\n\
+NOTE: in this build the sealed-key TRANSPORT + shipping are wired, but the \
+final unwrap step needs a key-transport primitive that is intentionally held \
+behind the crypto boundary; the command reports this clearly. Op sync and \
+device pairing are fully functional without it.")]
+    ShareToDevice {
+        /// The target device id (from the peer's `device export-identity`).
+        device_id: String,
+        /// The vault to share (name or id).
+        #[arg(long, default_value = "personal", value_name = "NAME_OR_ID")]
+        vault: String,
     },
 }
 

@@ -1,0 +1,38 @@
+[package]
+name = "lp-sync"
+description = "LocalPass sync engine: op-log ingest verifier, deterministic total-merge, and file-based log shipping (sync-protocol.md §4/§5/§7)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# --- The storage core we drive. lp-sync verifies + merges foreign ops through
+# --- lp-vault's additive foreign-op API (crates/lp-vault/src/foreign.rs) so the
+# --- op log, materialized state, and encrypted index stay consistent in one
+# --- transaction (vault-format.md §7). We touch NO storage internals directly. ---
+lp-vault = { path = "../lp-vault" }
+# --- The crypto boundary: lp-sync consumes only lp-crypto's high-level API
+# --- (Ed25519 verify, BLAKE3, X25519 seal) and holds NO crypto primitives
+# --- (LESSONS "crypto boundary"). ---
+lp-crypto = { path = "../lp-crypto" }
+# --- UUIDv7 device/op ids (same crate/version lp-vault pins) for parsing the
+# --- log-shipping directory names (<device_id> as hyphenated UUID). ---
+uuid = { version = "1", features = ["v7"] }
+# --- The advisory, plaintext manifest.json (sync-protocol.md §7.2) and the
+# --- compact device-identity string for pairing are (de)serialized with serde. ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# --- One error enum; typed sync alarms + no secret in any message
+# --- (workspace-pinned). ---
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# --- Isolated temp profiles + sync roots for round-trip and ingest-security
+# --- tests. ---
+tempfile = "3"
+# --- Permutation-convergence property test (sync-protocol.md §4.4): generate
+# --- arbitrary op multisets across simulated devices and assert byte-identical
+# --- materialized state over sampled permutations. ---
+proptest = "1"

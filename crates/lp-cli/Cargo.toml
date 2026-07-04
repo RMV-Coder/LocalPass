@@ -26,6 +26,10 @@ lp-daemon = { path = "../lp-daemon" }
 # --- (which this CLI then creates in a vault) and writes/reads the age archive.
 # --- The CLI owns storage + prompting; the porter is pure format I/O. ---
 lp-porter = { path = "../lp-porter" }
+# --- The sync engine: file-based log shipping, ingest verification, and the
+# --- deterministic merge. The CLI drives its setup/push/pull/status + device
+# --- pairing surface; lp-sync owns the protocol, the CLI owns prompting + I/O. ---
+lp-sync = { path = "../lp-sync" }
 # --- Argument parsing. clap v4 derive gives a typed command tree, generated
 # --- --help, and stable long-flag names — the documented CLI contract (PRD §4.4). ---
 clap = { version = "4", features = ["derive"] }
