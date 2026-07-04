@@ -30,6 +30,12 @@ lp-porter = { path = "../lp-porter" }
 # --- deterministic merge. The CLI drives its setup/push/pull/status + device
 # --- pairing surface; lp-sync owns the protocol, the CLI owns prompting + I/O. ---
 lp-sync = { path = "../lp-sync" }
+# --- The browser native-messaging host crate. The CLI's `browser register/
+# --- unregister` writes the per-OS manifests (+ Windows HKCU registry key) that
+# --- point Chrome/Firefox at the installed `localpass-native-host` binary. The
+# --- CLI owns only prompting/reporting; lp-native-host owns the manifest shape
+# --- and the registry effects (PRD §4.7 / §6.7). ---
+lp-native-host = { path = "../lp-native-host" }
 # --- Argument parsing. clap v4 derive gives a typed command tree, generated
 # --- --help, and stable long-flag names — the documented CLI contract (PRD §4.4). ---
 clap = { version = "4", features = ["derive"] }

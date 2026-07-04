@@ -1,0 +1,48 @@
+[package]
+name = "lp-native-host"
+description = "LocalPass browser native-messaging host (the `localpass-native-host` binary): bridges a Chrome/Firefox extension over stdio to the LocalPass daemon with a FILL-SCOPED capability only — non-secret credential candidates by registrable-domain match, and a single-item, origin-re-validated password fill. Holds no keys; all secret access goes through the daemon's same-user-only IPC."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "localpass-native-host"
+path = "src/bin/localpass-native-host.rs"
+
+[dependencies]
+# --- The daemon library: this host is a daemon CLIENT (like the CLI). It
+# --- connects over the daemon's existing same-user-only IPC and issues ONLY the
+# --- fill-scoped requests (Status / MatchLogins / FillLogin). It reuses the
+# --- daemon's authoritative registrable-domain matcher (`lp_daemon::origin`) so
+# --- the host's pre-filter and the daemon's server-side re-check use one
+# --- implementation. The host itself holds NO keys and cannot unlock. ---
+lp-daemon = { path = "../lp-daemon" }
+# --- The versioned {"v":1,...} native-messaging JSON schema (extension <-> host).
+# --- serde derives the request/response model; serde_json is the on-wire body. ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# --- One error enum; no secret ever appears in a message (workspace-pinned). ---
+thiserror = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# --- Windows native-messaging registration writes a registry value under
+# --- HKCU\Software\<vendor>\NativeMessagingHosts\com.localpass.host pointing at
+# --- the manifest json (that is how Chrome/Firefox locate the host on Windows).
+# --- Same crate family (windows-sys 0.59) lp-daemon already uses — no new
+# --- third-party surface. Feature set is the minimal registry API: create/set/
+# --- delete an HKCU key + the ERROR_SUCCESS constant. ---
+windows-sys = { version = "0.59", features = [
+    "Win32_System_Registry",
+    "Win32_Foundation",
+] }
+
+[dev-dependencies]
+# --- Black-box integration test: spawn the built `localpass-native-host` binary
+# --- and drive it over stdio with framed ping/status/credentials_for/fill against
+# --- a real daemon (started via the `localpass` CLI) on an isolated per-test
+# --- profile + endpoint. tempfile isolates each test's profile dir. ---
+assert_cmd = "2"
+tempfile = "3"
+serde_json = "1"

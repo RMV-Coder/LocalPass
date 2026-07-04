@@ -50,6 +50,9 @@
 //! ## Module map
 //!
 //! - [`protocol`] — the versioned, length-prefixed JSON wire types (the spec).
+//! - [`origin`] — registrable-domain (eTLD+1) matching for browser autofill;
+//!   the daemon-side authority for the `MatchLogins`/`FillLogin` requests the
+//!   browser native-messaging host proxies (PRD §4.7 / §8 T7).
 //! - [`frame`] — length-prefixed read/write over any byte stream.
 //! - [`transport`] — the platform endpoint + access control.
 //! - [`engine`] — request → `lp_vault` operations → response.
@@ -72,6 +75,7 @@ pub mod client;
 pub mod engine;
 pub mod error;
 pub mod frame;
+pub mod origin;
 pub mod protocol;
 pub mod render;
 pub mod server;

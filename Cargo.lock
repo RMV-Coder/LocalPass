@@ -1270,6 +1270,7 @@ dependencies = [
  "getrandom 0.3.4",
  "lp-crypto",
  "lp-daemon",
+ "lp-native-host",
  "lp-porter",
  "lp-sync",
  "lp-vault",
@@ -1324,6 +1325,19 @@ dependencies = [
  "thiserror 2.0.18",
  "windows-sys 0.59.0",
  "zeroize",
+]
+
+[[package]]
+name = "lp-native-host"
+version = "0.1.0"
+dependencies = [
+ "assert_cmd",
+ "lp-daemon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

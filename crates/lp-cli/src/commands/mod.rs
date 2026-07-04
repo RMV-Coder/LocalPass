@@ -7,6 +7,7 @@
 //! [`PasswordSource`]: crate::unlock::PasswordSource
 
 pub mod backup;
+pub mod browser;
 pub mod daemon;
 pub mod device;
 pub mod env;

@@ -540,6 +540,14 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
                 message: Some(format!("version {new_version}")),
             })
         }),
+
+        Request::MatchLogins { origin, .. } => {
+            with_session(state, |session| match_logins(session, &origin))
+        }
+
+        Request::FillLogin {
+            item_id, origin, ..
+        } => with_session(state, |session| fill_login(session, &item_id, &origin)),
     };
 
     // Any successfully-handled request (even one returning a usage Error) counts
@@ -564,7 +572,9 @@ fn request_profile(request: &Request) -> Option<&str> {
         | Request::CreateItem { profile, .. }
         | Request::UpdateItem { profile, .. }
         | Request::DeleteItem { profile, .. }
-        | Request::RestoreVersion { profile, .. } => Some(profile),
+        | Request::RestoreVersion { profile, .. }
+        | Request::MatchLogins { profile, .. }
+        | Request::FillLogin { profile, .. } => Some(profile),
         Request::Ping | Request::Lock | Request::Shutdown => None,
     }
 }
@@ -620,6 +630,171 @@ fn handle_unlock(
     }
 }
 
+/// Collect every URL a `login` item advertises for autofill matching: its
+/// primary `url` field (kind `url`) plus any additional `TypeData::Login.urls`.
+/// Non-login items yield an empty list. Blank URLs are dropped. This is the
+/// exact set the registrable-domain check runs over (PRD §4.7).
+fn login_urls(payload: &lp_vault::ItemPayload) -> Vec<String> {
+    use lp_vault::payload::{FieldKind, TypeData};
+    let mut urls = Vec::new();
+    let TypeData::Login { urls: extra } = &payload.type_data else {
+        return urls;
+    };
+    // The primary URL lives as a `url`-kind custom field (mirrors how the CLI
+    // stores `--url`); accept any string-valued field named "url" too.
+    for f in &payload.fields {
+        let is_url = matches!(f.kind, FieldKind::Url) || f.name.eq_ignore_ascii_case("url");
+        if is_url && let Some(s) = f.value.as_str() {
+            let s = s.trim();
+            if !s.is_empty() {
+                urls.push(s.to_string());
+            }
+        }
+    }
+    for u in extra {
+        let u = u.trim();
+        if !u.is_empty() {
+            urls.push(u.to_string());
+        }
+    }
+    urls
+}
+
+/// The non-secret username of a login item (the `username` field, exact then
+/// case-insensitive), or an empty string when unset.
+fn login_username(payload: &lp_vault::ItemPayload) -> String {
+    payload
+        .fields
+        .iter()
+        .find(|f| f.name == "username")
+        .or_else(|| {
+            payload
+                .fields
+                .iter()
+                .find(|f| f.name.eq_ignore_ascii_case("username"))
+        })
+        .and_then(|f| f.value.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// The password of a login item (the `password` field, exact then
+/// case-insensitive), or an empty string when unset. **Secret** — only ever put
+/// in a [`Response::Fill`], never a candidate list.
+fn login_password(payload: &lp_vault::ItemPayload) -> String {
+    payload
+        .fields
+        .iter()
+        .find(|f| f.name == "password")
+        .or_else(|| {
+            payload
+                .fields
+                .iter()
+                .find(|f| f.name.eq_ignore_ascii_case("password"))
+        })
+        .and_then(|f| f.value.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Whether any of `payload`'s login URLs matches `origin` by registrable domain.
+/// The single authoritative predicate ([`crate::origin`]) used by both the
+/// candidate scan and the fill re-check.
+fn payload_matches_origin(payload: &lp_vault::ItemPayload, origin: &str) -> bool {
+    login_urls(payload)
+        .iter()
+        .any(|u| crate::origin::url_matches_origin(u, origin))
+}
+
+/// Handle [`Request::MatchLogins`]: scan every vault for `login` items whose
+/// stored URLs match `origin` by registrable domain, returning **non-secret**
+/// candidate descriptors (never a password).
+fn match_logins(session: &Session, origin: &str) -> Result<Response, Response> {
+    // Reject an origin with no registrable domain up front (a bare public suffix,
+    // an IP, localhost) — there is nothing legitimate to match (PRD §8 T7).
+    if crate::origin::registrable_domain(origin).is_none() {
+        return Ok(Response::LoginCandidates {
+            candidates: Vec::new(),
+        });
+    }
+    let vaults = session.list_vaults().map_err(vault_err)?;
+    let mut candidates = Vec::new();
+    for (vault_id, vault_name) in &vaults {
+        let v = session.open_vault(*vault_id).map_err(vault_err)?;
+        let items = v.list_items().map_err(vault_err)?;
+        for it in &items {
+            if payload_matches_origin(&it.payload, origin) {
+                candidates.push(crate::protocol::LoginCandidate {
+                    item_id: it.item_id.to_hyphenated(),
+                    title: it.payload.title.clone(),
+                    username: login_username(&it.payload),
+                    vault: vault_name.clone(),
+                });
+            }
+        }
+    }
+    Ok(Response::LoginCandidates { candidates })
+}
+
+/// Handle [`Request::FillLogin`]: find the one item by id/title across all
+/// vaults, **re-validate** its URL against `origin` server-side, and return
+/// `{username, password}` only on a match. A mismatch is a usage error, never
+/// the secret (defense in depth against a hostile extension — PRD §8 T7).
+fn fill_login(session: &Session, item_ref: &str, origin: &str) -> Result<Response, Response> {
+    // Re-validate the origin has a registrable domain at all before doing work.
+    if crate::origin::registrable_domain(origin).is_none() {
+        return Err(usage(
+            "the requested origin has no registrable domain; refusing to fill",
+        ));
+    }
+    let vaults = session.list_vaults().map_err(vault_err)?;
+    // Locate the item across vaults (by id first, else by unique title).
+    let mut found: Option<lp_vault::Item> = None;
+    for (vault_id, _name) in &vaults {
+        let v = session.open_vault(*vault_id).map_err(vault_err)?;
+        // Try by id (`parse_id` yields an `lp_vault::Id`, which is `ItemId`).
+        if let Some(id) = parse_id(item_ref) {
+            match v.get_item(id) {
+                Ok(item) => {
+                    found = Some(item);
+                    break;
+                }
+                Err(lp_vault::Error::NotFound(_)) => {}
+                Err(e) => return Err(vault_err(e)),
+            }
+        }
+        // Try by unique title within this vault.
+        if found.is_none() {
+            let items = v.list_items().map_err(vault_err)?;
+            if let Some(it) = items.iter().find(|it| it.payload.title == item_ref) {
+                found = Some(v.get_item(it.item_id).map_err(vault_err)?);
+                break;
+            }
+        }
+    }
+    let item = found.ok_or_else(|| usage(format!("no login item matching {item_ref:?}")))?;
+
+    // Must be a login item.
+    if !matches!(item.payload.type_data, lp_vault::TypeData::Login { .. }) {
+        return Err(usage(
+            "the requested item is not a login item; refusing to fill",
+        ));
+    }
+
+    // THE server-side origin re-check (defense in depth). A mismatch never
+    // returns the secret.
+    if !payload_matches_origin(&item.payload, origin) {
+        return Err(usage(
+            "the item's URL does not match the requested origin; refusing to fill",
+        ));
+    }
+
+    Ok(Response::Fill {
+        username: login_username(&item.payload),
+        password: login_password(&item.payload),
+    })
+}
+
 /// Parse a canonical item payload `Value` into an [`lp_vault::ItemPayload`].
 fn parse_payload(value: serde_json::Value) -> Result<lp_vault::ItemPayload, Response> {
     // Serialize to canonical bytes then parse through lp-vault's own path so the
@@ -655,5 +830,72 @@ mod tests {
         // No session, so maybe_autolock is a no-op and returns false.
         assert!(!st.maybe_autolock());
         assert_eq!(st.idle_remaining_secs(), None);
+    }
+
+    fn login_with_url(url: &str) -> lp_vault::ItemPayload {
+        use lp_vault::payload::{Field, FieldKind, TypeData};
+        use serde_json::json;
+        let mut p = lp_vault::ItemPayload::new(TypeData::Login { urls: vec![] }, "Site");
+        p.fields = vec![
+            Field {
+                name: "username".into(),
+                kind: FieldKind::Text,
+                value: json!("alice"),
+            },
+            Field {
+                name: "password".into(),
+                kind: FieldKind::Hidden,
+                value: json!("s3cr3t"),
+            },
+            Field {
+                name: "url".into(),
+                kind: FieldKind::Url,
+                value: json!(url),
+            },
+        ];
+        p
+    }
+
+    #[test]
+    fn login_urls_collects_primary_and_extra() {
+        use lp_vault::payload::TypeData;
+        let mut p = login_with_url("https://example.com/login");
+        if let TypeData::Login { urls } = &mut p.type_data {
+            urls.push("https://alt.example.com".into());
+            urls.push("   ".into()); // blank dropped
+        }
+        let urls = login_urls(&p);
+        assert!(urls.contains(&"https://example.com/login".to_string()));
+        assert!(urls.contains(&"https://alt.example.com".to_string()));
+        assert_eq!(urls.len(), 2);
+    }
+
+    #[test]
+    fn login_urls_empty_for_non_login() {
+        let p = lp_vault::ItemPayload::new(lp_vault::TypeData::Note {}, "n");
+        assert!(login_urls(&p).is_empty());
+    }
+
+    #[test]
+    fn username_and_password_extracted() {
+        let p = login_with_url("https://example.com");
+        assert_eq!(login_username(&p), "alice");
+        assert_eq!(login_password(&p), "s3cr3t");
+    }
+
+    #[test]
+    fn payload_matches_by_registrable_domain() {
+        let p = login_with_url("https://example.com/login");
+        assert!(payload_matches_origin(&p, "https://www.example.com/"));
+        assert!(payload_matches_origin(&p, "https://login.example.com/"));
+        // Phishing lookalike never matches (T7).
+        assert!(!payload_matches_origin(&p, "https://evil-example.com/"));
+        assert!(!payload_matches_origin(&p, "https://example.com.evil.com/"));
+    }
+
+    #[test]
+    fn blank_url_login_matches_nothing() {
+        let p = login_with_url("");
+        assert!(!payload_matches_origin(&p, "https://example.com/"));
     }
 }

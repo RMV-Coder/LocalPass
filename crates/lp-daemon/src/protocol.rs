@@ -29,9 +29,10 @@
 //! # Secret handling on the channel
 //!
 //! The master password (in [`Request::Unlock`]) and revealed secret values (in
-//! [`Response::Item`] with `reveal = true`, and [`Response::Field`]) cross this
-//! channel **in the clear**. That is safe **only because the channel is
-//! same-user-only** by construction: on Windows the pipe's DACL grants access to
+//! [`Response::Item`] with `reveal = true`, [`Response::Field`], and
+//! [`Response::Fill`]) cross this channel **in the clear**. That is safe **only
+//! because the channel is same-user-only** by construction: on Windows the pipe's
+//! DACL grants access to
 //! the current user's SID alone; on Unix the socket lives in a `0700` directory,
 //! is `0600`, and every connection's peer uid is checked against our euid
 //! (PRD §7.3, §8 T8). No other process — not another user, not the network —
@@ -212,6 +213,38 @@ pub enum Request {
         /// The version number to restore.
         version: i64,
     },
+    /// **Browser autofill (fill-scoped):** list the non-secret login candidates
+    /// whose stored URLs match `origin`'s registrable domain (eTLD+1), across all
+    /// vaults. Answered by [`Response::LoginCandidates`].
+    ///
+    /// This is the query behind the extension's `credentials_for` — it returns
+    /// **only** `{item_id, title, username, vault}` per candidate and **never a
+    /// password**. The daemon (not the extension) decides what matches, using
+    /// [`crate::origin`]. A locked daemon answers [`Response::Locked`].
+    MatchLogins {
+        /// The profile directory being operated on.
+        profile: String,
+        /// The page origin (a full origin/URL or a bare host) to match against.
+        origin: String,
+    },
+    /// **Browser autofill (fill-scoped):** reveal exactly one login item's
+    /// `{username, password}` — and only if the item's stored URL still matches
+    /// `origin`'s registrable domain, **re-checked here server-side**. Answered by
+    /// [`Response::Fill`].
+    ///
+    /// This is the only browser-facing request that returns secret values, and
+    /// only for a single, user-selected item. The origin re-validation is
+    /// defense-in-depth against a hostile/compromised extension claiming a match
+    /// it should not have (PRD §8 T7): a mismatch returns [`Response::Error`],
+    /// never the secret. A locked daemon answers [`Response::Locked`].
+    FillLogin {
+        /// The profile directory being operated on.
+        profile: String,
+        /// The item id (hyphenated) or title to fill.
+        item_id: String,
+        /// The page origin the fill is for (re-validated against the item's URL).
+        origin: String,
+    },
     /// Terminate the daemon: drop the session and exit, removing the endpoint.
     Shutdown,
 }
@@ -238,6 +271,8 @@ impl Request {
             Request::UpdateItem { .. } => "UpdateItem",
             Request::DeleteItem { .. } => "DeleteItem",
             Request::RestoreVersion { .. } => "RestoreVersion",
+            Request::MatchLogins { .. } => "MatchLogins",
+            Request::FillLogin { .. } => "FillLogin",
             Request::Shutdown => "Shutdown",
         }
     }
@@ -337,6 +372,25 @@ pub struct WireItemSummary {
     pub tags: Vec<String>,
 }
 
+/// A single non-secret login candidate for browser autofill
+/// ([`Response::LoginCandidates`]).
+///
+/// This is the **only** shape the extension's `credentials_for` returns per
+/// match, and it deliberately carries **no password** — just enough for the
+/// extension to render a picker. The secret is fetched separately, per item, via
+/// [`Request::FillLogin`] after the user chooses.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct LoginCandidate {
+    /// The item id (hyphenated) — the handle passed back to `FillLogin`.
+    pub item_id: String,
+    /// The item title (for display in the picker).
+    pub title: String,
+    /// The login username (non-secret; safe to show pre-fill). Empty if unset.
+    pub username: String,
+    /// The vault name the item lives in (for display / disambiguation).
+    pub vault: String,
+}
+
 /// The unlock/lock state reported by [`Response::Status`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -433,6 +487,23 @@ pub enum Response {
         /// The full canonical `ItemPayload` as JSON.
         payload: serde_json::Value,
     },
+    /// Non-secret login candidates matching an origin (answer to
+    /// [`Request::MatchLogins`]). **Never carries a password** — see
+    /// [`LoginCandidate`].
+    LoginCandidates {
+        /// The matching candidates (may be empty).
+        candidates: Vec<LoginCandidate>,
+    },
+    /// The `{username, password}` for one user-selected login (answer to
+    /// [`Request::FillLogin`]), returned **only after** the daemon re-validated
+    /// that the item's URL matches the requested origin. This is the sole
+    /// browser-facing response carrying a secret value; it carries nothing else.
+    Fill {
+        /// The login username.
+        username: String,
+        /// The login password (the secret).
+        password: String,
+    },
     /// The requested operation needs an unlocked session and none is held.
     Locked,
     /// This daemon serves a different profile than the request named.
@@ -466,6 +537,8 @@ impl Response {
             Response::Totp { .. } => "Totp",
             Response::Field { .. } => "Field",
             Response::RawPayload { .. } => "RawPayload",
+            Response::LoginCandidates { .. } => "LoginCandidates",
+            Response::Fill { .. } => "Fill",
             Response::Locked => "Locked",
             Response::WrongProfile { .. } => "WrongProfile",
             Response::Error { .. } => "Error",
@@ -525,6 +598,19 @@ mod tests {
         let dbg = format!("{resp:?}");
         assert!(!dbg.contains("s3cr3t-value"));
         assert!(dbg.contains("Field"));
+    }
+
+    #[test]
+    fn response_debug_never_prints_fill_password() {
+        let resp = Response::Fill {
+            username: "octocat".into(),
+            password: "s3cr3t-pw".into(),
+        };
+        let dbg = format!("{resp:?}");
+        assert!(!dbg.contains("s3cr3t-pw"));
+        // Username is non-secret but the kind-only Debug omits it anyway.
+        assert!(!dbg.contains("octocat"));
+        assert!(dbg.contains("Fill"));
     }
 
     #[test]

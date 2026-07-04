@@ -184,6 +184,71 @@ pub enum Command {
 
     /// Print the current TOTP code for a `totp` item (PRD §4.1 / §4.4).
     Totp(TotpArgs),
+
+    /// Register or unregister the browser autofill native-messaging host
+    /// (PRD §4.7 / §6.7). Points Chrome/Firefox at the `localpass-native-host`
+    /// binary via the per-OS manifest (+ HKCU registry key on Windows).
+    Browser {
+        #[command(subcommand)]
+        command: BrowserCommand,
+    },
+}
+
+/// `localpass browser ...`
+#[derive(Debug, Subcommand)]
+#[command(
+    long_about = "Register the LocalPass browser-autofill native-messaging host.\n\n\
+The browser extension talks to LocalPass over Chrome/Firefox NATIVE MESSAGING — \
+NOT a localhost port (PRD §4.7 avoids that whole class of local-port-hijack \
+bugs). For the browser to launch the host, it needs a native-messaging host \
+MANIFEST that names the host (com.localpass.host), the path to the installed \
+`localpass-native-host` binary, and the extension allowlist.\n\n\
+`browser register` writes that manifest to the correct per-OS location and, on \
+Windows, the HKCU registry value that points the browser at it. `browser \
+unregister` removes them (idempotent).\n\n\
+EXTENSION ID: LocalPass has no published extension id yet, so a documented \
+PLACEHOLDER id is used unless you pass --extension-id. The allowlist is the \
+browser-enforced gate on WHICH extension may connect, so set the real id before \
+relying on autofill.\n\n\
+The host itself holds NO keys: it bridges to the daemon with a FILL-SCOPED \
+capability only (non-secret candidates + a single-item, origin-re-validated \
+fill)."
+)]
+pub enum BrowserCommand {
+    /// Write the native-messaging manifest(s) (+ Windows registry key).
+    Register {
+        /// Register for Chrome / Chromium.
+        #[arg(long)]
+        chrome: bool,
+        /// Register for Firefox.
+        #[arg(long)]
+        firefox: bool,
+        /// Register for all supported browsers (the default if no browser flag
+        /// is given).
+        #[arg(long)]
+        all: bool,
+        /// The extension id to allowlist (default: a documented placeholder).
+        /// For Chrome this is the 32-char extension id; for Firefox the addon id.
+        #[arg(long, value_name = "ID")]
+        extension_id: Option<String>,
+        /// Path to the installed `localpass-native-host` binary (default: the
+        /// one sitting next to this `localpass` binary).
+        #[arg(long, value_name = "PATH")]
+        host_path: Option<PathBuf>,
+    },
+    /// Remove the native-messaging manifest(s) (+ Windows registry key).
+    Unregister {
+        /// Unregister Chrome / Chromium.
+        #[arg(long)]
+        chrome: bool,
+        /// Unregister Firefox.
+        #[arg(long)]
+        firefox: bool,
+        /// Unregister all supported browsers (the default if no browser flag is
+        /// given).
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 /// `localpass totp <title-or-id> [flags]`

@@ -114,5 +114,6 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Device { command } => commands::device::run(&profile_dir, src, command),
         Command::Ssh { command } => commands::ssh::run(&profile_dir, src, no_daemon, command),
         Command::Totp(args) => commands::totp::run(&profile_dir, src, no_daemon, args),
+        Command::Browser { command } => commands::browser::run(command),
     }
 }
