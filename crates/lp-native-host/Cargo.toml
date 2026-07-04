@@ -1,4 +1,5 @@
 [package]
+publish = false  # application crate; uses path deps, not published to crates.io
 name = "lp-native-host"
 description = "LocalPass browser native-messaging host (the `localpass-native-host` binary): bridges a Chrome/Firefox extension over stdio to the LocalPass daemon with a FILL-SCOPED capability only — non-secret credential candidates by registrable-domain match, and a single-item, origin-re-validated password fill. Holds no keys; all secret access goes through the daemon's same-user-only IPC."
 version.workspace = true

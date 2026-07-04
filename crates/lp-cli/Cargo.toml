@@ -1,4 +1,5 @@
 [package]
+publish = false  # application crate; uses path deps, not published to crates.io
 name = "lp-cli"
 description = "LocalPass command-line interface (the `localpass` binary): account init, vault and item CRUD, generation, and password change — a fully local, direct-unlock CLI (no daemon yet)."
 version.workspace = true

@@ -1,4 +1,5 @@
 [package]
+publish = false  # application crate; uses path deps, not published to crates.io
 name = "lp-daemon"
 description = "LocalPass per-user agent: a background process that holds an unlocked vault session behind an authenticated, same-user-only local IPC channel (Windows named pipe / Unix domain socket) so repeated CLI calls don't re-prompt for the master password."
 version.workspace = true

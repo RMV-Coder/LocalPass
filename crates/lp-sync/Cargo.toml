@@ -1,4 +1,5 @@
 [package]
+publish = false  # application crate; uses path deps, not published to crates.io
 name = "lp-sync"
 description = "LocalPass sync engine: op-log ingest verifier, deterministic total-merge, and file-based log shipping (sync-protocol.md §4/§5/§7)."
 version.workspace = true

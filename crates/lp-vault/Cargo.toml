@@ -1,4 +1,5 @@
 [package]
+publish = false  # application crate; uses path deps, not published to crates.io
 name = "lp-vault"
 description = "LocalPass storage core: account store, per-vault SQLite files, items, versions, and local op-log authoring"
 version.workspace = true

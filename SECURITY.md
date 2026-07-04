@@ -165,6 +165,29 @@ not the MVP default (PRD §5.2; vault-format.md §9).
 
 ---
 
+## Known dependency advisories
+
+Supply-chain scanning (`cargo deny`, run in CI) is clean except for two
+documented, accepted advisories on transitive dependencies (rationale recorded
+in [`deny.toml`](deny.toml)):
+
+- **RUSTSEC-2023-0071 (`rsa` — "Marvin" timing side-channel).** The `rsa` crate
+  has a non-constant-time implementation whose timing leaks key bits *during
+  decryption* over a network (a padding-oracle vector). LocalPass pulls `rsa`
+  only via `ssh-key` and uses it **only to sign** with a user's RSA SSH key in
+  the local SSH agent — it performs **no RSA decryption anywhere**, and signing
+  runs over a same-user-only local pipe on a client-chosen hash, not on
+  attacker-supplied ciphertext exposed to a network observer. The advisory's
+  vector therefore does not apply. **Mitigation: prefer Ed25519 SSH keys** (the
+  recommended default); RSA exists for interoperability. A tracked follow-up
+  will feature-gate RSA so the default build omits the `rsa` crate entirely.
+- **RUSTSEC-2026-0173 (`proc-macro-error2` — unmaintained).** A compile-time
+  proc-macro pulled transitively by `age`'s error-message localization. It ships
+  no runtime code and is an "unmaintained" notice, not a vulnerability; it will
+  drop when `age` updates its i18n stack.
+
+---
+
 ## External audit status
 
 An **independent external security audit of the core cryptography is a hard gate

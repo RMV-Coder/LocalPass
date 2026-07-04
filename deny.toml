@@ -7,9 +7,41 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    # RUSTSEC-2023-0071 — "Marvin Attack": a non-constant-time RSA
+    # implementation in the `rsa` crate leaks key bits through *decryption*
+    # timing observable over a network (a PKCS#1 v1.5 padding oracle on
+    # attacker-supplied ciphertexts). No fixed release exists yet.
+    #
+    # Why this does not apply to LocalPass: `rsa` is pulled in ONLY via
+    # `ssh-key`, and is used ONLY to SIGN with a user's RSA SSH key inside the
+    # local SSH agent (crates/lp-daemon/src/sshagent/keys.rs) — we perform no
+    # RSA decryption anywhere (verified: no `.decrypt`/OAEP/PKCS1v15Encrypt in
+    # the tree). The signing operation runs over a same-user-only IPC pipe on
+    # the user's own machine and is not exposed to a remote network observer,
+    # and it operates on a client-chosen hash, not attacker-supplied
+    # ciphertext — so the Marvin decryption-oracle vector is absent.
+    #
+    # Mitigation posture (see SECURITY.md): Ed25519 is the recommended SSH key
+    # type; RSA support exists for interop. Tracked follow-up: feature-gate RSA
+    # so the default build omits the `rsa` crate entirely.
+    "RUSTSEC-2023-0071",
+    # RUSTSEC-2026-0173 — `proc-macro-error2` is unmaintained (an
+    # unmaintained-crate advisory, NOT a vulnerability). It is a compile-time
+    # proc-macro pulled transitively by `age` → `i18n-embed-fl` (age's error-
+    # message localization); it produces no runtime code in the shipped binary
+    # and is not on any attack surface. We do not control age's build-dep tree;
+    # tracked to drop when age updates its i18n stack.
+    "RUSTSEC-2026-0173",
+]
 
 [licenses]
 version = 2
+# Our own workspace crates are AGPL-3.0-only (core/daemon) and MPL-2.0 (GUI);
+# they are unpublished first-party code whose license is our choice (recorded
+# per-crate in Cargo.toml), not a third-party dependency to vet. Skip them so
+# the allowlist below governs only external dependencies.
+private = { ignore = true }
 allow = [
     "MIT",
     "Apache-2.0",
@@ -26,6 +58,10 @@ allow = [
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Intra-workspace `path` dependencies have no version requirement, which
+# cargo-deny otherwise reports as a wildcard. Allow it for path deps only;
+# external wildcard version requirements remain denied.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"

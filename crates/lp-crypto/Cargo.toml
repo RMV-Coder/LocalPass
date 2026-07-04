@@ -1,4 +1,5 @@
 [package]
+publish = false  # application crate; uses path deps, not published to crates.io
 name = "lp-crypto"
 description = "LocalPass cryptographic core: KDF, AEAD envelopes, key wrapping, sealing, signing"
 version.workspace = true
