@@ -33,6 +33,8 @@ Living log for the LocalPass build. [PRD.md](PRD.md) is the *what*; this file re
 
 ## Lessons learned
 
+- **2026-07-04 — Smoke-test Windows CLIs from PowerShell, not git-bash.** MSYS argument conversion turns a bare `/c` into `C:\`, so `localpass run -- cmd /c ...` appeared broken from bash (interactive cmd banner, wrong exit codes) while the binary was correct. **How to apply:** for Windows child-process behavior, verify via the PowerShell tool; treat git-bash smoke failures involving `/`-prefixed args as suspect before blaming the code.
+
 - **2026-07-04 — Gate commits on `cargo test`'s exit code, never a grep'd pipeline.** A `cargo test | grep "test result" && git commit` chain committed a broken test because grep's exit code masked the failure (caught and amended immediately). **How to apply:** run tests as their own command, branch on `$?`, and only then commit.
 - **2026-07-04 — AAD component encoding (fixed contract):** AAD strings are UTF-8, joined with a single `|`: labels verbatim, ids as 32-char lowercase hex (no hyphens), integers as decimal ASCII. Chain-genesis hash input is raw-byte framed: `label_utf8 || vault_id(16) || device_id(16)`.
 - **2026-07-04 — Review subagent crypto with a hardening checklist, not just tests.** The lp-crypto delivery was excellent (constructions, hygiene, oracle-resistance all correct), yet still missed X25519 low-order-point rejection (`SharedSecret::was_contributory()`), added in review. **How to apply:** for crypto deliveries, walk a fixed checklist (nonce sourcing, contributory ECDH, domain separation, zeroization on every early-return path, error-oracle collapse) rather than relying on the test suite the same author wrote.

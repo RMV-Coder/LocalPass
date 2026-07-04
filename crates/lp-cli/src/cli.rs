@@ -116,6 +116,134 @@ pub enum Command {
         #[command(subcommand)]
         command: PasswordCommand,
     },
+
+    /// Run a command with secrets injected into its environment (PRD §4.8).
+    Run(RunArgs),
+
+    /// Export, import, and diff `.env` sets (PRD §4.8).
+    Env {
+        #[command(subcommand)]
+        command: EnvCommand,
+    },
+}
+
+/// `localpass run [flags] -- <command> [args...]`
+///
+/// Resolves secrets **once**, at spawn, into the child's environment. Plaintext
+/// exists only in this process's memory and the child's environment — never on
+/// disk, and never in the child's argv beyond what you passed.
+#[derive(Debug, Args)]
+#[command(
+    long_about = "Run a command with secrets injected as environment variables.\n\n\
+Sources are layered; on a KEY conflict, later sources override earlier ones:\n  \
+1. --env-set <item>   all entries of an env-set item (repeatable)\n  \
+2. --env-file <path>  dotenv lines; values may be localpass:// / op:// \
+references (resolved) or literals (passed through). Repeatable; applied in \
+flag order, after --env-set.\n  \
+3. -e KEY=<reference>  ad-hoc single mappings (highest precedence)\n\n\
+REFERENCES (PRD §4.8): localpass://<vault>/<item>/<field> and the alias \
+op://<vault>/<item>/<field> resolve identically. <vault> is a name or id, \
+<item> a title or id, <field> a field name (or an env-set entry key). \
+Percent-encoding (%XX) in a segment is decoded.\n\n\
+The child environment is the parent environment plus the resolved vars \
+(resolved vars override inherited ones). With --no-inherit the child gets ONLY \
+the resolved vars plus a minimal passthrough (PATH, SYSTEMROOT, TEMP/TMP, \
+HOME/USERPROFILE, and a few OS essentials) for basic operability.\n\n\
+SPAWN: on Unix, LocalPass calls exec() and is replaced by the child (it \
+vanishes from the process tree, and the child's exit code is the shell's). On \
+Windows there is no exec: LocalPass spawns the child with inherited stdio, \
+waits, and exits with the child's exit code.\n\n\
+ERRORS: an unresolvable reference exits 1, naming the failing KEY and reference \
+(never a resolved value); a wrong password / Secret Key exits 2."
+)]
+pub struct RunArgs {
+    /// Default vault for bare references and env-sets that omit a vault
+    /// (name or id).
+    #[arg(long, default_value = "personal", value_name = "NAME_OR_ID")]
+    pub vault: String,
+
+    /// Inject all entries of an env-set item (title or id). Repeatable; later
+    /// sets override earlier ones on a KEY conflict.
+    #[arg(long = "env-set", value_name = "TITLE_OR_ID")]
+    pub env_sets: Vec<String>,
+
+    /// Load a dotenv file whose values may be references (resolved) or literals
+    /// (passed through). Repeatable; applied in flag order after --env-set.
+    #[arg(long = "env-file", value_name = "PATH")]
+    pub env_files: Vec<PathBuf>,
+
+    /// Ad-hoc mapping `KEY=<reference>` (highest precedence). Repeatable.
+    #[arg(short = 'e', value_name = "KEY=REF")]
+    pub env: Vec<String>,
+
+    /// Give the child ONLY the resolved vars plus a minimal passthrough
+    /// (PATH, SYSTEMROOT, TEMP/TMP, HOME/USERPROFILE, …) — do not inherit the
+    /// full parent environment.
+    #[arg(long)]
+    pub no_inherit: bool,
+
+    /// The command to run, then its arguments (everything after `--`).
+    #[arg(trailing_var_arg = true, required = true, value_name = "COMMAND")]
+    pub command: Vec<String>,
+}
+
+/// `localpass env ...`
+#[derive(Debug, Subcommand)]
+pub enum EnvCommand {
+    /// Export an env-set to stdout (or a 0600 file) in a chosen format.
+    #[command(long_about = "Materialize an env-set's variables.\n\n\
+By default this prints plaintext secrets to stdout — an explicit, DISCOURAGED \
+path (the stdout leaks into your shell history, scrollback, and any pipe). \
+Prefer `localpass run`, which never writes secrets to disk or a terminal. Use \
+--file to write a 0600 file (Unix) instead of stdout.\n\n\
+FORMATS: dotenv (KEY=value, default), shell (export KEY='...' with safe \
+single-quote escaping), json (a flat object).")]
+    Export {
+        /// The env-set item to export (title or id).
+        env_set: String,
+        /// Vault to look in (name or id).
+        #[arg(long, default_value = "personal", value_name = "NAME_OR_ID")]
+        vault: String,
+        /// Output format.
+        #[arg(long, value_enum, default_value = "dotenv")]
+        format: EnvFormat,
+        /// Write to this file with 0600 permissions (Unix) instead of stdout.
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+    },
+    /// Import a dotenv file into a new env-set item (values never echoed).
+    Import {
+        /// The dotenv file to import.
+        path: PathBuf,
+        /// The title for the new env-set item.
+        #[arg(long = "as", value_name = "TITLE")]
+        title: String,
+        /// Vault to create the item in (name or id).
+        #[arg(long, default_value = "personal", value_name = "NAME_OR_ID")]
+        vault: String,
+    },
+    /// Diff a dotenv file against a stored env-set (keys only; values never
+    /// printed). Exits 1 if they differ.
+    Diff {
+        /// The dotenv file.
+        path: PathBuf,
+        /// The env-set item to compare against (title or id).
+        env_set: String,
+        /// Vault to look in (name or id).
+        #[arg(long, default_value = "personal", value_name = "NAME_OR_ID")]
+        vault: String,
+    },
+}
+
+/// Output format for `env export`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum EnvFormat {
+    /// `KEY=value` lines.
+    Dotenv,
+    /// `export KEY='value'` lines with single-quote escaping.
+    Shell,
+    /// A flat JSON object.
+    Json,
 }
 
 /// `localpass vault ...`
@@ -260,7 +388,11 @@ pub struct ContentArgs {
     #[arg(long)]
     pub username: Option<String>,
 
-    /// Password value. Mutually exclusive with --generate.
+    /// Password value, or `-` to read it from stdin (one line).
+    ///
+    /// WARNING: passing a secret directly on the command line exposes it in
+    /// process listings (`ps`, Task Manager) and your shell history. Prefer
+    /// `--password -` (pipe it), or `--generate` to never handle it yourself.
     #[arg(long, conflicts_with = "generate")]
     pub password: Option<String>,
 
@@ -285,10 +417,22 @@ pub struct ContentArgs {
     pub fields: Vec<String>,
 
     /// Custom hidden (secret) field `key=value` (repeatable).
+    ///
+    /// WARNING: the value is visible in process listings and shell history.
+    /// Prefer `--secret-field-stdin NAME` (reads the value from stdin) for
+    /// anything sensitive.
     #[arg(long = "secret-field", value_name = "KEY=VALUE")]
     pub secret_fields: Vec<String>,
 
+    /// Add a hidden (secret) field named NAME, reading its value from stdin
+    /// (one line) — keeps the secret out of argv. Use at most once per command.
+    #[arg(long = "secret-field-stdin", value_name = "NAME")]
+    pub secret_field_stdin: Option<String>,
+
     /// env-set entry `KEY=VALUE` (repeatable; env-set items).
+    ///
+    /// WARNING: the value is visible in process listings and shell history. For
+    /// bulk secrets prefer `--from-env-file`, or import with `env import`.
     #[arg(long = "env", value_name = "KEY=VALUE")]
     pub env: Vec<String>,
 

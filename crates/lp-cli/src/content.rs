@@ -12,6 +12,7 @@
 //! passwords are returned to the caller so it can decide whether to surface
 //! them (add: printed once; edit: silent).
 
+use std::io::Read;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -39,54 +40,58 @@ fn split_kv(arg: &str, flag: &str) -> Result<(String, String)> {
     }
 }
 
-/// Parse a simple `.env` file into ordered `(KEY, VALUE)` entries.
-///
-/// Rules (deliberately minimal): ignore blank lines and lines whose first
-/// non-space character is `#`; accept `KEY=VALUE`; strip an optional leading
-/// `export ` and surrounding quotes on the value. Values are never echoed on
-/// error.
+/// Parse a simple `.env` file into ordered [`EnvEntry`]s, delegating to the
+/// shared [`crate::dotenv`] parser (blank/comment skipping, `export ` prefix,
+/// single quote-pair stripping, no interpolation). Values are never echoed.
 fn parse_env_file(path: &Path) -> Result<Vec<EnvEntry>> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("reading env file {}", path.display()))?;
-    let mut out = Vec::new();
-    for (lineno, raw) in text.lines().enumerate() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let line = line.strip_prefix("export ").unwrap_or(line);
-        let Some((key, val)) = line.split_once('=') else {
-            bail!(
-                "malformed line {} in {} (expected KEY=VALUE)",
-                lineno + 1,
-                path.display()
-            );
-        };
-        let key = key.trim();
-        if key.is_empty() {
-            bail!("empty key on line {} in {}", lineno + 1, path.display());
-        }
-        // Strip matching surrounding quotes from the value only.
-        let val = val.trim();
-        let val = strip_quotes(val);
-        out.push(EnvEntry {
-            key: key.to_string(),
-            value: val.to_string(),
-        });
-    }
-    Ok(out)
+    Ok(crate::dotenv::parse_file(path)?
+        .into_iter()
+        .map(|e| EnvEntry {
+            key: e.key,
+            value: e.value,
+        })
+        .collect())
 }
 
-/// Strip a single pair of matching surrounding single/double quotes.
-fn strip_quotes(s: &str) -> &str {
-    let bytes = s.as_bytes();
-    if bytes.len() >= 2
-        && (bytes[0] == b'"' || bytes[0] == b'\'')
-        && bytes[bytes.len() - 1] == bytes[0]
-    {
-        &s[1..s.len() - 1]
-    } else {
-        s
+/// Read the whole of stdin as a secret value, stripping exactly one trailing
+/// line ending (LF or CRLF). Interior whitespace is preserved (a secret may
+/// legitimately contain it). Used by `--password -` and `--secret-field-stdin`.
+///
+/// The value is never echoed. At most one stdin-sourced secret may be requested
+/// per invocation (stdin cannot be split), enforced by the caller.
+fn read_secret_from_stdin(what: &str) -> Result<String> {
+    let mut buf = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buf)
+        .with_context(|| format!("reading {what} from stdin"))?;
+    let trimmed = buf
+        .strip_suffix('\n')
+        .map_or(buf.as_str(), |s| s.strip_suffix('\r').unwrap_or(s));
+    Ok(trimmed.to_string())
+}
+
+/// Resolve the effective password value from `--password` / `--generate`,
+/// honouring `--password -` (read one value from stdin). Returns the value and
+/// whether it was freshly generated.
+///
+/// `stdin_used` tracks whether stdin has already been consumed by another
+/// secret source this invocation, so `--password -` and `--secret-field-stdin`
+/// cannot both try to read the single stdin stream.
+fn resolve_password(args: &ContentArgs, stdin_used: &mut bool) -> Result<(Option<String>, bool)> {
+    if args.generate {
+        let g = generate::password(24, true)?;
+        return Ok((Some(g.secret), true));
+    }
+    match args.password.as_deref() {
+        Some("-") => {
+            if *stdin_used {
+                bail!("cannot read both --password and --secret-field-stdin from stdin");
+            }
+            *stdin_used = true;
+            Ok((Some(read_secret_from_stdin("password")?), false))
+        }
+        Some(other) => Ok((Some(other.to_string()), false)),
+        None => Ok((None, false)),
     }
 }
 
@@ -156,14 +161,14 @@ fn apply_common(
         }
     }
 
-    // Password (explicit or generated).
-    let mut generated = None;
-    let password_value: Option<String> = if args.generate {
-        let g = generate::password(24, true)?;
-        generated = Some(g.secret.clone());
-        Some(g.secret)
+    // Password (explicit, `--password -` from stdin, or generated). Track
+    // whether stdin has been consumed so a second stdin secret source errors.
+    let mut stdin_used = false;
+    let (password_value, was_generated) = resolve_password(args, &mut stdin_used)?;
+    let generated = if was_generated {
+        password_value.clone()
     } else {
-        args.password.clone()
+        None
     };
 
     // username / password / url land in different places by type.
@@ -209,6 +214,17 @@ fn apply_common(
         let (key, value) = split_kv(f, "secret-field")?;
         upsert_field(payload, &key, FieldKind::Hidden, json!(value));
     }
+    // --secret-field-stdin NAME: read one hidden field's value from stdin,
+    // keeping it out of argv (PRD §4.4 leakage hardening).
+    if let Some(name) = &args.secret_field_stdin {
+        if stdin_used {
+            bail!("cannot read both --password and --secret-field-stdin from stdin");
+        }
+        stdin_used = true;
+        let value = read_secret_from_stdin("secret field value")?;
+        upsert_field(payload, name, FieldKind::Hidden, json!(value));
+    }
+    let _ = stdin_used; // final state unused after the last consumer
 
     Ok(generated)
 }
@@ -306,6 +322,7 @@ mod tests {
             tags: vec![],
             fields: vec![],
             secret_fields: vec![],
+            secret_field_stdin: None,
             env: vec![],
             from_env_file: None,
         }

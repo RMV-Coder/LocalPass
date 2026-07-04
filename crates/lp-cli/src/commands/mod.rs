@@ -6,10 +6,12 @@
 //!
 //! [`PasswordSource`]: crate::unlock::PasswordSource
 
+pub mod env;
 pub mod generate;
 pub mod init;
 pub mod item;
 pub mod password;
+pub mod run;
 pub mod search;
 pub mod status;
 pub mod vault;

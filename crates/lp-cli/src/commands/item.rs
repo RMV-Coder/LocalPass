@@ -166,7 +166,7 @@ pub fn print_item_table(items: &[Item]) {
             "{:<width$}  {:<8}  {}",
             truncate(&it.payload.title, width),
             it.payload.type_data.type_str(),
-            it.updated_at,
+            crate::timestamp::format_millis_utc(it.updated_at),
             width = width
         );
     }

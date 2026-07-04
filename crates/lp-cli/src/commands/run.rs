@@ -1,0 +1,192 @@
+//! `localpass run [flags] -- <command> [args...]` — the flagship secret
+//! injection command (PRD §4.8, §7.2).
+//!
+//! Unlocks, composes the child environment from layered sources (env-sets <
+//! env-files < `-e`), resolves every reference **once**, then spawns the child
+//! with that environment. Plaintext secrets exist only in this process's memory
+//! and the child's environment — never on disk, never in the child's argv.
+//!
+//! # Spawn behaviour per OS
+//!
+//! - **Unix:** `exec()` replaces this process with the child (via
+//!   `std::os::unix::process::CommandExt::exec`, not an intra-doc link because
+//!   that path does not exist on the Windows doc build); LocalPass vanishes from
+//!   the process tree and the child's exit status is what the shell sees.
+//! - **Windows:** there is no `exec`. LocalPass spawns the child with inherited
+//!   stdio, waits for it, and exits with the child's exit code.
+
+use std::path::Path;
+use std::process::Command;
+
+use anyhow::Result;
+use lp_vault::Session;
+use lp_vault::payload::TypeData;
+
+use crate::cli::RunArgs;
+use crate::envmap::{OrderedEnv, base_env};
+use crate::error::CliError;
+use crate::reference;
+use crate::resolve;
+use crate::unlock::{self, PasswordSource};
+
+/// Run `localpass run`.
+///
+/// # Errors
+///
+/// - [`CliError::Auth`] (exit 2) on a wrong password / Secret Key.
+/// - [`CliError::Usage`] (exit 1) on an unresolvable reference, an unknown
+///   env-set / vault, or a spawn failure. The message names the failing KEY and
+///   reference, never a resolved value.
+pub fn run(profile_dir: &Path, src: PasswordSource, args: &RunArgs) -> Result<()> {
+    // `command` is guaranteed non-empty by clap (`required = true`).
+    let (program, program_args) = args
+        .command
+        .split_first()
+        .expect("clap guarantees a non-empty command");
+
+    let (session, _sk) = unlock::unlock(profile_dir, src)?;
+
+    // Compose the resolved variables (layering + precedence). Done before we
+    // touch the base environment so a resolution failure aborts cleanly.
+    let resolved = compose_resolved(&session, args)?;
+
+    // Base = full parent env (default) or the minimal passthrough (--no-inherit).
+    let mut child_env = base_env(!args.no_inherit);
+    for (k, v) in resolved.iter() {
+        child_env.set(k, v); // resolved vars override inherited ones
+    }
+
+    spawn(program, program_args, &child_env)
+}
+
+/// Compose the fully-resolved variable set from all sources, applying the
+/// precedence env-set < env-file < `-e`.
+fn compose_resolved(session: &Session, args: &RunArgs) -> Result<OrderedEnv> {
+    let mut env = OrderedEnv::new();
+
+    // 1) --env-set: pull every entry of each env-set item. Later sets override.
+    for set_ref in &args.env_sets {
+        let entries = load_env_set(session, &args.vault, set_ref)?;
+        for (k, v) in entries {
+            env.set(k, v);
+        }
+    }
+
+    // 2) --env-file: dotenv values may be references (resolved) or literals.
+    for path in &args.env_files {
+        for entry in crate::dotenv::parse_file(path)? {
+            let value = if reference::is_reference(&entry.value) {
+                resolve_named(session, &entry.key, &entry.value)?
+            } else {
+                entry.value
+            };
+            env.set(entry.key, value);
+        }
+    }
+
+    // 3) -e KEY=<reference>: highest precedence. The RHS is a reference.
+    for mapping in &args.env {
+        let (key, reference) = split_mapping(mapping)?;
+        let value = resolve_named(session, key, reference)?;
+        env.set(key.to_string(), value);
+    }
+
+    Ok(env)
+}
+
+/// Load all entries of an env-set item as `(key, value)` pairs.
+fn load_env_set(
+    session: &Session,
+    vault_ref: &str,
+    set_ref: &str,
+) -> Result<Vec<(String, String)>> {
+    let vault = resolve::open_vault(session, vault_ref)?;
+    let item = resolve::find_item(&vault, set_ref)?;
+    match &item.payload.type_data {
+        TypeData::EnvSet { entries } => Ok(entries
+            .iter()
+            .map(|e| (e.key.clone(), e.value.clone()))
+            .collect()),
+        other => Err(CliError::usage(format!(
+            "--env-set {set_ref:?} is a {} item, not an env-set",
+            other.type_str()
+        ))
+        .into()),
+    }
+}
+
+/// Split a `KEY=<reference>` mapping without ever putting the reference in a
+/// generic error (the reference is not itself secret, but keeping the shape
+/// consistent avoids surprises).
+fn split_mapping(mapping: &str) -> Result<(&str, &str)> {
+    match mapping.split_once('=') {
+        Some((k, v)) if !k.is_empty() && !v.is_empty() => Ok((k, v)),
+        _ => Err(CliError::usage(format!(
+            "malformed -e mapping (expected KEY=reference with non-empty parts): {mapping:?}"
+        ))
+        .into()),
+    }
+}
+
+/// Resolve a reference, attaching the KEY to any error so the user knows which
+/// variable failed — **without** leaking the resolved value (there is none on
+/// the failure path; on success the value is returned, never logged).
+fn resolve_named(session: &Session, key: &str, reference: &str) -> Result<String> {
+    reference::resolve_str(session, reference).map_err(|e| {
+        // Re-wrap as a Usage error naming the KEY and the (non-secret)
+        // reference. The underlying message already avoids any secret value.
+        CliError::usage(format!(
+            "could not resolve {key}={reference}: {}",
+            root_message(&e)
+        ))
+        .into()
+    })
+}
+
+/// Extract the leaf human message from an error chain (avoids a `Debug` dump).
+fn root_message(e: &anyhow::Error) -> String {
+    format!("{e:#}")
+}
+
+/// Spawn the child with the composed environment.
+///
+/// Unix: exec-replace (never returns on success). Windows: spawn + wait +
+/// propagate the exit code.
+fn spawn(program: &str, args: &[String], env: &OrderedEnv) -> Result<()> {
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    // Start from an empty environment and set exactly our composed map, so
+    // --no-inherit genuinely means "only these" and inheritance is explicit.
+    cmd.env_clear();
+    for (k, v) in env.iter() {
+        cmd.env(k, v);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // exec() only returns on failure; on success this process is replaced.
+        let err = cmd.exec();
+        Err(CliError::usage(format!("failed to exec {program:?}: {err}")).into())
+    }
+
+    #[cfg(not(unix))]
+    {
+        spawn_and_wait(cmd, program)
+    }
+}
+
+/// Windows (and any non-Unix) path: spawn, inherit stdio, wait, and exit with
+/// the child's code. Split out so it is unit-testable without `#[cfg]` noise.
+#[cfg(not(unix))]
+fn spawn_and_wait(mut cmd: Command, program: &str) -> Result<()> {
+    let status = cmd
+        .status()
+        .map_err(|e| CliError::usage(format!("failed to spawn {program:?}: {e}")))?;
+    // Propagate the child's exit code. `process::exit` skips destructors, but at
+    // this point the only sensitive data is the child's own environment (which
+    // the OS owns now); this process holds no unzeroized key material of its own
+    // beyond what Session drops, and we are terminating anyway.
+    let code = status.code().unwrap_or(1);
+    std::process::exit(code);
+}

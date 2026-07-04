@@ -27,11 +27,15 @@
 mod cli;
 mod commands;
 mod content;
+mod dotenv;
+mod envmap;
 mod error;
 mod generate;
 mod output;
 mod profile;
+mod reference;
 mod resolve;
+mod timestamp;
 mod unlock;
 mod wordlist;
 
@@ -81,5 +85,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         } => commands::search::run(&profile_dir, src, query, *item_type, vault, *json),
         Command::Generate(args) => commands::generate::run(args),
         Command::Password { command } => commands::password::run(&profile_dir, src, command),
+        Command::Run(args) => commands::run::run(&profile_dir, src, args),
+        Command::Env { command } => commands::env::run(&profile_dir, src, command),
     }
 }
