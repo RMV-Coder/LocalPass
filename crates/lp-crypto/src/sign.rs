@@ -97,6 +97,29 @@ impl SigningKeyPair {
         let sig: Signature = self.signing_key.sign(&payload);
         Ok(sig.to_bytes())
     }
+
+    /// Export the 32-byte secret seed — for **encrypted persistence only**.
+    ///
+    /// Exists solely so the storage layer can persist the device identity
+    /// wrapped under the AccountKey (vault-format.md §2) and reconstruct it at
+    /// unlock via [`SigningKeyPair::from_seed`]. The returned buffer zeroizes
+    /// on drop; callers must encrypt it immediately and never write it to
+    /// disk, logs, or any other sink in plaintext.
+    #[must_use]
+    pub fn secret_seed(&self) -> zeroize::Zeroizing<[u8; 32]> {
+        zeroize::Zeroizing::new(self.signing_key.to_bytes())
+    }
+
+    /// Reconstruct a keypair from a previously exported 32-byte seed.
+    ///
+    /// Deterministic: the same seed always yields the same keypair (and thus
+    /// the same [`VerifyingKey`]).
+    #[must_use]
+    pub fn from_seed(seed: &[u8; 32]) -> Self {
+        Self {
+            signing_key: SigningKey::from_bytes(seed),
+        }
+    }
 }
 
 impl core::fmt::Debug for SigningKeyPair {
@@ -154,5 +177,26 @@ impl VerifyingKey {
 impl core::fmt::Debug for VerifyingKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("VerifyingKey(..)")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seed_roundtrip_reconstructs_identity() {
+        let original = SigningKeyPair::generate();
+        let restored = SigningKeyPair::from_seed(&original.secret_seed());
+        assert_eq!(
+            original.verifying_key().to_bytes(),
+            restored.verifying_key().to_bytes()
+        );
+        // Signatures from the restored pair verify under the original public key.
+        let sig = restored.sign(CONTEXT_SYNC_OP, b"msg").unwrap();
+        original
+            .verifying_key()
+            .verify(CONTEXT_SYNC_OP, b"msg", &sig)
+            .unwrap();
     }
 }

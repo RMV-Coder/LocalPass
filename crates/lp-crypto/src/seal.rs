@@ -114,6 +114,29 @@ impl SealingKeyPair {
         self.public.clone()
     }
 
+    /// Export the 32-byte X25519 secret — for **encrypted persistence only**.
+    ///
+    /// Exists solely so the storage layer can persist the device identity
+    /// wrapped under the AccountKey (vault-format.md §2) and reconstruct it at
+    /// unlock via [`SealingKeyPair::from_secret_bytes`]. The returned buffer
+    /// zeroizes on drop; callers must encrypt it immediately and never write
+    /// it to disk, logs, or any other sink in plaintext.
+    #[must_use]
+    pub fn secret_bytes(&self) -> zeroize::Zeroizing<[u8; 32]> {
+        zeroize::Zeroizing::new(self.secret.to_bytes())
+    }
+
+    /// Reconstruct a keypair from previously exported secret bytes.
+    ///
+    /// Deterministic: the same bytes always yield the same keypair (and thus
+    /// the same [`PublicSealingKey`]).
+    #[must_use]
+    pub fn from_secret_bytes(bytes: &[u8; 32]) -> Self {
+        let secret = StaticSecret::from(*bytes);
+        let public = PublicSealingKey(PublicKey::from(&secret));
+        Self { secret, public }
+    }
+
     /// Open a message produced by [`seal_for`] addressed to this keypair.
     ///
     /// # Errors
@@ -236,6 +259,19 @@ mod tests {
         let recipient = PublicSealingKey::from_bytes(LOW_ORDER_PK);
         let err = seal_for(&recipient, b"secret", b"aad").unwrap_err();
         assert!(matches!(err, Error::InvalidPublicKey(_)));
+    }
+
+    #[test]
+    fn secret_bytes_roundtrip_reconstructs_identity() {
+        let original = SealingKeyPair::generate();
+        let restored = SealingKeyPair::from_secret_bytes(&original.secret_bytes());
+        assert_eq!(
+            original.public_key().to_bytes(),
+            restored.public_key().to_bytes()
+        );
+        // A message sealed to the original public key opens with the restored pair.
+        let sealed = seal_for(&original.public_key(), b"secret", b"aad").unwrap();
+        assert_eq!(restored.open(&sealed, b"aad").unwrap(), b"secret");
     }
 
     #[test]

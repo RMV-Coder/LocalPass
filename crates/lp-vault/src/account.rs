@@ -6,28 +6,18 @@
 //! holding the live [`AccountKey`] and device identity, from which vaults are
 //! created and opened.
 //!
-//! # Device identity — a flagged lp-crypto gap
+//! # Device identity persistence
 //!
 //! vault-format.md §2 stores the device Ed25519 signing seed and X25519 scalar
 //! **wrapped under the AccountKey** so the identity is reconstructed at every
-//! unlock. `lp-crypto`'s [`SigningKeyPair`] and [`SealingKeyPair`] expose
-//! **no** private-seed export and **no** from-seed constructor (only
-//! `generate()`), so the private halves cannot round-trip through the crate as
-//! the spec intends.
-//!
-//! Resolution (documented, spec-faithful where possible; see the crate report):
-//! the live [`Session`] carries the signing/sealing keypairs generated at
-//! account creation and keeps them in memory until [`Session::lock`]. The
-//! `device_identity` row persists the **public** halves plaintext (exactly as
-//! the spec requires) and, for the `*_priv_env` columns, an AccountKey-wrapped
-//! 32-byte value with the spec's exact AAD — so the schema, AAD binding, and
-//! encryption are all honored. On unlock the device **public** identity is
-//! loaded (which is all that op-chain *verification* needs — it uses the stored
-//! public key), and a fresh in-memory signing key backs any **new** op authored
-//! in that session. Authoring across an unlock therefore uses a session-scoped
-//! key rather than the persisted seed; this is the single behavior that a
-//! one-line `from_seed`/`seed_bytes` addition to `lp-crypto` would make fully
-//! spec-exact. Verification, and everything else, is unaffected.
+//! unlock. The private halves are exported via `lp-crypto`'s
+//! `secret_seed()`/`secret_bytes()` (zeroizing buffers), sealed under the
+//! AccountKey with the spec's exact AAD, and reconstructed at unlock with
+//! `from_seed`/`from_secret_bytes`. After reconstruction the public halves are
+//! checked against the stored plaintext publics — a mismatch fails the unlock
+//! rather than silently authoring ops under a divergent identity. This keeps
+//! the device's op-signing key stable across lock/unlock, which the sync hash
+//! chain requires (sync-protocol.md §5: peers pin one public key per device).
 
 use lp_crypto::{
     AccountKey, KdfParams, SealingKeyPair, SecretKey, SigningKeyPair, VaultKey,
@@ -224,6 +214,30 @@ fn aad_str(bytes: &[u8]) -> &str {
     std::str::from_utf8(bytes).expect("account-store AAD is UTF-8")
 }
 
+/// Open an AccountKey-sealed envelope expected to contain exactly 32 secret
+/// bytes, returning them in a zeroizing buffer. The intermediate heap
+/// plaintext is wiped on every path, including the length-mismatch error.
+fn open_secret_32(
+    account_key: &AccountKey,
+    envelope_bytes: &[u8],
+    aad: &[u8],
+    len_err: &'static str,
+) -> Result<zeroize::Zeroizing<[u8; 32]>> {
+    use zeroize::Zeroize;
+    let envelope = lp_crypto::Envelope::from_bytes(envelope_bytes).map_err(Error::from_crypto)?;
+    let mut plain = account_key
+        .open(&envelope, aad)
+        .map_err(Error::from_crypto)?;
+    if plain.len() != 32 {
+        plain.zeroize();
+        return Err(Error::Invalid(len_err));
+    }
+    let mut out = zeroize::Zeroizing::new([0u8; 32]);
+    out.copy_from_slice(&plain);
+    plain.zeroize();
+    Ok(out)
+}
+
 /// This device's identity: the live keypairs and their public bytes.
 ///
 /// Private keypairs are held in memory for the [`Session`] lifetime and dropped
@@ -259,33 +273,21 @@ impl DeviceIdentity {
 
     /// Insert the `device_identity` row.
     ///
-    /// Publics are plaintext; the private envelopes are AccountKey-wrapped with
-    /// the spec's exact AAD. See the module-level gap note for why the wrapped
-    /// value is not a round-trippable seed under the current `lp-crypto` API.
+    /// Publics are plaintext; the private halves are the **real** Ed25519 seed
+    /// and X25519 secret, sealed under the AccountKey with the spec's exact
+    /// AAD (vault-format.md §2), so [`DeviceIdentity::load`] can reconstruct
+    /// the identity at every unlock.
     fn insert(&self, tx: &Connection, account_key: &AccountKey, now: i64) -> Result<()> {
-        // The `*_priv_env` columns must be Envelope v1 ciphertext under the
-        // AccountKey, with the spec's exact AAD (vault-format.md §2). lp-crypto
-        // exposes no way to export the real Ed25519 seed / X25519 scalar (see
-        // module docs), so we wrap a fresh 32-byte symmetric secret via
-        // `wrap_key` — this yields a correctly-shaped, correctly-AAD'd envelope
-        // without reading any private bytes. It is *not* used to reconstruct the
-        // keypair; that path needs an lp-crypto `from_seed`/`seed_bytes`. The
-        // AAD and format are exact so a future migration can swap in the real
-        // seed with no schema change.
-        let ed_placeholder = lp_crypto::SymmetricKey::generate();
-        let x_placeholder = lp_crypto::SymmetricKey::generate();
-        let ed_env = wrap_key(
-            account_key.inner(),
-            &ed_placeholder,
-            aad_str(&aad::device_ed25519(&self.device_id)),
-        )
-        .map_err(Error::from_crypto)?;
-        let x_env = wrap_key(
-            account_key.inner(),
-            &x_placeholder,
-            aad_str(&aad::device_x25519(&self.device_id)),
-        )
-        .map_err(Error::from_crypto)?;
+        // secret_seed()/secret_bytes() return zeroizing buffers; they are
+        // sealed immediately and never leave this scope in plaintext.
+        let ed_seed = self.signing.secret_seed();
+        let x_secret = self.sealing.secret_bytes();
+        let ed_env = account_key
+            .seal(&ed_seed[..], &aad::device_ed25519(&self.device_id))
+            .map_err(Error::from_crypto)?;
+        let x_env = account_key
+            .seal(&x_secret[..], &aad::device_x25519(&self.device_id))
+            .map_err(Error::from_crypto)?;
         tx.execute(
             "INSERT INTO device_identity
                 (device_id, ed25519_pub, x25519_pub, ed25519_priv_env, x25519_priv_env, created_at, label)
@@ -302,18 +304,23 @@ impl DeviceIdentity {
         Ok(())
     }
 
-    /// Load the device identity at unlock: read the stored public keys and
-    /// device_id, and back new authoring with a fresh in-memory keypair (see
-    /// module docs for why the persisted seed cannot be reconstructed).
-    fn load(conn: &Connection, _account_key: &AccountKey) -> Result<Self> {
-        let (device_id, ed_pub, x_pub) = conn.query_row(
-            "SELECT device_id, ed25519_pub, x25519_pub FROM device_identity LIMIT 1",
+    /// Load the device identity at unlock: decrypt the persisted Ed25519 seed
+    /// and X25519 secret under the AccountKey and reconstruct the keypairs,
+    /// then verify the reconstructed publics match the stored plaintext
+    /// publics (fail the unlock on mismatch rather than author ops under a
+    /// divergent identity).
+    fn load(conn: &Connection, account_key: &AccountKey) -> Result<Self> {
+        let (device_id, ed_pub, x_pub, ed_env, x_env) = conn.query_row(
+            "SELECT device_id, ed25519_pub, x25519_pub, ed25519_priv_env, x25519_priv_env
+               FROM device_identity LIMIT 1",
             [],
             |r| {
                 let d: Vec<u8> = r.get(0)?;
                 let e: Vec<u8> = r.get(1)?;
                 let x: Vec<u8> = r.get(2)?;
-                Ok((d, e, x))
+                let ee: Vec<u8> = r.get(3)?;
+                let xe: Vec<u8> = r.get(4)?;
+                Ok((d, e, x, ee, xe))
             },
         )?;
         let device_id = Id::from_slice(&device_id)?;
@@ -325,10 +332,32 @@ impl DeviceIdentity {
             .as_slice()
             .try_into()
             .map_err(|_| Error::Invalid("stored x25519_pub was not 32 bytes"))?;
+
+        let signing = SigningKeyPair::from_seed(&*open_secret_32(
+            account_key,
+            &ed_env,
+            &aad::device_ed25519(&device_id),
+            "stored ed25519 seed was not 32 bytes",
+        )?);
+        let sealing = SealingKeyPair::from_secret_bytes(&*open_secret_32(
+            account_key,
+            &x_env,
+            &aad::device_x25519(&device_id),
+            "stored x25519 secret was not 32 bytes",
+        )?);
+
+        if signing.verifying_key().to_bytes() != ed25519_pub
+            || sealing.public_key().to_bytes() != x25519_pub
+        {
+            return Err(Error::Invalid(
+                "device identity public keys do not match reconstructed secrets",
+            ));
+        }
+
         Ok(Self {
             device_id,
-            signing: SigningKeyPair::generate(),
-            sealing: SealingKeyPair::generate(),
+            signing,
+            sealing,
             ed25519_pub,
             x25519_pub,
         })
