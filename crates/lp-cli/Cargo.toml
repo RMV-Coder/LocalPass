@@ -1,0 +1,52 @@
+[package]
+name = "lp-cli"
+description = "LocalPass command-line interface (the `localpass` binary): account init, vault and item CRUD, generation, and password change — a fully local, direct-unlock CLI (no daemon yet)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "localpass"
+path = "src/main.rs"
+
+[dependencies]
+# --- The storage/crypto core we drive. lp-cli holds NO crypto primitives; it
+# --- unlocks through lp-vault and only handles the SecretKey display string via
+# --- lp-crypto's high-level SecretKey type (crypto-boundary rule, LESSONS.md). ---
+lp-vault = { path = "../lp-vault" }
+lp-crypto = { path = "../lp-crypto" }
+# --- Argument parsing. clap v4 derive gives a typed command tree, generated
+# --- --help, and stable long-flag names — the documented CLI contract (PRD §4.4). ---
+clap = { version = "4", features = ["derive"] }
+# --- Hidden password prompts read straight from the TTY (never echoed, never in
+# --- argv). The only supported interactive secret-entry path (PRD §4.4 UX rules). ---
+rpassword = "7"
+# --- Platform data dir resolution for the default --profile
+# --- (%APPDATA%/localpass, ~/.local/share/localpass, ~/Library/...). ---
+directories = "5"
+# --- Binary-only error context. anyhow is used ONLY in the CLI (never in a
+# --- library crate): it lets each command attach a one-line human message that
+# --- we render to stderr, mapping to the documented exit codes. ---
+anyhow = "1"
+# --- Stable, documented --json output. Also parses `key=value` field flags into
+# --- typed payload values via serde_json::Value. ---
+serde_json = "1"
+# --- Generation randomness ONLY. This is the same OS CSPRNG lp-crypto uses
+# --- (getrandom → OsRng, PRD §5.2); permitted here for password/passphrase
+# --- generation because no key-hierarchy secret is involved. NOT used for any
+# --- key material — that always comes from lp-crypto. ---
+getrandom = "0.3"
+# --- Parse hyphenated UUID strings back into lp-vault ids (item/vault lookup by
+# --- id). lp-vault re-exports Id but not a string parser, so we parse the
+# --- canonical hyphenated form ourselves. Same crate/version lp-vault pins. ---
+uuid = { version = "1", features = ["v7"] }
+
+[dev-dependencies]
+# --- Black-box CLI integration tests: spawn the built `localpass` binary,
+# --- assert on exit codes and stdout/stderr (assert_cmd + predicates), each in
+# --- its own tempdir profile with LOCALPASS_PASSWORD (tempfile). ---
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
