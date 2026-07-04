@@ -200,6 +200,31 @@ fn otpauth_hotp_and_type_mismatch_rejected() {
         .stderr(contains("totp"));
 }
 
+/// `item add --type totp --otpauth-uri` with NO `--title` defaults the title
+/// to the URI's issuer/account label ("Issuer (account)").
+#[test]
+fn otpauth_import_without_title_uses_uri_label() {
+    let profile = TestProfile::initialized();
+    let uri = format!(
+        "otpauth://totp/ACME%20Co:alice@acme.com?secret={RFC_SEED_B32}&issuer=ACME%20Co&digits=6&period=30"
+    );
+    // No --title flag at all.
+    profile
+        .cmd()
+        .args(["item", "add", "--type", "totp", "--otpauth-uri"])
+        .arg(&uri)
+        .assert()
+        .success()
+        .stdout(contains("ACME Co (alice@acme.com)"));
+
+    // The item is addressable by that derived title.
+    profile
+        .cmd()
+        .args(["totp", "ACME Co (alice@acme.com)"])
+        .assert()
+        .success();
+}
+
 /// A missing totp item is a user error (exit 1).
 #[test]
 fn totp_missing_item_is_user_error() {

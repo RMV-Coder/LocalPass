@@ -1169,9 +1169,10 @@ pub struct ItemAddArgs {
     )]
     pub item_type: ItemType,
 
-    /// Item title (required).
+    /// Item title. Required, except with `--otpauth-uri`, where it defaults to
+    /// the URI's issuer/account label.
     #[arg(long)]
-    pub title: String,
+    pub title: Option<String>,
 
     /// For `--type totp`: populate the item from an `otpauth://totp/...` URI
     /// (the string a 2FA QR code encodes). The secret, issuer, account,

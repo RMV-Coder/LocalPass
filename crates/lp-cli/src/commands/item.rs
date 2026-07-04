@@ -126,16 +126,44 @@ fn run_proxied(
 
 // --- add -----------------------------------------------------------------
 
+/// Resolve the title for `item add`: the explicit `--title`, or — for a totp
+/// item created from an `--otpauth-uri` — a title derived from the URI's
+/// issuer/account label ("Issuer (account)", or whichever half is present).
+/// Errors if neither a title nor a usable URI label is available.
+fn effective_add_title(args: &ItemAddArgs) -> Result<String> {
+    if let Some(t) = &args.title {
+        return Ok(t.clone());
+    }
+    if let Some(uri) = &args.otpauth_uri {
+        let parsed = crate::otpauth::parse(uri)?;
+        let title = match (parsed.issuer.trim(), parsed.account.trim()) {
+            ("", "") => String::new(),
+            (issuer, "") => issuer.to_string(),
+            ("", account) => account.to_string(),
+            (issuer, account) => format!("{issuer} ({account})"),
+        };
+        if !title.is_empty() {
+            return Ok(title);
+        }
+        return Err(CliError::usage(
+            "the otpauth URI has no issuer/account label; pass --title explicitly",
+        )
+        .into());
+    }
+    Err(CliError::usage("a --title is required").into())
+}
+
 fn add(session: &lp_vault::Session, args: &ItemAddArgs) -> Result<()> {
     let vault = resolve::open_vault(session, &args.content.vault)?;
+    let title = effective_add_title(args)?;
     let (payload, built) = content::build_new(
         args.item_type,
-        &args.title,
+        &title,
         &args.content,
         args.otpauth_uri.as_deref(),
     )?;
     let id = vault.create_item(&payload).map_err(map_vault_error)?;
-    println!("added {:?} ({})", args.title, id.to_hyphenated());
+    println!("added {:?} ({})", title, id.to_hyphenated());
     if let Some(pw) = built.generated_password {
         // The generated password is shown once, on its own line, so the user
         // can capture it. (This is an explicit user action: --generate.)
@@ -411,9 +439,10 @@ fn expect_ok_message(resp: &Response) -> Result<Option<String>> {
 }
 
 fn add_proxied(profile: &str, client: &mut Client, args: &ItemAddArgs) -> Result<()> {
+    let title = effective_add_title(args)?;
     let (payload, built) = content::build_new(
         args.item_type,
-        &args.title,
+        &title,
         &args.content,
         args.otpauth_uri.as_deref(),
     )?;
@@ -427,7 +456,7 @@ fn add_proxied(profile: &str, client: &mut Client, args: &ItemAddArgs) -> Result
         },
     )?;
     let id = expect_ok_message(&resp)?.unwrap_or_default();
-    println!("added {:?} ({id})", args.title);
+    println!("added {:?} ({id})", title);
     if let Some(pw) = built.generated_password {
         println!("generated password: {pw}");
     }
