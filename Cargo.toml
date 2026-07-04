@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+# apps/* (the MPL-2.0 Tauri desktop app) are their own workspace so the
+# AGPL core's gates stay fast and never build the GUI.
+exclude = ["apps"]
 
 [workspace.package]
 version = "0.1.0"
