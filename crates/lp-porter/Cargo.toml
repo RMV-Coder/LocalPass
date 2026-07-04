@@ -1,0 +1,45 @@
+[package]
+name = "lp-porter"
+description = "LocalPass import/export: parse foreign password-manager exports into LocalPass items, and write the age-encrypted recoverable archive (PRD §4.6 / §6.9)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# --- The item model we import INTO and export FROM. lp-porter builds
+# --- `lp_vault::ItemPayload` values; the CLI persists them. We consume only
+# --- lp-vault's public payload model, never its storage internals. ---
+lp-vault = { path = "../lp-vault" }
+# --- FOREIGN-FORMAT crypto exception (documented in lib.rs): `age` reads/writes
+# --- the standalone-age archive format — an external standard, not LocalPass's
+# --- own envelope crypto (which stays in lp-crypto). The `armor` feature is off:
+# --- we emit the binary age format, whose header magic is exactly what the
+# --- `age` CLI expects, keeping the archive small. ---
+age = { version = "0.11", default-features = false }
+# --- ZIP reader for the 1Password .1pux container (a ZIP holding export.data).
+# --- default-features off + only `deflate`: 1PUX uses store/deflate, so we skip
+# --- bzip2/zstd/lzma/aes C-and-Rust deps and keep the tree lean. ---
+zip = { version = "8", default-features = false, features = ["deflate"] }
+# --- LastPass and generic CSV parsing/writing (RFC 4180, quoting, embedded
+# --- newlines). Hand-rolling CSV quote handling is a footgun; `csv` is the
+# --- standard, well-fuzzed choice. ---
+csv = "1"
+# --- tar container for the age archive body: a documented, ubiquitous format so
+# --- `age -d | tar -x` round-trips outside LocalPass (PRD §6.9 exit hatch). ---
+tar = "0.4"
+# --- serde model for the archive JSON and for parsing 1PUX / Bitwarden JSON.
+# --- serde_json's untyped `Value` lets us tolerate unknown/extra foreign fields
+# --- without a brittle exhaustive schema. ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# --- One error enum; no secret ever appears in a message (workspace-pinned). ---
+thiserror = { workspace = true }
+# --- Drop-zeroed containers for the age passphrase and any transient plaintext
+# --- we hold while building the archive (workspace-pinned). ---
+zeroize = { workspace = true }
+
+[dev-dependencies]
+# --- Isolated temp dirs / files for round-trip and malformed-input tests. ---
+tempfile = "3"

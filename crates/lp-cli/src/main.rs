@@ -102,6 +102,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Password { command } => commands::password::run(&profile_dir, src, command),
         Command::Run(args) => commands::run::run(&profile_dir, src, no_daemon, args),
         Command::Env { command } => commands::env::run(&profile_dir, src, no_daemon, command),
+        Command::Import(args) => commands::import::run(&profile_dir, src, no_daemon, args),
+        Command::Export(args) => commands::export::run(&profile_dir, src, no_daemon, args),
         Command::Unlock => commands::daemon::run_unlock(&profile_dir, src),
         Command::Lock => commands::daemon::run_lock(&profile_dir),
         Command::Daemon { command } => commands::daemon::run(&profile_dir, command),

@@ -131,6 +131,12 @@ pub enum Command {
         command: EnvCommand,
     },
 
+    /// Import items from another password manager's export (PRD §4.6).
+    Import(ImportArgs),
+
+    /// Export items — the recoverable age archive, or guarded plaintext (§4.6).
+    Export(ExportArgs),
+
     /// Unlock the vault in the background daemon so later commands don't
     /// re-prompt. Starts the daemon if it isn't running, then sends the
     /// password to it (over the same-user-only local IPC channel).
@@ -290,6 +296,121 @@ pub enum EnvFormat {
     Shell,
     /// A flat JSON object.
     Json,
+}
+
+/// The source format for `localpass import`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ImportFormat {
+    /// 1Password `.1pux` export (a ZIP containing export.data).
+    #[value(name = "1password")]
+    OnePassword,
+    /// Bitwarden unencrypted JSON export.
+    Bitwarden,
+    /// LastPass CSV export.
+    Lastpass,
+    /// Generic CSV with an explicit column mapping (`--map field=COLUMN`).
+    Csv,
+    /// A `.env` file → one env-set item.
+    Env,
+    /// KeePass KDBX 4 database (not yet supported; see docs).
+    Kdbx,
+    /// A LocalPass age archive (re-import of `localpass export age`).
+    Age,
+}
+
+/// `localpass import <format> <path> [flags]`
+#[derive(Debug, Args)]
+#[command(
+    long_about = "Import items from another password manager's export.\n\n\
+FORMATS: 1password (.1pux), bitwarden (JSON), lastpass (CSV), csv (generic, \
+needs --map), env (.env → one env-set), kdbx (KeePass — NOT yet supported), \
+age (a LocalPass age archive).\n\n\
+The input file is only READ — it is never modified or deleted. On a partial \
+parse, LocalPass imports every entry it understands and reports the count plus \
+the titles it skipped (never a secret value).\n\n\
+GENERIC CSV: map columns with repeated --map, e.g. \
+--map title=Name --map username=Login --map password=Secret. Only title is \
+required.\n\n\
+KDBX / AGE: pass the database/archive passphrase via --kdbx-password-stdin \
+(read from stdin) or you will be prompted."
+)]
+pub struct ImportArgs {
+    /// The source format.
+    #[arg(value_enum)]
+    pub format: ImportFormat,
+
+    /// Path to the export file to import.
+    pub path: PathBuf,
+
+    /// Vault to create the imported items in (name or id).
+    #[arg(long, default_value = "personal", value_name = "NAME_OR_ID")]
+    pub vault: String,
+
+    /// Column mapping for generic CSV: `field=COLUMN` (repeatable). `field` is
+    /// one of title/username/password/url/notes.
+    #[arg(long = "map", value_name = "FIELD=COLUMN")]
+    pub map: Vec<String>,
+
+    /// Title for the new env-set (env format only; default: the file stem).
+    #[arg(long = "as", value_name = "TITLE")]
+    pub title: Option<String>,
+
+    /// Read the KDBX / age archive passphrase from stdin instead of prompting.
+    #[arg(long)]
+    pub kdbx_password_stdin: bool,
+}
+
+/// The target format for `localpass export`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ExportFormat {
+    /// age-encrypted, recoverable archive (decryptable by the standalone `age`
+    /// tool). The default and only safe export.
+    Age,
+    /// Plaintext JSON (ALL secrets in cleartext) — requires the guard flag.
+    Json,
+    /// Plaintext CSV (login-style columns in cleartext) — requires the guard.
+    Csv,
+    /// A single env-set item → dotenv `KEY=value` lines.
+    Dotenv,
+}
+
+/// `localpass export <format> <path> [flags]`
+#[derive(Debug, Args)]
+#[command(long_about = "Export items to a file.\n\n\
+FORMATS: age (encrypted, recoverable with the standalone `age` tool — the \
+recommended exit hatch), json / csv (PLAINTEXT, all secrets in cleartext — \
+guarded), dotenv (one env-set → KEY=value lines).\n\n\
+age: you are prompted for a passphrase twice (or pipe it once via \
+--passphrase-stdin). The archive is `age -d`-decryptable: \
+`age -d out.age | tar -xO vault.json` yields the item JSON.\n\n\
+PLAINTEXT (json/csv): refused unless you pass --i-understand-plaintext-export. \
+These write your secrets UNENCRYPTED to disk — avoid unless you truly need it.\n\n\
+dotenv: pass --env-set <title|id> to choose the env-set item to render.")]
+pub struct ExportArgs {
+    /// The target format.
+    #[arg(value_enum)]
+    pub format: ExportFormat,
+
+    /// Output file path.
+    pub path: PathBuf,
+
+    /// Vault(s) to export (name or id). Repeatable; default: `personal`.
+    /// Ignored by `dotenv` (which exports a single env-set item).
+    #[arg(long, value_name = "NAME_OR_ID")]
+    pub vault: Vec<String>,
+
+    /// Required acknowledgement for the plaintext json/csv formats: without it,
+    /// those formats refuse to run.
+    #[arg(long)]
+    pub i_understand_plaintext_export: bool,
+
+    /// Read the age passphrase from stdin (one line) instead of prompting twice.
+    #[arg(long)]
+    pub passphrase_stdin: bool,
+
+    /// The env-set item (title or id) to render for the `dotenv` format.
+    #[arg(long = "env-set", value_name = "TITLE_OR_ID")]
+    pub env_set: Option<String>,
 }
 
 /// `localpass vault ...`

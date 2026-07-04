@@ -22,6 +22,10 @@ lp-crypto = { path = "../lp-crypto" }
 # --- spawns the separate `localpass-daemon` binary. Shares the wire protocol and
 # --- item-render model so proxied output matches direct-unlock output. ---
 lp-daemon = { path = "../lp-daemon" }
+# --- Import/export logic. The porter parses foreign exports into ItemPayloads
+# --- (which this CLI then creates in a vault) and writes/reads the age archive.
+# --- The CLI owns storage + prompting; the porter is pure format I/O. ---
+lp-porter = { path = "../lp-porter" }
 # --- Argument parsing. clap v4 derive gives a typed command tree, generated
 # --- --help, and stable long-flag names — the documented CLI contract (PRD §4.4). ---
 clap = { version = "4", features = ["derive"] }
@@ -47,6 +51,10 @@ getrandom = "0.3"
 # --- id). lp-vault re-exports Id but not a string parser, so we parse the
 # --- canonical hyphenated form ourselves. Same crate/version lp-vault pins. ---
 uuid = { version = "1", features = ["v7"] }
+# --- Drop-zeroed containers for the age-archive passphrase, handled like a
+# --- master password (prompted twice / stdin, zeroized) before it crosses into
+# --- lp-porter (workspace-pinned). ---
+zeroize = { workspace = true }
 
 [dev-dependencies]
 # --- Black-box CLI integration tests: spawn the built `localpass` binary,
@@ -55,3 +63,6 @@ uuid = { version = "1", features = ["v7"] }
 assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
+# --- Authoring a .1pux fixture (a ZIP holding export.data) inline in the
+# --- import integration test. Same crate/features lp-porter uses. ---
+zip = { version = "8", default-features = false, features = ["deflate"] }
