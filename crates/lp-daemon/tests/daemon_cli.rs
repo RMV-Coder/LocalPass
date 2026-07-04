@@ -178,19 +178,25 @@ fn status_and_wrong_password() {
     p.cmd().args(["daemon", "stop"]).assert().success();
 }
 
-/// Auto-lock with a 1-second timeout actually locks after the idle window.
+/// Auto-lock with a short timeout actually locks after the idle window.
+///
+/// The window is 4s (not 1s): each CLI invocation is a fresh process whose
+/// spawn + connect overhead can exceed a second on a cold machine, and a
+/// 1-second window let the daemon lock before the first status check could
+/// land (observed post-reboot). 4s gives the check ample headroom while the
+/// post-window sleep (6s) still stays well past it.
 #[test]
 fn autolock_locks_after_idle() {
     let p = DaemonProfile::initialized("autolock");
 
-    // Start with a 1-second idle auto-lock.
+    // Start with a 4-second idle auto-lock.
     p.cmd()
-        .args(["daemon", "start", "--autolock", "1"])
+        .args(["daemon", "start", "--autolock", "4"])
         .assert()
         .success();
     p.cmd().arg("unlock").assert().success();
 
-    // Immediately unlocked.
+    // Immediately unlocked (this status itself resets the idle timer).
     p.cmd()
         .args(["daemon", "status"])
         .assert()
@@ -198,7 +204,7 @@ fn autolock_locks_after_idle() {
         .stdout(contains("unlocked"));
 
     // Wait past the idle window, then it must be locked.
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    std::thread::sleep(std::time::Duration::from_secs(6));
     p.cmd()
         .args(["daemon", "status"])
         .assert()
