@@ -18,6 +18,7 @@
 pub mod commands;
 pub mod daemon;
 pub mod generate;
+pub mod item_input;
 pub mod model;
 mod wordlist;
 
@@ -32,6 +33,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::ensure_service,
             commands::status,
+            commands::create_account,
             commands::unlock,
             commands::lock,
             commands::list_vaults,
@@ -42,6 +44,9 @@ pub fn run() {
             commands::totp,
             commands::generate_password,
             commands::generate_passphrase,
+            commands::create_item,
+            commands::update_item,
+            commands::delete_item,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the LocalPass desktop application");

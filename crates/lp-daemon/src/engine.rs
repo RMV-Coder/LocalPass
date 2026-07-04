@@ -364,6 +364,8 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
             ..
         } => handle_unlock(state, &password, secret_key.as_deref(), autolock_secs),
 
+        Request::CreateAccount { password, .. } => handle_create_account(state, &password),
+
         Request::Lock => {
             state.lock();
             Handled::reply(Response::Ok {
@@ -587,6 +589,7 @@ fn request_profile(request: &Request) -> Option<&str> {
     match request {
         Request::Status { profile }
         | Request::Unlock { profile, .. }
+        | Request::CreateAccount { profile, .. }
         | Request::ListVaults { profile }
         | Request::ListItems { profile, .. }
         | Request::GetItem { profile, .. }
@@ -654,6 +657,109 @@ fn handle_unlock(
         ))),
         Err(e) => Handled::reply(usage(format!("unlock failed: {e}"))),
     }
+}
+
+/// The default vault created at account creation. Mirrors the CLI's
+/// `init::DEFAULT_VAULT` so a GUI-created account is indistinguishable from a
+/// `localpass init`-created one.
+const DEFAULT_VAULT: &str = "personal";
+
+/// Create a brand-new account, write its Secret Key to `<profile>/secret-key`,
+/// create the default `personal` vault, and hold the unlocked session.
+///
+/// Refuses if an account already exists at the profile. On success the daemon
+/// holds the live [`Session`] exactly as a successful unlock does, and resets
+/// the idle timer (via the shared [`State::touch`] on the way out of `handle`).
+///
+/// The returned [`Response::AccountCreated`] carries the Secret Key display
+/// string once (for the Emergency Kit); the daemon keeps no copy of it beyond
+/// the on-device `secret-key` file it must write for the unlock path to read.
+fn handle_create_account(state: &mut State, password: &str) -> Handled {
+    let profile = state.profile().to_path_buf();
+
+    // Refuse if an account already exists (mirrors the CLI's `init` guard). The
+    // `create` call below would also fail, but checking up front yields the
+    // exact "already exists" message and never partially touches the store.
+    if profile.join(lp_vault::account::ACCOUNT_FILE).exists() {
+        return Handled::reply(usage(format!(
+            "an account already exists at {} — refusing to overwrite",
+            profile.display()
+        )));
+    }
+
+    // Create the account. The Secret Key is returned exactly once here.
+    let (session, secret_key) = match AccountStore::create(&profile, password) {
+        Ok(pair) => pair,
+        Err(lp_vault::Error::Invalid(_)) => {
+            // `create` maps "already exists" to Invalid.
+            return Handled::reply(usage(format!(
+                "an account already exists at {}",
+                profile.display()
+            )));
+        }
+        Err(e) => return Handled::reply(usage(format!("could not create the account: {e}"))),
+    };
+
+    // Persist the Secret Key on-device at `<profile>/secret-key`, byte-for-byte
+    // as the CLI's `init` does (the unlock path — `load_secret_key` above —
+    // reads exactly this file). A failure here leaves an account with no local
+    // Secret Key, which cannot be unlocked, so surface it as an error.
+    let secret_key_display = secret_key.to_display_string();
+    if let Err(e) = write_secret_key_file(&profile, &secret_key_display) {
+        return Handled::reply(usage(format!(
+            "account created, but writing the Secret Key file failed: {e}"
+        )));
+    }
+
+    // Create the default vault (same name as the CLI's `init`).
+    if let Err(e) = session.create_vault(DEFAULT_VAULT) {
+        return Handled::reply(usage(format!(
+            "account created, but creating the default vault failed: {e}"
+        )));
+    }
+
+    let vault_count = session.list_vaults().map(|v| v.len()).unwrap_or(1);
+
+    // Hold the unlocked session (same as a successful Unlock).
+    state.lock();
+    state.session = Some(session);
+
+    Handled::reply(Response::AccountCreated {
+        secret_key: secret_key_display,
+        profile: profile.display().to_string(),
+        vault_count,
+    })
+}
+
+/// Write the Secret Key display string to `<profile>/secret-key`, owner-only.
+///
+/// This mirrors `lp-cli`'s `profile::store_secret_key` **byte-for-byte**: the
+/// file is the display string followed by a single `\n`, created (or truncated)
+/// with mode `0600` on Unix. The unlock path ([`load_secret_key`]) reads exactly
+/// this file, so the two writers must agree on its contents.
+fn write_secret_key_file(profile: &Path, secret_key_display: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    std::fs::create_dir_all(profile)?;
+    let path = profile.join("secret-key");
+    // Newline-terminated so the file is a well-formed text line (matches lp-cli).
+    let contents = format!("{secret_key_display}\n");
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(&path)?;
+    f.write_all(contents.as_bytes())?;
+    // Re-assert 0600 in case the file pre-existed with looser perms.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    f.sync_all()?;
+    Ok(())
 }
 
 /// Collect every URL a `login` item advertises for autofill matching: its

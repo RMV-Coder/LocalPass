@@ -12,6 +12,7 @@
   import type { SessionState } from "./lib/types";
   import Unlock from "./components/Unlock.svelte";
   import Vault from "./components/Vault.svelte";
+  import Onboarding from "./components/Onboarding.svelte";
   import { toasts } from "./lib/toast";
 
   let session = $state<SessionState | null>(null);
@@ -46,6 +47,12 @@
 
   function onUnlocked(s: SessionState) {
     session = s;
+  }
+
+  // After onboarding the daemon already holds the unlocked session; refresh
+  // status to route into the Vault.
+  async function onOnboarded() {
+    await refresh();
   }
 
   async function doLock() {
@@ -90,6 +97,8 @@
     </div>
   </header>
   <Vault />
+{:else if session && session.state === "no_account"}
+  <Onboarding onDone={onOnboarded} />
 {:else if session}
   <Unlock {session} {onUnlocked} onRefresh={refresh} />
 {/if}

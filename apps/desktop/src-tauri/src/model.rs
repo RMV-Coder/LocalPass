@@ -44,6 +44,14 @@ pub enum SessionState {
     },
     /// No daemon is reachable — show the "start the daemon" guidance.
     NoDaemon,
+    /// A daemon is running for this profile but **no account exists yet** — show
+    /// the onboarding (account-creation) flow instead of the unlock screen. This
+    /// is detected by the command layer (the `account.localpass` file is absent),
+    /// not reported by the daemon's status.
+    NoAccount {
+        /// The profile the account would be created in.
+        profile: String,
+    },
     /// A daemon is running but serving a different profile than ours.
     WrongProfile {
         /// The profile the running daemon actually serves.
@@ -147,6 +155,24 @@ pub struct GeneratedView {
     pub secret: String,
     /// Entropy of the generation process, in bits.
     pub entropy_bits: f64,
+}
+
+/// The result of a successful account creation, returned once to the webview so
+/// it can render the Emergency Kit.
+///
+/// The `secret_key` here is the single-use display string minted by the daemon;
+/// it crosses to the webview **exactly once** (the onboarding Emergency Kit
+/// step), lives only in component-local state, and is cleared on navigation —
+/// the same discipline a revealed field / generated password follows. It is
+/// never stored in the backend and never re-fetchable.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CreatedAccount {
+    /// The Secret Key display string (`LP1-…`), shown once for the Emergency Kit.
+    pub secret_key: String,
+    /// The profile the account was created in (absolute path, display only).
+    pub profile: String,
+    /// The number of vaults created (the default `personal` vault → `1`).
+    pub vault_count: usize,
 }
 
 /// Map a masked [`WireField`] to a [`FieldView`], **dropping the value of any
@@ -408,5 +434,15 @@ mod tests {
         })
         .unwrap();
         assert!(json.contains(r#""state":"locked""#));
+    }
+
+    #[test]
+    fn no_account_serializes_with_snake_case_tag_and_profile() {
+        let json = serde_json::to_string(&SessionState::NoAccount {
+            profile: "/home/u/.local/share/localpass".into(),
+        })
+        .unwrap();
+        assert!(json.contains(r#""state":"no_account""#));
+        assert!(json.contains("/home/u/.local/share/localpass"));
     }
 }

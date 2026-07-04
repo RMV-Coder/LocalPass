@@ -9,7 +9,7 @@
   a seconds-remaining ring.
 -->
 <script lang="ts">
-  import { getItem, revealField, totp as totpApi } from "../lib/api";
+  import { getItem, revealField, totp as totpApi, deleteItem } from "../lib/api";
   import type { ItemView, TotpView } from "../lib/types";
   import { MASK, typeLabel, formatTimestamp, groupTotp } from "../lib/format";
   import { copyToClipboard } from "../lib/clipboard";
@@ -18,12 +18,35 @@
   interface Props {
     vault: string;
     itemId: string;
+    /** Called when the user clicks Edit (the parent opens the form). */
+    onEdit?: (id: string) => void;
+    /** Called after the item is moved to trash (the parent refreshes). */
+    onDeleted?: () => void;
   }
-  let { vault, itemId }: Props = $props();
+  let { vault, itemId, onEdit, onDeleted }: Props = $props();
 
   let item = $state<ItemView | null>(null);
   let error = $state("");
   let loading = $state(false);
+
+  // Delete confirmation dialog state.
+  let confirmingDelete = $state(false);
+  let deleting = $state(false);
+
+  async function doDelete() {
+    if (deleting) return;
+    deleting = true;
+    try {
+      await deleteItem(vault, itemId);
+      toast("Moved to trash", "ok");
+      confirmingDelete = false;
+      onDeleted?.();
+    } catch (err) {
+      toast(typeof err === "string" ? err : "Delete failed", "error");
+    } finally {
+      deleting = false;
+    }
+  }
 
   // Revealed secret values, keyed by field name. Component-local only.
   let revealed = $state<Record<string, string>>({});
@@ -141,13 +164,51 @@
   </div>
 {:else if item}
   <div class="detail">
-    <h2>{item.title}</h2>
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:0.5rem">
+      <h2>{item.title}</h2>
+      <div class="field-actions">
+        <button class="btn btn-small" onclick={() => onEdit?.(itemId)}>Edit</button>
+        <button
+          class="btn btn-small"
+          style="color:var(--danger);border-color:var(--danger)"
+          onclick={() => (confirmingDelete = true)}
+        >
+          Delete
+        </button>
+      </div>
+    </div>
     <p class="row-meta" style="margin-top:0">
       <span class="badge">{typeLabel(item.type_str)}</span>
       {#if item.favorite}<span class="badge">★ favorite</span>{/if}
       <span>Updated {formatTimestamp(item.updated_at)}</span>
       <span>· v{item.version}</span>
     </p>
+
+    {#if confirmingDelete}
+      <div class="error" role="alertdialog" aria-labelledby="del-title" style="color:var(--text);background:var(--bg-hover);border-color:var(--border)">
+        <p id="del-title" style="margin:0 0 0.6rem">
+          Move <strong>{item.title}</strong> to the trash? It is recoverable for
+          30 days.
+        </p>
+        <div class="toolbar">
+          <button
+            class="btn btn-small"
+            style="color:var(--danger);border-color:var(--danger)"
+            onclick={doDelete}
+            disabled={deleting}
+          >
+            {deleting ? "Deleting…" : "Delete"}
+          </button>
+          <button
+            class="btn btn-small"
+            onclick={() => (confirmingDelete = false)}
+            disabled={deleting}
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    {/if}
 
     {#if item.tags.length}
       <p class="row-meta">

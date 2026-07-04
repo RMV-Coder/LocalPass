@@ -13,9 +13,11 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  CreatedAccount,
   GeneratedView,
   ItemSummaryView,
   ItemView,
+  NewItemInput,
   SessionState,
   TotpView,
   VaultView,
@@ -32,6 +34,14 @@ export function ensureService(): Promise<SessionState> {
  *  that is a normal state returned in the payload. */
 export function status(): Promise<SessionState> {
   return invoke<SessionState>("status");
+}
+
+/** Create a brand-new account (onboarding). The password + confirm are passed
+ *  straight through and not retained in JS beyond this call's arguments. On
+ *  success returns the Secret Key ONCE (for the Emergency Kit) — the caller holds
+ *  it in component-local state and clears it on navigation, never a store. */
+export function createAccount(password: string, confirm: string): Promise<CreatedAccount> {
+  return invoke<CreatedAccount>("create_account", { password, confirm });
 }
 
 /** Unlock with the master password. The password is passed straight through and
@@ -83,4 +93,21 @@ export function generatePassword(length: number, symbols: boolean): Promise<Gene
 /** Generate an EFF-wordlist passphrase (computed in Rust). */
 export function generatePassphrase(words: number, separator: string): Promise<GeneratedView> {
   return invoke<GeneratedView>("generate_passphrase", { words, separator });
+}
+
+/** Create a new item in a vault. Returns the new item's id. Secret values in
+ *  `input` flow straight to the daemon; the response carries only the id. */
+export function createItem(vault: string, input: NewItemInput): Promise<string> {
+  return invoke<string>("create_item", { vault, input });
+}
+
+/** Update an existing item. Unrevealed secret fields left undefined in `input`
+ *  are preserved server-side. Resolves with no value on success. */
+export function updateItem(vault: string, id: string, input: NewItemInput): Promise<void> {
+  return invoke<void>("update_item", { vault, id, input });
+}
+
+/** Move an item to the trash (30-day retention). */
+export function deleteItem(vault: string, id: string): Promise<void> {
+  return invoke<void>("delete_item", { vault, id });
 }

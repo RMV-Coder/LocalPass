@@ -8,10 +8,11 @@
   reveals happen inside ItemDetail.
 -->
 <script lang="ts">
-  import { listVaults, listItems, search as searchApi } from "../lib/api";
-  import type { VaultView, ItemSummaryView } from "../lib/types";
+  import { listVaults, listItems, search as searchApi, getItem } from "../lib/api";
+  import type { VaultView, ItemSummaryView, ItemView } from "../lib/types";
   import { typeLabel, formatTimestamp } from "../lib/format";
   import ItemDetail from "./ItemDetail.svelte";
+  import ItemForm from "./ItemForm.svelte";
   import Generator from "./Generator.svelte";
 
   let vaults = $state<VaultView[]>([]);
@@ -19,10 +20,13 @@
   let items = $state<ItemSummaryView[]>([]);
   let selectedItem = $state<string>(""); // item id
   let query = $state("");
-  let view = $state<"item" | "generator">("item");
+  let view = $state<"item" | "generator" | "form">("item");
   let loadingItems = $state(false);
   let error = $state("");
   let itemListEl: HTMLUListElement | undefined = $state();
+
+  // The item being edited in the form (null = create mode).
+  let editing = $state<ItemView | null>(null);
 
   async function loadVaults() {
     try {
@@ -68,6 +72,45 @@
   function selectItem(id: string) {
     selectedItem = id;
     view = "item";
+  }
+
+  // Open the create form (no existing item).
+  function startAdd() {
+    editing = null;
+    selectedItem = "";
+    view = "form";
+  }
+
+  // Open the edit form: fetch the (masked) item so the form can prefill
+  // non-secret fields. Secret fields are NOT prefilled (they start as
+  // "•••• unchanged" in the form).
+  async function startEdit(id: string) {
+    try {
+      editing = await getItem(selectedVault, id);
+      view = "form";
+    } catch (err) {
+      error = typeof err === "string" ? err : "Could not load the item to edit.";
+    }
+  }
+
+  // After a create/update: refresh the list and select the saved item.
+  async function onFormSaved(id: string) {
+    editing = null;
+    view = "item";
+    await refreshItems();
+    selectedItem = id;
+  }
+
+  function onFormCancel() {
+    editing = null;
+    view = "item";
+  }
+
+  // After a delete: clear selection and refresh the list.
+  async function onItemDeleted() {
+    selectedItem = "";
+    view = "item";
+    await refreshItems();
   }
 
   function onItemKeydown(e: KeyboardEvent, index: number) {
@@ -132,7 +175,17 @@
   <!-- Item list + search -->
   <section class="pane item-pane" aria-label="Items">
     <div class="pane-header">
-      <p class="pane-title">{currentVaultName || "Items"}</p>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:0.5rem">
+        <p class="pane-title">{currentVaultName || "Items"}</p>
+        <button
+          class="btn btn-small btn-primary"
+          onclick={startAdd}
+          disabled={!selectedVault}
+          aria-label="Add item"
+        >
+          + Add
+        </button>
+      </div>
       <div style="margin-top:0.5rem">
         <label for="item-search" class="sr-only">Search items</label>
         <input
@@ -179,13 +232,27 @@
     {/if}
   </section>
 
-  <!-- Detail / generator -->
+  <!-- Detail / generator / form -->
   <main class="pane" aria-label="Details" aria-live="polite">
     {#if view === "generator"}
       <Generator />
+    {:else if view === "form" && selectedVault}
+      {#key editing?.id ?? "new"}
+        <ItemForm
+          vault={selectedVault}
+          existing={editing}
+          onSaved={onFormSaved}
+          onCancel={onFormCancel}
+        />
+      {/key}
     {:else if selectedItem && selectedVault}
       {#key selectedItem}
-        <ItemDetail vault={selectedVault} itemId={selectedItem} />
+        <ItemDetail
+          vault={selectedVault}
+          itemId={selectedItem}
+          onEdit={startEdit}
+          onDeleted={onItemDeleted}
+        />
       {/key}
     {:else}
       <div class="empty">

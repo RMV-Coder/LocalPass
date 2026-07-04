@@ -80,6 +80,26 @@ pub fn profile_string() -> Result<String, String> {
     Ok(resolve_profile()?.display().to_string())
 }
 
+/// The account-store file name within a profile directory. Mirrors
+/// `lp_vault::account::ACCOUNT_FILE`; kept as a literal here so the GUI backend
+/// does not take a direct `lp-vault` dependency (it reaches the core only
+/// through `lp-daemon`, as a client).
+const ACCOUNT_FILE: &str = "account.localpass";
+
+/// Whether an account store already exists in the resolved profile.
+///
+/// The GUI uses this to distinguish "a daemon is up but the vault is locked"
+/// (show the unlock screen) from "no account has been created yet" (show
+/// onboarding). It is a cheap filesystem check on `<profile>/account.localpass`
+/// — the same file the daemon's create/unlock paths key on.
+///
+/// # Errors
+///
+/// Propagates [`resolve_profile`]'s error if the profile cannot be determined.
+pub fn account_exists() -> Result<bool, String> {
+    Ok(resolve_profile()?.join(ACCOUNT_FILE).exists())
+}
+
 /// Ensure a daemon is running for this profile, spawning one if needed.
 ///
 /// This is what lets the GUI "just work" for a first-time user: the desktop app

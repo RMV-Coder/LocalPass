@@ -1,0 +1,438 @@
+<!--
+  SPDX-License-Identifier: MPL-2.0
+  This file is part of the LocalPass desktop GUI. See ../../LICENSE.
+
+  The add/edit item form. Type selector (create only — an item's type cannot
+  change), required title, type-conditional fields, a password field with a
+  "Generate" affordance (calls the backend generator), tags, and add/remove
+  custom fields.
+
+  SECRET BOUNDARY: on EDIT, secret fields are NOT prefilled. They show
+  "•••• (unchanged)" and an optional new value input; leaving one blank preserves
+  the current (unrevealed) value server-side. New secret values live only in
+  component-local form state and go straight to the backend on submit — never a
+  store, never echoed back.
+-->
+<script lang="ts">
+  import { createItem, updateItem, generatePassword } from "../lib/api";
+  import type { ItemView, NewItemInput, CustomFieldInput, EnvEntryInput } from "../lib/types";
+  import { toast } from "../lib/toast";
+
+  interface Props {
+    vault: string;
+    /** The existing item (edit mode) or null (create mode). */
+    existing?: ItemView | null;
+    /** Called with the item id after a successful create/update. */
+    onSaved: (id: string) => void;
+    /** Called when the user cancels. */
+    onCancel: () => void;
+  }
+  let { vault, existing = null, onSaved, onCancel }: Props = $props();
+
+  const isEdit = $derived(existing !== null);
+
+  const TYPES = [
+    { value: "login", label: "Login" },
+    { value: "note", label: "Secure note" },
+    { value: "api_key", label: "API key" },
+    { value: "env_set", label: "Env set" },
+    { value: "ssh_key", label: "SSH key" },
+    { value: "totp", label: "TOTP" },
+  ];
+
+  // Look up a non-secret field's value on the existing item (for prefill).
+  // A one-time snapshot of the item to seed form state from. The parent remounts
+  // this component (via `{#key}`) whenever the edited item changes, so reading
+  // the initial `existing` here is intentional (not a reactive dependency). We
+  // read through this plain function to keep the seeds out of the reactive graph.
+  // svelte-ignore state_referenced_locally
+  const seed = existing;
+  function fieldVal(name: string): string {
+    return seed?.fields.find((f) => f.name === name && !f.secret)?.value ?? "";
+  }
+
+  // Form state, seeded from the item snapshot when editing.
+  let type_str = $state(seed?.type_str ?? "login");
+  let title = $state(seed?.title ?? "");
+  let notes = $state(seed?.notes ?? "");
+  let tagsText = $state((seed?.tags ?? []).join(", "));
+  let favorite = $state(seed?.favorite ?? false);
+
+  // Login / api-key common.
+  let username = $state(fieldVal("username"));
+  let url = $state(fieldVal("url"));
+  let apiKey = $state(fieldVal("key"));
+  // Secret value inputs (blank on edit = keep current).
+  let password = $state("");
+
+  // env-set entries. ItemView does not surface env entries as regular fields,
+  // so on edit the user re-enters/adds entries (create is the primary path).
+  let envEntries = $state<EnvEntryInput[]>([]);
+
+  // ssh-key.
+  let sshAlgo = $state(fieldVal("algo"));
+  let sshPublic = $state("");
+  let sshPrivate = $state(""); // secret; blank on edit = keep
+  let sshFingerprint = $state("");
+
+  // totp.
+  let totpSecret = $state(""); // secret; blank on edit = keep
+  let totpAlgo = $state("SHA1");
+  let totpDigits = $state(6);
+  let totpPeriod = $state(30);
+  let totpIssuer = $state("");
+  let totpAccount = $state("");
+
+  // Custom fields (create + edit). On edit we do NOT prefill secret custom
+  // values; the user can set a new value or leave blank to preserve.
+  let customFields = $state<CustomFieldInput[]>([]);
+
+  let genLen = $state(20);
+  let genSymbols = $state(true);
+  let busy = $state(false);
+  let error = $state("");
+
+  async function generate() {
+    try {
+      const g = await generatePassword(genLen, genSymbols);
+      password = g.secret;
+      toast("Password generated", "ok");
+    } catch (err) {
+      toast(typeof err === "string" ? err : "Generation failed", "error");
+    }
+  }
+
+  function addCustom() {
+    customFields = [...customFields, { name: "", value: "", secret: false }];
+  }
+  function removeCustom(i: number) {
+    customFields = customFields.filter((_, idx) => idx !== i);
+  }
+
+  function addEnv() {
+    envEntries = [...envEntries, { key: "", value: "" }];
+  }
+  function removeEnv(i: number) {
+    envEntries = envEntries.filter((_, idx) => idx !== i);
+  }
+
+  function buildInput(): NewItemInput {
+    const tags = tagsText
+      .split(",")
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0);
+
+    const input: NewItemInput = {
+      type_str,
+      title: title.trim(),
+      notes,
+      tags,
+      favorite,
+      custom_fields: customFields
+        .filter((f) => f.name.trim().length > 0)
+        .map((f) => ({ name: f.name.trim(), value: f.value, secret: f.secret })),
+    };
+
+    // undefined for a secret left blank on edit = preserve; on create an empty
+    // string is fine (the field is simply omitted for logins).
+    const secretOrKeep = (v: string): string | undefined =>
+      isEdit && v.length === 0 ? undefined : v.length > 0 ? v : undefined;
+
+    if (type_str === "login") {
+      input.username = username;
+      input.url = url;
+      input.password = secretOrKeep(password);
+    } else if (type_str === "api_key") {
+      input.api_key = apiKey;
+      input.url = url;
+      input.password = secretOrKeep(password);
+    } else if (type_str === "env_set") {
+      input.env_entries = envEntries.filter((e) => e.key.trim().length > 0);
+    } else if (type_str === "ssh_key") {
+      input.ssh_algo = sshAlgo;
+      input.ssh_public_openssh = sshPublic;
+      input.ssh_fingerprint = sshFingerprint;
+      input.ssh_private_pem = secretOrKeep(sshPrivate);
+    } else if (type_str === "totp") {
+      input.totp_secret_b32 = secretOrKeep(totpSecret);
+      input.totp_algo = totpAlgo;
+      input.totp_digits = totpDigits;
+      input.totp_period = totpPeriod;
+      input.totp_issuer = totpIssuer;
+      input.totp_account = totpAccount;
+    }
+    return input;
+  }
+
+  async function submit(e: Event) {
+    e.preventDefault();
+    if (busy) return;
+    if (title.trim().length === 0) {
+      error = "A title is required.";
+      return;
+    }
+    busy = true;
+    error = "";
+    try {
+      const input = buildInput();
+      let id: string;
+      if (isEdit && existing) {
+        await updateItem(vault, existing.id, input);
+        id = existing.id;
+      } else {
+        id = await createItem(vault, input);
+      }
+      // Clear any secret material from the form before leaving.
+      password = "";
+      sshPrivate = "";
+      totpSecret = "";
+      toast(isEdit ? "Item updated" : "Item created", "ok");
+      onSaved(id);
+    } catch (err) {
+      error = typeof err === "string" ? err : "Could not save the item.";
+    } finally {
+      busy = false;
+    }
+  }
+
+  // Wipe transient secret form state on teardown.
+  $effect(() => () => {
+    password = "";
+    sshPrivate = "";
+    totpSecret = "";
+  });
+</script>
+
+<div class="detail">
+  <h2>{isEdit ? "Edit item" : "New item"}</h2>
+
+  <form onsubmit={submit} novalidate>
+    {#if !isEdit}
+      <div class="field-group">
+        <label for="if-type">Type</label>
+        <select id="if-type" bind:value={type_str}>
+          {#each TYPES as t (t.value)}
+            <option value={t.value}>{t.label}</option>
+          {/each}
+        </select>
+      </div>
+    {/if}
+
+    <div class="field-group">
+      <label for="if-title">Title</label>
+      <input id="if-title" type="text" bind:value={title} autocomplete="off" required />
+    </div>
+
+    {#if type_str === "login" || type_str === "api_key"}
+      {#if type_str === "api_key"}
+        <div class="field-group">
+          <label for="if-apikey">Key / identifier</label>
+          <input id="if-apikey" type="text" autocomplete="off" bind:value={apiKey} />
+        </div>
+      {:else}
+        <div class="field-group">
+          <label for="if-username">Username</label>
+          <input id="if-username" type="text" autocomplete="off" bind:value={username} />
+        </div>
+      {/if}
+
+      <div class="field-group">
+        <label for="if-password">{type_str === "api_key" ? "Secret" : "Password"}</label>
+        {#if isEdit}
+          <p class="hint" style="margin-top:0">
+            Leave blank to keep the current secret (•••• unchanged).
+          </p>
+        {/if}
+        <div class="gen-output" style="margin-top:0">
+          <input
+            id="if-password"
+            class="val"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder={isEdit ? "•••• (unchanged)" : ""}
+            bind:value={password}
+            style="user-select:text"
+          />
+          <button class="btn" type="button" onclick={generate}>Generate</button>
+        </div>
+        <div class="toolbar" style="margin-top:0.4rem">
+          <label style="display:flex;align-items:center;gap:0.4em;font-weight:400;margin:0">
+            Length {genLen}
+            <input type="range" min="8" max="64" bind:value={genLen} style="width:120px" />
+          </label>
+          <label style="display:flex;align-items:center;gap:0.4em;font-weight:400;margin:0">
+            <input type="checkbox" bind:checked={genSymbols} /> Symbols
+          </label>
+        </div>
+      </div>
+
+      <div class="field-group">
+        <label for="if-url">{type_str === "api_key" ? "Endpoint" : "URL"}</label>
+        <input id="if-url" type="text" autocomplete="off" bind:value={url} />
+      </div>
+    {/if}
+
+    {#if type_str === "ssh_key"}
+      <div class="field-group">
+        <label for="if-ssh-algo">Algorithm</label>
+        <input id="if-ssh-algo" type="text" autocomplete="off" bind:value={sshAlgo} placeholder="ed25519" />
+      </div>
+      <div class="field-group">
+        <label for="if-ssh-public">Public key (OpenSSH)</label>
+        <input id="if-ssh-public" type="text" autocomplete="off" bind:value={sshPublic} />
+      </div>
+      <div class="field-group">
+        <label for="if-ssh-private">Private key (PEM)</label>
+        {#if isEdit}
+          <p class="hint" style="margin-top:0">Leave blank to keep the current private key.</p>
+        {/if}
+        <textarea
+          id="if-ssh-private"
+          bind:value={sshPrivate}
+          rows="4"
+          spellcheck="false"
+          placeholder={isEdit ? "•••• (unchanged)" : ""}
+          style="width:100%;font-family:var(--mono);padding:0.55em 0.7em;border:1px solid var(--border);border-radius:6px;background:var(--bg-panel);color:var(--text)"
+        ></textarea>
+      </div>
+      <div class="field-group">
+        <label for="if-ssh-fp">Fingerprint</label>
+        <input id="if-ssh-fp" type="text" autocomplete="off" bind:value={sshFingerprint} />
+      </div>
+    {/if}
+
+    {#if type_str === "totp"}
+      <div class="field-group">
+        <label for="if-totp-secret">Base32 secret</label>
+        {#if isEdit}
+          <p class="hint" style="margin-top:0">Leave blank to keep the current secret.</p>
+        {/if}
+        <input
+          id="if-totp-secret"
+          type="text"
+          autocomplete="off"
+          spellcheck="false"
+          bind:value={totpSecret}
+          placeholder={isEdit ? "•••• (unchanged)" : ""}
+        />
+      </div>
+      <div class="toolbar">
+        <div class="field-group" style="flex:1">
+          <label for="if-totp-algo">Algorithm</label>
+          <select id="if-totp-algo" bind:value={totpAlgo}>
+            <option value="SHA1">SHA1</option>
+            <option value="SHA256">SHA256</option>
+            <option value="SHA512">SHA512</option>
+          </select>
+        </div>
+        <div class="field-group">
+          <label for="if-totp-digits">Digits</label>
+          <input id="if-totp-digits" type="number" min="6" max="10" bind:value={totpDigits} />
+        </div>
+        <div class="field-group">
+          <label for="if-totp-period">Period (s)</label>
+          <input id="if-totp-period" type="number" min="10" max="120" bind:value={totpPeriod} />
+        </div>
+      </div>
+      <div class="field-group">
+        <label for="if-totp-issuer">Issuer</label>
+        <input id="if-totp-issuer" type="text" autocomplete="off" bind:value={totpIssuer} />
+      </div>
+      <div class="field-group">
+        <label for="if-totp-account">Account</label>
+        <input id="if-totp-account" type="text" autocomplete="off" bind:value={totpAccount} />
+      </div>
+    {/if}
+
+    {#if type_str === "env_set"}
+      <div class="field-group" role="group" aria-label="Environment variables">
+        <p class="field-name" style="margin:0 0 0.35em">Environment variables</p>
+        {#each envEntries as entry, i (i)}
+          <div class="toolbar" style="margin-bottom:0.4rem">
+            <input
+              type="text"
+              placeholder="KEY"
+              autocomplete="off"
+              bind:value={entry.key}
+              style="flex:1"
+              aria-label={`Env key ${i + 1}`}
+            />
+            <input
+              type="text"
+              placeholder="value"
+              autocomplete="off"
+              bind:value={entry.value}
+              style="flex:2"
+              aria-label={`Env value ${i + 1}`}
+            />
+            <button class="btn btn-small btn-ghost" type="button" onclick={() => removeEnv(i)}>
+              Remove
+            </button>
+          </div>
+        {/each}
+        <button class="btn btn-small" type="button" onclick={addEnv}>+ Add variable</button>
+      </div>
+    {/if}
+
+    <!-- Notes (all types). -->
+    <div class="field-group">
+      <label for="if-notes">Notes</label>
+      <textarea
+        id="if-notes"
+        bind:value={notes}
+        rows="3"
+        style="width:100%;padding:0.55em 0.7em;border:1px solid var(--border);border-radius:6px;background:var(--bg-panel);color:var(--text);font:inherit"
+      ></textarea>
+    </div>
+
+    <!-- Tags. -->
+    <div class="field-group">
+      <label for="if-tags">Tags</label>
+      <input id="if-tags" type="text" autocomplete="off" bind:value={tagsText} placeholder="comma, separated" />
+    </div>
+
+    <!-- Custom fields. -->
+    <div class="field-group" role="group" aria-label="Custom fields">
+      <p class="field-name" style="margin:0 0 0.35em">Custom fields</p>
+      {#each customFields as cf, i (i)}
+        <div class="toolbar" style="margin-bottom:0.4rem">
+          <input
+            type="text"
+            placeholder="name"
+            autocomplete="off"
+            bind:value={cf.name}
+            style="flex:1"
+            aria-label={`Custom field name ${i + 1}`}
+          />
+          <input
+            type={cf.secret ? "password" : "text"}
+            placeholder={isEdit && cf.secret ? "•••• (unchanged)" : "value"}
+            autocomplete="off"
+            bind:value={cf.value}
+            style="flex:2"
+            aria-label={`Custom field value ${i + 1}`}
+          />
+          <label style="display:flex;align-items:center;gap:0.3em;font-weight:400;margin:0;white-space:nowrap">
+            <input type="checkbox" bind:checked={cf.secret} /> Secret
+          </label>
+          <button class="btn btn-small btn-ghost" type="button" onclick={() => removeCustom(i)}>
+            Remove
+          </button>
+        </div>
+      {/each}
+      <button class="btn btn-small" type="button" onclick={addCustom}>+ Add field</button>
+    </div>
+
+    {#if error}
+      <div class="error" role="alert" aria-live="assertive">{error}</div>
+    {/if}
+
+    <div class="toolbar" style="margin-top:1rem">
+      <button class="btn btn-primary" type="submit" disabled={busy}>
+        {busy ? "Saving…" : isEdit ? "Save changes" : "Create item"}
+      </button>
+      <button class="btn" type="button" onclick={onCancel} disabled={busy}>Cancel</button>
+    </div>
+  </form>
+</div>

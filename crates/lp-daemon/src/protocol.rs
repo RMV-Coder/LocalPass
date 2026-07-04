@@ -85,6 +85,27 @@ pub enum Request {
         /// `None`, the daemon keeps its configured/default timeout.
         autolock_secs: Option<u64>,
     },
+    /// Create a **brand-new account** in `profile` and hold it unlocked.
+    ///
+    /// The zero-terminal onboarding path (PRD §4.11) for the desktop GUI, which
+    /// is a daemon client and cannot create the account itself. The daemon:
+    /// creates the account store (`AccountStore::create`), writes the Secret Key
+    /// display string to `<profile>/secret-key` (owner-only — the exact file the
+    /// unlock path reads), creates the default `personal` vault, and holds the
+    /// unlocked session (same as a successful [`Unlock`](Request::Unlock)).
+    ///
+    /// Refuses if an account already exists at `profile` (returns
+    /// [`Response::Error`]). Answered by [`Response::AccountCreated`], which
+    /// carries the Secret Key display string **once** so the GUI can show the
+    /// Emergency Kit — it crosses the same-user-only channel exactly like a
+    /// revealed secret does.
+    CreateAccount {
+        /// The profile directory to create the account in.
+        profile: String,
+        /// The master password (crosses the same-user-only channel; see module
+        /// docs). Zeroized after use on both ends.
+        password: String,
+    },
     /// Drop the unlocked session now (zeroizing key material). Idempotent.
     Lock,
     /// List all vaults as `(id, name)` (requires an unlocked session).
@@ -258,6 +279,7 @@ impl Request {
             Request::Ping => "Ping",
             Request::Status { .. } => "Status",
             Request::Unlock { .. } => "Unlock",
+            Request::CreateAccount { .. } => "CreateAccount",
             Request::Lock => "Lock",
             Request::ListVaults { .. } => "ListVaults",
             Request::ListItems { .. } => "ListItems",
@@ -278,18 +300,21 @@ impl Request {
     }
 
     /// Best-effort zeroize of the in-memory password after the request has been
-    /// handled. Only [`Request::Unlock`] carries one.
+    /// handled. Only [`Request::Unlock`] and [`Request::CreateAccount`] carry one.
     pub fn zeroize_secrets(&mut self) {
-        if let Request::Unlock {
-            password,
-            secret_key,
-            ..
-        } = self
-        {
-            password.zeroize();
-            if let Some(sk) = secret_key {
-                sk.zeroize();
+        match self {
+            Request::Unlock {
+                password,
+                secret_key,
+                ..
+            } => {
+                password.zeroize();
+                if let Some(sk) = secret_key {
+                    sk.zeroize();
+                }
             }
+            Request::CreateAccount { password, .. } => password.zeroize(),
+            _ => {}
         }
     }
 }
@@ -433,6 +458,20 @@ pub enum Response {
         /// a secret value.
         message: Option<String>,
     },
+    /// The answer to a successful [`Request::CreateAccount`].
+    ///
+    /// Carries the freshly-generated Secret Key **display string** — the one
+    /// place it crosses the same-user-only channel, so the GUI can render the
+    /// Emergency Kit once (component-local, cleared on navigation). The `Debug`
+    /// impl is kind-only (see below), so it is never logged.
+    AccountCreated {
+        /// The Secret Key display string (`LP1-…`), shown once by the client.
+        secret_key: String,
+        /// The profile the account was created in (absolute path, display only).
+        profile: String,
+        /// The number of vaults created (the default `personal` vault → `1`).
+        vault_count: usize,
+    },
     /// A list of vaults as `(id, name)`.
     Vaults {
         /// The vaults.
@@ -530,6 +569,7 @@ impl Response {
             Response::Pong => "Pong",
             Response::Status { .. } => "Status",
             Response::Ok { .. } => "Ok",
+            Response::AccountCreated { .. } => "AccountCreated",
             Response::Vaults { .. } => "Vaults",
             Response::Items { .. } => "Items",
             Response::Versions { .. } => "Versions",
@@ -611,6 +651,43 @@ mod tests {
         // Username is non-secret but the kind-only Debug omits it anyway.
         assert!(!dbg.contains("octocat"));
         assert!(dbg.contains("Fill"));
+    }
+
+    #[test]
+    fn request_debug_never_prints_create_account_password() {
+        let req = Request::CreateAccount {
+            profile: "/tmp/p".into(),
+            password: "hunter2-onboard".into(),
+        };
+        let dbg = format!("{req:?}");
+        assert!(!dbg.contains("hunter2-onboard"));
+        assert!(dbg.contains("CreateAccount"));
+    }
+
+    #[test]
+    fn response_debug_never_prints_account_created_secret_key() {
+        let resp = Response::AccountCreated {
+            secret_key: "LP1-SECRET-KIT-VALUE".into(),
+            profile: "/tmp/p".into(),
+            vault_count: 1,
+        };
+        let dbg = format!("{resp:?}");
+        assert!(!dbg.contains("LP1-SECRET-KIT-VALUE"));
+        assert!(dbg.contains("AccountCreated"));
+    }
+
+    #[test]
+    fn zeroize_clears_create_account_password() {
+        let mut req = Request::CreateAccount {
+            profile: "/tmp/p".into(),
+            password: "hunter2-onboard".into(),
+        };
+        req.zeroize_secrets();
+        if let Request::CreateAccount { password, .. } = &req {
+            assert!(password.is_empty());
+        } else {
+            panic!("still create account");
+        }
     }
 
     #[test]
