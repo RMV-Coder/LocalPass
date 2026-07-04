@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: MPL-2.0
+# This file is part of the LocalPass desktop GUI (MPL-2.0), a separate workspace
+# from the AGPL-3.0 core so the core's gates never build the GUI (PRD §5.6).
+
+[package]
+name = "localpass-desktop"
+version = "0.1.0"
+description = "LocalPass desktop GUI (Tauri 2 backend) — a thin daemon client; the webview renders and requests, all secret handling stays in Rust."
+edition = "2024"
+rust-version = "1.90"
+license = "MPL-2.0"
+repository = "https://github.com/localpass/localpass"
+# `default-run` disambiguates `cargo run` (the app binary, not the lib).
+default-run = "localpass-desktop"
+
+# --- DETACHED WORKSPACE (critical, per the architecture rules) ---
+# The root Cargo.toml already `exclude = ["apps"]`. Declaring our OWN empty
+# `[workspace]` here fully detaches this crate: `cargo test --workspace` /
+# `cargo clippy --workspace` run from the repo root never see or build the GUI,
+# and this crate has its own lockfile and target dir. It reaches the AGPL core
+# only through path dependencies below.
+[workspace]
+
+[lib]
+# The Tauri mobile bootstrap looks for a `<name>_lib` crate; keeping the app
+# logic in a lib also lets us unit-test the pure command-mapping code.
+name = "localpass_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "localpass-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+# Generates the Tauri context (embeds the frontend dist/, config, icons) at
+# build time and runs the platform build steps.
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# --- Tauri 2: the OS-webview app shell. The webview renders only; every secret
+# --- crosses into it exclusively through the #[tauri::command] functions here. ---
+tauri = { version = "2", features = [] }
+# --- Serde for the view-model types the commands return (and daemon wire types
+# --- deserialize through lp-daemon's serde derives). ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# --- The daemon client. The Tauri backend is a daemon CLIENT exactly like the
+# --- CLI and the native-messaging host (LESSONS.md): it connects over the
+# --- same-user-only IPC channel and proxies a small, fill-and-read command set.
+# --- No key material or master password is ever held here beyond the single
+# --- unlock() call that forwards the password straight to the daemon. ---
+lp-daemon = { path = "../../../crates/lp-daemon" }
+# --- Profile-directory resolution reuse: `directories` yields the same default
+# --- profile path the CLI uses (%APPDATA%\localpass etc.), so the GUI unlocks
+# --- the same account store the CLI and daemon serve. ---
+directories = "6"
+# --- Password/passphrase generation done locally in the backend (the daemon
+# --- protocol has no generate op). Mirrors lp-cli's generate.rs approach
+# --- verbatim: getrandom (OS CSPRNG, the same source lp-crypto uses) with
+# --- rejection sampling, no key material. Documented design choice in README. ---
+getrandom = "0.3"
+# --- Zeroize the master password buffer after it is forwarded to the daemon. ---
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
+
+[features]
+# This feature is used by the CI/`tauri build` custom-protocol path.
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+lto = "thin"
+strip = "symbols"

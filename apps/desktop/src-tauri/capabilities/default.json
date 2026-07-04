@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimal core capability for the LocalPass main window. No filesystem, shell, http, or remote capabilities are granted — the backend talks only to the local daemon over IPC, and the webview loads only bundled 'self' content (strict CSP).",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default"
+  ]
+}

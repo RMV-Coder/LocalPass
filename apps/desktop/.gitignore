@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: MPL-2.0
+# Frontend build + deps
+node_modules/
+dist/
+.vite/
+
+# Rust / Tauri build artifacts (this crate is its own workspace)
+src-tauri/target/
+src-tauri/gen/
+
+# Editor / OS
+.DS_Store
+*.log

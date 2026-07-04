@@ -47,3 +47,6 @@ desktop.ini
 *.log
 *.tmp
 scratch/
+
+# --- Local tooling config (not project source) ---
+.claude/

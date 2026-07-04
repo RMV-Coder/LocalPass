@@ -1,0 +1,502 @@
+/*
+ * SPDX-License-Identifier: MPL-2.0
+ * This file is part of the LocalPass desktop GUI. See ../LICENSE.
+ *
+ * A small, hand-written stylesheet — no UI framework. Honors
+ * prefers-color-scheme (light/dark) and prefers-reduced-motion, uses a
+ * high-contrast focus ring for keyboard-first operation (WCAG 2.2 AA), and
+ * ships only system fonts (no remote/CDN fonts — strict CSP).
+ */
+
+:root {
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+
+  /* Light theme (default). */
+  --bg: #f5f6f7;
+  --bg-panel: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-hover: #eef0f2;
+  --bg-selected: #dcefe9;
+  --border: #d5d9dd;
+  --text: #17201f;
+  --text-muted: #5c6764;
+  --accent: #0d7a63;
+  --accent-text: #ffffff;
+  --danger: #b3261e;
+  --danger-bg: #fdecea;
+  --ok: #0d7a63;
+  --focus: #0a5cff;
+  --shadow: rgba(0, 0, 0, 0.08);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1615;
+    --bg-panel: #16201e;
+    --bg-elevated: #1c2825;
+    --bg-hover: #223330;
+    --bg-selected: #12433a;
+    --border: #2a3835;
+    --text: #e6ecea;
+    --text-muted: #9bb0aa;
+    --accent: #6ee7cd;
+    --accent-text: #05201a;
+    --danger: #ff8f87;
+    --danger-bg: #3a1512;
+    --ok: #6ee7cd;
+    --focus: #7db4ff;
+    --shadow: rgba(0, 0, 0, 0.4);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  /* No text selection of secrets by accident on rapid clicks; individual
+     fields opt back in. */
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+}
+
+/* --- Focus: a strong, always-visible ring for keyboard users. --- */
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Buttons never remove the focus ring; they only lose the default one on mouse. */
+button {
+  font: inherit;
+  color: inherit;
+}
+
+a {
+  color: var(--accent);
+}
+
+/* --- Buttons --- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  padding: 0.5em 0.9em;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+.btn:hover {
+  background: var(--bg-hover);
+}
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.btn-primary {
+  background: var(--accent);
+  color: var(--accent-text);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.btn-primary:hover {
+  filter: brightness(1.05);
+  background: var(--accent);
+}
+.btn-small {
+  padding: 0.3em 0.6em;
+  font-size: 0.85em;
+}
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+}
+.btn-ghost:hover {
+  background: var(--bg-hover);
+}
+
+/* --- Inputs --- */
+label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.35em;
+}
+input[type="text"],
+input[type="password"],
+input[type="search"],
+input[type="number"],
+select {
+  width: 100%;
+  padding: 0.55em 0.7em;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  color: var(--text);
+  font: inherit;
+}
+input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.field-group {
+  margin-bottom: 1rem;
+}
+.hint {
+  color: var(--text-muted);
+  font-size: 0.85em;
+  margin-top: 0.3em;
+}
+
+/* --- Status / error regions --- */
+.error {
+  color: var(--danger);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  padding: 0.6em 0.8em;
+  margin: 0.75rem 0;
+}
+.muted {
+  color: var(--text-muted);
+}
+.mono {
+  font-family: var(--mono);
+}
+
+/* --- Layout: sidebar + main --- */
+.shell {
+  display: grid;
+  grid-template-columns: 220px 300px 1fr;
+  height: 100%;
+  min-height: 0;
+}
+@media (max-width: 860px) {
+  .shell {
+    grid-template-columns: 180px 1fr;
+  }
+  .shell .item-pane {
+    display: none;
+  }
+  .shell.show-items .vault-pane {
+    display: none;
+  }
+  .shell.show-items {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.pane {
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  min-height: 0;
+  background: var(--bg-panel);
+}
+.pane:last-child {
+  border-right: none;
+  background: var(--bg);
+}
+.pane-header {
+  padding: 0.8rem 1rem 0.5rem;
+  position: sticky;
+  top: 0;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  z-index: 1;
+}
+.pane-title {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+/* --- List rows --- */
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0.4rem;
+}
+.list li {
+  margin: 0;
+}
+.row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  width: 100%;
+  text-align: left;
+  padding: 0.55rem 0.7rem;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+.row:hover {
+  background: var(--bg-hover);
+}
+.row[aria-current="true"],
+.row.selected {
+  background: var(--bg-selected);
+}
+.row-title {
+  font-weight: 600;
+}
+.row-meta {
+  font-size: 0.8em;
+  color: var(--text-muted);
+  display: flex;
+  gap: 0.5em;
+  align-items: center;
+}
+.badge {
+  display: inline-block;
+  font-size: 0.72em;
+  padding: 0.05em 0.5em;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+
+/* --- Centered card screens (unlock, no-daemon) --- */
+.center {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+}
+.card {
+  width: 100%;
+  max-width: 420px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.75rem;
+  box-shadow: 0 8px 30px var(--shadow);
+}
+.card h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.4rem;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 1.25rem;
+}
+.brand .logo {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  background: var(--accent);
+  display: grid;
+  place-items: center;
+  color: var(--accent-text);
+  font-weight: 800;
+}
+
+/* --- Top bar --- */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+.topbar .left {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-weight: 700;
+}
+.topbar .right {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* --- Item detail --- */
+.detail {
+  padding: 1.25rem 1.5rem;
+  max-width: 720px;
+}
+.detail h2 {
+  margin: 0 0 0.25rem;
+}
+.field {
+  display: grid;
+  grid-template-columns: 140px 1fr auto;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border);
+}
+@media (max-width: 620px) {
+  .field {
+    grid-template-columns: 1fr;
+    gap: 0.25rem;
+  }
+}
+.field-name {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.field-value {
+  font-family: var(--mono);
+  word-break: break-all;
+  user-select: text;
+}
+.field-actions {
+  display: flex;
+  gap: 0.35rem;
+}
+
+/* --- TOTP ring --- */
+.totp {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+.totp-code {
+  font-family: var(--mono);
+  font-size: 1.9rem;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+}
+.ring {
+  --pct: 100;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background:
+    conic-gradient(var(--accent) calc(var(--pct) * 1%), var(--border) 0);
+}
+.ring span {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--bg);
+  display: grid;
+  place-items: center;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Generator meter --- */
+.meter {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+  margin-top: 0.4rem;
+}
+.meter > span {
+  display: block;
+  height: 100%;
+  transition: width 0.15s ease, background-color 0.15s ease;
+}
+.meter.weak > span {
+  background: var(--danger);
+}
+.meter.fair > span {
+  background: #d08700;
+}
+.meter.strong > span {
+  background: var(--accent);
+}
+.meter.excellent > span {
+  background: var(--accent);
+}
+
+.gen-output {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.5rem;
+}
+.gen-output .val {
+  flex: 1;
+  font-family: var(--mono);
+  padding: 0.6em 0.7em;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  word-break: break-all;
+  user-select: all;
+  min-height: 2.6em;
+}
+
+.toolbar {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.empty {
+  padding: 2rem 1.5rem;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* Screen-reader-only text (visually hidden, still announced). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Toast for copy feedback (aria-live). */
+.toast {
+  position: fixed;
+  bottom: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--text);
+  color: var(--bg);
+  padding: 0.5em 1em;
+  border-radius: 999px;
+  font-size: 0.9em;
+  box-shadow: 0 4px 16px var(--shadow);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+    scroll-behavior: auto !important;
+  }
+}
