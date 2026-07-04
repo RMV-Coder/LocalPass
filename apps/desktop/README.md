@@ -38,14 +38,21 @@ separately licensed per PRD §5.6).
   (`%APPDATA%\localpass`, `~/Library/Application Support/localpass`,
   `~/.local/share/localpass`). Override with the `LOCALPASS_PROFILE` env var.
 
+### The daemon is auto-started
+
+On launch the app calls `ensure_service`, which **starts the daemon for you** if
+one isn't already running (via `lp_daemon::spawn::spawn_detached` — the same path
+`localpass unlock` uses on the CLI), then shows the unlock screen. A first-time
+user never has to start a daemon by hand. It locates the `localpass-daemon`
+binary next to the app (in a packaged install — see [Build](#build)) or on
+`PATH` (a `cargo install`ed dev setup).
+
 ## Prerequisites
 
-- **A running LocalPass daemon** for the target profile:
-  ```
-  localpass daemon start
-  ```
-  Without it, the app shows a "no daemon running" screen with this hint. If the
-  daemon is running but locked, the app shows the unlock screen.
+- The `localpass-daemon` binary must be **findable**: bundled beside the app in a
+  packaged install, or on your `PATH` in development
+  (`cargo install --path crates/lp-daemon`). If it can't be found, the unlock
+  screen shows install guidance instead of failing opaquely.
 - Rust (stable, MSVC on Windows) and Node.js (v24+). On Windows, **WebView2**
   (bundled with Windows 11).
 
@@ -68,11 +75,26 @@ npm run dev            # Vite dev server on http://localhost:1420
 ```bash
 cd apps/desktop
 npm run build          # Vite frontend build -> dist/
-npm run tauri build    # full platform bundle (optional; slower)
+npm run bundle         # self-contained installer (recommended)
 ```
 
-`npm run build` emitting `dist/` plus a compiling `src-tauri` is the required
-proof the app is real; a full installer bundle is optional.
+**`npm run bundle`** is the way to produce a shareable installer. It:
+
+1. builds `localpass-daemon` in release and stages it as a Tauri **sidecar**
+   (`scripts/prepare-sidecar.mjs` → `src-tauri/binaries/`), then
+2. runs `tauri build`, which bundles the daemon **beside** the app binary and
+   produces the platform installer under
+   `src-tauri/target/release/bundle/` (NSIS `.exe` / MSI on Windows).
+
+Because the daemon ships inside the install, the app's auto-start finds it as a
+sibling — the installed app is fully self-contained (no separate
+`localpass-daemon` needed on the target machine). Plain `npm run tauri build`
+still works but **requires the sidecar to be staged first** (run the
+`prepare-sidecar` step, or just use `npm run bundle`).
+
+> The installer is **unsigned** (pre-1.0), so Windows SmartScreen shows an
+> "unrecognized app" prompt — click **More info → Run anyway**. Testers should
+> not store real secrets yet (see the repo `SECURITY.md`).
 
 ## Checks
 
