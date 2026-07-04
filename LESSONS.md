@@ -37,6 +37,8 @@ Living log for the LocalPass build. [PRD.md](PRD.md) is the *what*; this file re
 
 ## Lessons learned
 
+- **2026-07-04 — Verify crypto outputs against an independent consumer, not just round-trips.** ssh-key 0.6.7 has a real RSA bug (CRT primes passed as `p,p` instead of `p,q`) that a self-round-trip test can mask; it surfaced because signatures were verified against the public key and then against real `ssh-add`. **How to apply:** for any signing/encryption path involving a third-party format, include at least one test that validates output with an independent implementation (another crate's verifier, a system tool), not only our own decoder.
+
 - **2026-07-04 — Interrupted subagents leave recoverable work.** A machine restart killed the Wave 6 agent mid-flight, but its working-tree output survived (~1,900 lines, compiling, 6/7 tests passing). Recovery cost was one bad test assumption (a CLI-layer `secret-key` file referenced from an lp-vault-layer test), a missing `cargo fmt`, and absent CLI-level tests. **How to apply:** after any interrupted agent, run the gates on the working tree first — finishing partial work is usually far cheaper than relaunching from zero; look specifically for layer-confusion mistakes near where the work stopped.
 - **2026-07-04 — Timing-window tests need process-spawn headroom.** The daemon autolock test used a 1s idle window; post-reboot process spawn ate it and the test flaked. Windows CLI process spawn + connect can cost ~1s cold. **How to apply:** in tests where a fresh CLI process must land inside a timing window, size the window ≥4s.
 
