@@ -1,0 +1,161 @@
+//! AAD (Additional Authenticated Data) construction — the fixed cross-crate
+//! encoding from `LESSONS.md`.
+//!
+//! Every ciphertext blob in LocalPass binds an AAD string that is reconstructed
+//! at decrypt time and never stored on disk (vault-format.md §2/§3). The
+//! encoding is a **fixed contract** (LESSONS.md 2026-07-04):
+//!
+//! - components are joined by a single `|` (U+007C);
+//! - purpose **labels** appear verbatim (e.g. `localpass/v1/wrap/item-key`);
+//! - **ids** (UUIDs) are rendered as 32-char **lowercase hex, no hyphens**;
+//! - **integers** (versions, generations, seq) are **decimal ASCII**.
+//!
+//! The whole thing is UTF-8. Because ids and integers have fixed, delimiter-free
+//! renderings and the `|` separator never appears inside a component, the
+//! joined string is unambiguous without length-prefix framing.
+//!
+//! This module is the single source of truth for those strings, so the AAD used
+//! by the account store and the vault file can never drift apart. Each helper
+//! corresponds to exactly one row in the vault-format.md §2/§3 AAD tables.
+
+use crate::ids::Id;
+
+/// Render a 16-byte id as 32 lowercase hex chars with no hyphens (AAD contract).
+#[must_use]
+pub fn id_hex(id: &Id) -> String {
+    let mut s = String::with_capacity(32);
+    for b in id.as_bytes() {
+        // Two lowercase hex nibbles per byte; no separators.
+        s.push(char::from_digit((b >> 4) as u32, 16).unwrap());
+        s.push(char::from_digit((b & 0x0f) as u32, 16).unwrap());
+    }
+    s
+}
+
+// --- Account-store AADs (vault-format.md §2) -------------------------------
+
+/// `wrapped_account_key.envelope` — wrapped under the MUK.
+#[must_use]
+pub fn account_key() -> Vec<u8> {
+    b"localpass/v1/wrap/account-key".to_vec()
+}
+
+/// `device_identity.ed25519_priv_env` — wrapped under the AccountKey.
+#[must_use]
+pub fn device_ed25519(device_id: &Id) -> Vec<u8> {
+    join(&["localpass/v1/wrap/device-ed25519", &id_hex(device_id)])
+}
+
+/// `device_identity.x25519_priv_env` — wrapped under the AccountKey.
+#[must_use]
+pub fn device_x25519(device_id: &Id) -> Vec<u8> {
+    join(&["localpass/v1/wrap/device-x25519", &id_hex(device_id)])
+}
+
+/// `vault_registry.name_env` — wrapped under the AccountKey.
+#[must_use]
+pub fn vault_name(vault_id: &Id) -> Vec<u8> {
+    join(&["localpass/v1/meta/vault-name", &id_hex(vault_id)])
+}
+
+/// `vault_registry.wrapped_vault_key` — wrapped under the AccountKey.
+#[must_use]
+pub fn vault_key(vault_id: &Id) -> Vec<u8> {
+    join(&["localpass/v1/wrap/vault-key", &id_hex(vault_id)])
+}
+
+/// `settings.value_env` — wrapped under the AccountKey.
+#[must_use]
+pub fn setting(key: &str) -> Vec<u8> {
+    join(&["localpass/v1/meta/setting", key])
+}
+
+// --- Vault-file AADs (vault-format.md §3) ----------------------------------
+
+/// `wrapped_keys.envelope` — ItemKey wrapped under the VaultKey.
+#[must_use]
+pub fn item_key(vault_id: &Id, item_id: &Id, version: i64) -> Vec<u8> {
+    join(&[
+        "localpass/v1/wrap/item-key",
+        &id_hex(vault_id),
+        &id_hex(item_id),
+        &version.to_string(),
+    ])
+}
+
+/// `item_versions.payload_env` — canonical payload encrypted under the ItemKey.
+#[must_use]
+pub fn item_payload(vault_id: &Id, item_id: &Id, version: i64) -> Vec<u8> {
+    join(&[
+        "localpass/v1/item/payload",
+        &id_hex(vault_id),
+        &id_hex(item_id),
+        &version.to_string(),
+    ])
+}
+
+/// `folders.name_env` — folder name encrypted under the VaultKey.
+#[must_use]
+pub fn folder_name(vault_id: &Id, folder_id: &Id) -> Vec<u8> {
+    join(&[
+        "localpass/v1/meta/folder-name",
+        &id_hex(vault_id),
+        &id_hex(folder_id),
+    ])
+}
+
+/// `ops.payload_env` — op payload encrypted under the VaultKey.
+#[must_use]
+pub fn op_payload(vault_id: &Id, op_id: &Id) -> Vec<u8> {
+    join(&["localpass/v1/op/payload", &id_hex(vault_id), &id_hex(op_id)])
+}
+
+/// Join AAD components with a single `|` and return UTF-8 bytes.
+fn join(parts: &[&str]) -> Vec<u8> {
+    parts.join("|").into_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn id_hex_is_32_lowercase_no_hyphens() {
+        let id = Id::from_bytes([0xAB; 16]);
+        let hex = id_hex(&id);
+        assert_eq!(hex.len(), 32);
+        assert_eq!(hex, "abababababababababababababababab");
+        assert!(!hex.contains('-'));
+        assert_eq!(hex, hex.to_lowercase());
+    }
+
+    #[test]
+    fn components_join_with_single_pipe() {
+        let v = Id::from_bytes([0x11; 16]);
+        let i = Id::from_bytes([0x22; 16]);
+        let aad = String::from_utf8(item_payload(&v, &i, 7)).unwrap();
+        assert_eq!(
+            aad,
+            "localpass/v1/item/payload|11111111111111111111111111111111|22222222222222222222222222222222|7"
+        );
+    }
+
+    #[test]
+    fn integers_are_decimal_ascii() {
+        let v = Id::from_bytes([0u8; 16]);
+        let i = Id::from_bytes([0u8; 16]);
+        let aad = String::from_utf8(item_key(&v, &i, 123)).unwrap();
+        assert!(aad.ends_with("|123"));
+    }
+
+    #[test]
+    fn distinct_rows_yield_distinct_aad() {
+        let v = Id::from_bytes([1u8; 16]);
+        let i = Id::from_bytes([2u8; 16]);
+        // Same item, different version → different AAD (anti-cut-and-paste).
+        assert_ne!(item_payload(&v, &i, 1), item_payload(&v, &i, 2));
+        // Different vault, same item/version → different AAD.
+        let v2 = Id::from_bytes([9u8; 16]);
+        assert_ne!(item_payload(&v, &i, 1), item_payload(&v2, &i, 1));
+    }
+}

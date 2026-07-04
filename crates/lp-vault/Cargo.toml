@@ -1,0 +1,35 @@
+[package]
+name = "lp-vault"
+description = "LocalPass storage core: account store, per-vault SQLite files, items, versions, and local op-log authoring"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# --- The crypto boundary: lp-vault consumes only lp-crypto's high-level API and
+# --- depends on NO crypto primitive crate directly (LESSONS "crypto boundary"). ---
+lp-crypto = { path = "../lp-crypto" }
+# --- SQLite storage. `bundled` compiles a pinned SQLite C amalgamation so the
+# --- on-disk format is reproducible across dev boxes and CI (no system libsqlite
+# --- version skew). WAL + synchronous=FULL durability lives on top of it. ---
+rusqlite = { version = "0.32", features = ["bundled"] }
+# --- UUIDv7 for every id (vault/item/op/folder/device). v7's time-ordered prefix
+# --- gives creation-order locality (accepted leak, vault-format.md §12 T1) while
+# --- staying a random identifier. `v7` for generation. ---
+uuid = { version = "1", features = ["v7"] }
+# --- Canonical JSON item payloads. serde derives the payload model; serde_json's
+# --- BTreeMap-backed `Value` gives us lexicographically-sorted keys for the JCS
+# --- approximation (see `canonical` module docs). ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# --- One error enum, no secret leakage in messages (workspace-pinned). ---
+thiserror = { workspace = true }
+# --- Drop-zeroed containers for any decrypted key/secret bytes we hold transiently
+# --- outside lp-crypto's own newtypes (workspace-pinned). ---
+zeroize = { workspace = true }
+
+[dev-dependencies]
+# --- Isolated temp dirs for every lifecycle/atomicity test. ---
+tempfile = "3"
