@@ -80,7 +80,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     let no_daemon = cli.no_daemon;
 
     match &cli.command {
-        Command::Init => commands::init::run(&profile_dir, src),
+        Command::Init(args) => commands::init::run(&profile_dir, src, args),
         Command::Status { json } => commands::status::run(&profile_dir, src, no_daemon, *json),
         Command::Vault { command } => commands::vault::run(&profile_dir, src, no_daemon, command),
         Command::Item { command } => commands::item::run(&profile_dir, src, no_daemon, command),
@@ -107,5 +107,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Unlock => commands::daemon::run_unlock(&profile_dir, src),
         Command::Lock => commands::daemon::run_lock(&profile_dir),
         Command::Daemon { command } => commands::daemon::run(&profile_dir, command),
+        Command::Backup { command } => commands::backup::run(&profile_dir, src, no_daemon, command),
+        Command::Kit(args) => commands::kit::run(&profile_dir, src, args),
     }
 }

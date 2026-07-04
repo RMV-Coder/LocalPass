@@ -126,6 +126,25 @@ impl AccountStore {
         Ok((session, secret_key))
     }
 
+    /// Read the account store's plaintext creation timestamp (`meta.created_at`,
+    /// unix millis) without unlocking. Used by the Emergency Kit to show the
+    /// account creation date (PRD §4.11).
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NotFound`] if no account store exists at `dir`.
+    /// - [`Error::Sqlite`] on a read failure.
+    pub fn created_at(dir: &Path) -> Result<i64> {
+        let path = dir.join(ACCOUNT_FILE);
+        if !path.exists() {
+            return Err(Error::NotFound("account store"));
+        }
+        let conn = db::open_connection(&path)?;
+        let created: i64 =
+            conn.query_row("SELECT created_at FROM meta WHERE id = 1", [], |r| r.get(0))?;
+        Ok(created)
+    }
+
     /// Unlock an existing account under `dir` with `password` and `secret_key`.
     ///
     /// Re-derives the MUK from the stored KDF params, unwraps the AccountKey
@@ -618,6 +637,18 @@ impl Session {
     #[allow(dead_code)]
     pub(crate) fn account_key(&self) -> &AccountKey {
         &self.account_key
+    }
+
+    /// The profile directory this session operates on.
+    #[must_use]
+    pub fn profile_dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// The on-disk path of a vault's `.vault` file (for stats/size display).
+    #[must_use]
+    pub fn vault_file_path(&self, vault_id: &VaultId) -> PathBuf {
+        self.vault_path(vault_id)
     }
 
     /// Path to the account-store file.

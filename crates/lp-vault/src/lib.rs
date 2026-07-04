@@ -82,6 +82,7 @@
 
 pub mod aad;
 pub mod account;
+pub mod backup;
 pub mod canonical;
 pub mod db;
 pub mod error;
@@ -93,6 +94,13 @@ pub mod vault;
 
 pub use account::{AccountStore, Session};
 pub use error::{Error, Result};
+// Re-export the `SecretKey` type: it is part of `AccountStore::create`'s public
+// return and `unlock`'s public signature, so callers (and tests) need it without
+// reaching into `lp-crypto` directly.
+pub use backup::{
+    BackupInfo, BackupManifest, ManifestFile, RestoreReport, VerifyReport, restore_single_item,
+};
 pub use ids::{DeviceId, FolderId, Id, ItemId, OpId, VaultId};
+pub use lp_crypto::SecretKey;
 pub use payload::{Field, FieldKind, ItemPayload, TypeData};
-pub use vault::{Item, StorageStats, TrashEntry, Vault, VersionInfo};
+pub use vault::{Item, PruneReport, StorageStats, TrashEntry, Vault, VersionInfo};

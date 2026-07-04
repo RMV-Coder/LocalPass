@@ -104,6 +104,28 @@ pub struct StorageStats {
     pub index_segments: u64,
 }
 
+/// The result of a [`Vault::prune_versions`] run (PRD §11 #8 storage reclaim).
+///
+/// A prune is a **local storage-reclaim** operation: it deletes old
+/// `item_versions` rows (and their `wrapped_keys`) that are neither the current
+/// version nor within the retained window. It never touches the `ops` log — the
+/// op chain remains the sync source of truth, so pruned versions stay
+/// reconstructable from ops until log compaction exists (a later work unit).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PruneReport {
+    /// Number of `item_versions` rows removed (equals the `wrapped_keys` rows
+    /// removed — one wrapped key per version).
+    pub versions_removed: u64,
+    /// An estimate of the bytes reclaimed: the summed on-disk length of the
+    /// removed `payload_env` + `wrapped_keys.envelope` blobs. This is the
+    /// ciphertext footprint freed in the table (SQLite may not shrink the file
+    /// until `VACUUM`, so this is a logical estimate, not a file-size delta).
+    pub bytes_reclaimed: u64,
+    /// Per-item counts of versions removed, for the items that lost at least one
+    /// version. `(item_id, removed_count)`.
+    pub per_item: Vec<(ItemId, u64)>,
+}
+
 /// A trash entry (tombstoned item).
 #[derive(Debug)]
 pub struct TrashEntry {
@@ -800,6 +822,168 @@ impl<'s> Vault<'s> {
         }
         tx.commit()?;
         Ok(expired.len())
+    }
+
+    // --- Version pruning (PRD §11 #8) -------------------------------------
+
+    /// Prune old item versions to reclaim local storage (PRD §11 #8).
+    ///
+    /// For each item, versions are removed only when **all** of these hold:
+    ///
+    /// 1. the version is **not** the item's current version
+    ///    (`items.current_version` always survives — never prunable, and it does
+    ///    not consume a `keep_last` slot);
+    /// 2. it falls **outside the newest `keep_last` non-current** versions of
+    ///    that item (the retained set is `{current} ∪ {newest keep_last
+    ///    non-current versions}`); so an item with 12 versions pruned at
+    ///    `keep_last = 10` keeps the current version plus the 10 newest of the
+    ///    remaining 11, removing exactly one (the oldest);
+    /// 3. if `older_than_ms` is `Some(cutoff)`, its `created_at < cutoff`
+    ///    (younger versions are always retained regardless of count).
+    ///
+    /// All deletions run in **one transaction**; a failure rolls back entirely.
+    /// Only `item_versions` and their matching `wrapped_keys` rows are removed —
+    /// the `ops` log is **never** touched, because the op chain is the sync
+    /// source of truth and pruned versions remain reconstructable from ops until
+    /// log compaction exists (a later work unit). This is why prune is documented
+    /// as a *local* reclaim operation: it does not alter sync state and does not
+    /// break [`verify_local_chain`](Self::verify_local_chain).
+    ///
+    /// The search index is unaffected: it only ever references an item's
+    /// *current* version, which prune never removes.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sqlite`] on a read/write failure; nothing is committed on error.
+    pub fn prune_versions(
+        &self,
+        keep_last: u32,
+        older_than_ms: Option<i64>,
+    ) -> Result<PruneReport> {
+        self.prune_versions_impl(keep_last, older_than_ms, /* commit = */ true)
+    }
+
+    /// Compute the [`PruneReport`] a real [`prune_versions`](Self::prune_versions)
+    /// would produce **without deleting anything** (PRD §11 #8 `--dry-run`).
+    ///
+    /// Runs the identical selection inside a transaction that is rolled back, so
+    /// the preview is byte-identical to the real run's report while the on-disk
+    /// state is untouched.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sqlite`] on a read failure.
+    pub fn prune_versions_dry_run(
+        &self,
+        keep_last: u32,
+        older_than_ms: Option<i64>,
+    ) -> Result<PruneReport> {
+        self.prune_versions_impl(keep_last, older_than_ms, /* commit = */ false)
+    }
+
+    /// The shared prune body. When `commit` is false the transaction is rolled
+    /// back (dry run); the returned report is identical either way.
+    fn prune_versions_impl(
+        &self,
+        keep_last: u32,
+        older_than_ms: Option<i64>,
+        commit: bool,
+    ) -> Result<PruneReport> {
+        let keep_last = i64::from(keep_last);
+        let mut conn = self.connect()?;
+        let tx = conn.transaction()?;
+
+        // Every item and its current version. We compute prunable versions per
+        // item so keep_last is applied per item (not globally).
+        let items: Vec<(Vec<u8>, i64)> = {
+            let mut stmt = tx.prepare("SELECT item_id, current_version FROM items")?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+
+        let mut report = PruneReport::default();
+
+        for (item_bytes, current_version) in items {
+            // All versions of this item, newest first, with their blob sizes and
+            // creation time (for the age cutoff).
+            let versions: Vec<(i64, i64, i64)> = {
+                let mut stmt = tx.prepare(
+                    "SELECT v.version,
+                            LENGTH(v.payload_env) + COALESCE(LENGTH(k.envelope), 0),
+                            v.created_at
+                       FROM item_versions v
+                       LEFT JOIN wrapped_keys k
+                         ON v.item_id = k.item_id AND v.version = k.version
+                      WHERE v.item_id = ?1
+                      ORDER BY v.version DESC",
+                )?;
+                let rows = stmt.query_map(params![item_bytes], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                })?;
+                rows.collect::<std::result::Result<_, _>>()?
+            };
+
+            let mut removed_here: u64 = 0;
+            let mut bytes_here: u64 = 0;
+            // The current version is always kept and is excluded from ranking;
+            // `keep_last` then retains the newest `keep_last` **non-current**
+            // versions. So the retained set is `{current} ∪ {newest keep_last
+            // non-current}`. Example: 12 versions, current = v12, keep_last = 10
+            // ⇒ keep v12 (current) + v11..v2 (10 newest non-current) ⇒ v1 pruned
+            // (exactly 1 removed).
+            let mut non_current_rank: i64 = 0;
+            for (version, blob_len, created_at) in &versions {
+                // Rule 1: never the current version (and it does not consume a
+                // keep_last slot).
+                if *version == current_version {
+                    continue;
+                }
+                // Rule 2: within the newest keep_last non-current → retain.
+                let rank = non_current_rank;
+                non_current_rank += 1;
+                if rank < keep_last {
+                    continue;
+                }
+                // Rule 3: if a cutoff is given, only prune strictly-older versions.
+                if let Some(cutoff) = older_than_ms
+                    && *created_at >= cutoff
+                {
+                    continue;
+                }
+
+                tx.execute(
+                    "DELETE FROM item_versions WHERE item_id = ?1 AND version = ?2",
+                    params![item_bytes, version],
+                )?;
+                tx.execute(
+                    "DELETE FROM wrapped_keys WHERE item_id = ?1 AND version = ?2",
+                    params![item_bytes, version],
+                )?;
+                removed_here += 1;
+                bytes_here += u64::try_from(*blob_len).unwrap_or(0);
+            }
+
+            if removed_here > 0 {
+                report.versions_removed += removed_here;
+                report.bytes_reclaimed += bytes_here;
+                report
+                    .per_item
+                    .push((Id::from_slice(&item_bytes)?, removed_here));
+            }
+        }
+
+        if commit {
+            tx.commit()?;
+        } else {
+            // Dry run: discard the DELETEs.
+            tx.rollback()?;
+        }
+        Ok(report)
     }
 
     // --- Op-chain verification --------------------------------------------

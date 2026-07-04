@@ -7,16 +7,20 @@
 //!    writes the account store.
 //! 4. Create a default vault named `personal`.
 //! 5. Store the Secret Key on-device at `<profile>/secret-key` (owner-only).
-//! 6. Print the **Emergency Kit**: the Secret Key display string, the profile
-//!    path, and the stern no-recovery guidance — shown **once**.
+//! 6. Print the **Emergency Kit** (rendered by [`crate::commands::kit`]) to
+//!    stdout — shown **once** — and, if `--kit-out` was given, also save a copy
+//!    to a file **outside** the profile.
 
 use std::path::Path;
 
 use anyhow::{Result, bail};
 use lp_vault::AccountStore;
 
+use crate::cli::InitArgs;
+use crate::commands::kit;
 use crate::error::{CliError, map_vault_error};
 use crate::profile;
+use crate::timestamp;
 use crate::unlock::{self, PasswordSource};
 
 /// Minimum master-password length. zxcvbn-style strength feedback is out of
@@ -35,7 +39,7 @@ const DEFAULT_VAULT: &str = "personal";
 /// - [`CliError::Usage`] if an account already exists or the password is too
 ///   short.
 /// - [`CliError::Internal`] on a storage failure.
-pub fn run(profile_dir: &Path, src: PasswordSource) -> Result<()> {
+pub fn run(profile_dir: &Path, src: PasswordSource, args: &InitArgs) -> Result<()> {
     if profile::account_exists(profile_dir) {
         bail!(CliError::usage(format!(
             "an account already exists at {} — refusing to overwrite",
@@ -70,37 +74,35 @@ pub fn run(profile_dir: &Path, src: PasswordSource) -> Result<()> {
     // Persist the Secret Key on-device (MVP keychain stand-in).
     profile::store_secret_key(profile_dir, &secret_key).map_err(CliError::internal)?;
 
-    print_emergency_kit(profile_dir, &secret_key.to_display_string());
-    Ok(())
-}
+    // Render the Emergency Kit once, print to stdout (as before), and — if
+    // requested — also save a copy to a file OUTSIDE the profile.
+    let secret_key_display = secret_key.to_display_string();
+    let created_ms =
+        AccountStore::created_at(profile_dir).unwrap_or_else(|_| lp_vault::db::now_millis());
+    let created = timestamp::format_millis_utc(created_ms);
 
-/// Print the Emergency Kit block to stdout. The Secret Key is shown **once**;
-/// there is no command to reprint it (only the printed kit and the on-device
-/// file hold it).
-fn print_emergency_kit(profile_dir: &Path, secret_key: &str) {
-    let bar = "=".repeat(64);
-    println!("{bar}");
-    println!("  LocalPass EMERGENCY KIT — store this OFFLINE, now.");
-    println!("{bar}");
-    println!();
-    println!("  Secret Key:   {secret_key}");
-    println!("  Profile path: {}", profile_dir.display());
-    println!();
-    println!("  This Secret Key is a 128-bit second factor mixed into your");
-    println!("  master password. Together they are the ONLY way into your data.");
-    println!();
-    println!("  >> PRINT THIS AND STORE IT OFFLINE (a safe, a drawer, on paper). <<");
-    println!();
-    println!("  There is NO cloud reset and NO recovery service. If you lose your");
-    println!("  master password AND this Secret Key AND all your devices, your");
-    println!("  data is gone forever. That is the design (PRD §4.11).");
-    println!();
-    println!("  A copy of the Secret Key is stored on THIS device at:");
-    println!("      {}", profile::secret_key_path(profile_dir).display());
-    println!("  with owner-only permissions. That on-device copy is the MVP");
-    println!("  stand-in for OS-keychain storage; it is only as safe as this");
-    println!("  machine's file permissions. The printed kit is authoritative.");
-    println!();
+    print!(
+        "{}",
+        kit::render_text(profile_dir, &secret_key_display, &created)
+    );
     println!("  A default vault named \"{DEFAULT_VAULT}\" has been created.");
-    println!("{bar}");
+
+    if let Some(out) = &args.kit_out {
+        // Reuse the kit command's guard: never write inside the profile.
+        kit::save_kit_file(
+            profile_dir,
+            out,
+            args.kit_format,
+            &secret_key_display,
+            &created,
+        )
+        .map_err(|e| {
+            // A bad --kit-out path is a usage error, not a fatal init failure —
+            // the account was created and the kit was printed. Surface it clearly.
+            CliError::usage(format!("account created, but --kit-out failed: {e}"))
+        })?;
+        println!("  Emergency Kit also written to {}", out.display());
+    }
+
+    Ok(())
 }

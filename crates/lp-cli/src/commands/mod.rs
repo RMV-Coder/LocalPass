@@ -6,6 +6,7 @@
 //!
 //! [`PasswordSource`]: crate::unlock::PasswordSource
 
+pub mod backup;
 pub mod daemon;
 pub mod env;
 pub mod export;
@@ -13,6 +14,7 @@ pub mod generate;
 pub mod import;
 pub mod init;
 pub mod item;
+pub mod kit;
 pub mod password;
 pub mod run;
 pub mod search;

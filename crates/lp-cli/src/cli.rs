@@ -77,7 +77,7 @@ pub struct Cli {
 #[allow(clippy::large_enum_variant)]
 pub enum Command {
     /// Create the account: set a master password and generate the Emergency Kit.
-    Init,
+    Init(InitArgs),
 
     /// Show profile path, whether an account exists, and the vault count.
     Status {
@@ -151,6 +151,152 @@ pub enum Command {
         #[command(subcommand)]
         command: DaemonCommand,
     },
+
+    /// Create, list, verify, and restore encrypted profile backups (PRD §4.11).
+    Backup {
+        #[command(subcommand)]
+        command: BackupCommand,
+    },
+
+    /// (Re)generate the Emergency Kit file — the Secret Key + recovery
+    /// instructions — anytime (PRD §4.11). Requires unlock; never writes into
+    /// the profile directory (that would defeat the kit's purpose).
+    Kit(KitArgs),
+}
+
+/// `localpass backup ...`
+#[derive(Debug, Subcommand)]
+pub enum BackupCommand {
+    /// Create a consistent snapshot of the account store + all live vaults.
+    #[command(long_about = "Create an encrypted backup snapshot (PRD §4.11).\n\n\
+The snapshot is taken with SQLite's Online Backup API, so it is consistent even \
+while the vault is in use — never a raw file copy. Every file is the same \
+end-to-end-encrypted format as your live profile and is safe on untrusted \
+storage (an external drive, a NAS). A plaintext manifest.json records file \
+hashes and item counts (no secrets).\n\n\
+By default backups go under <profile>/backups/<UTC-timestamp>/. Use --to to \
+target an external drive or NAS. After a successful create, backups beyond \
+--keep (default 30) are pruned; a failed create never deletes anything.")]
+    Create {
+        /// Destination root for the timestamped backup dir (default:
+        /// <profile>/backups). Point this at an external drive or NAS.
+        #[arg(long, value_name = "DIR")]
+        to: Option<PathBuf>,
+        /// How many backups to keep after this create (oldest beyond N pruned).
+        #[arg(long, value_name = "N")]
+        keep: Option<usize>,
+    },
+    /// List available backups (timestamp, size, item counts) from their
+    /// manifests.
+    List {
+        /// Where to look for backups (default: <profile>/backups).
+        #[arg(long, value_name = "DIR")]
+        from: Option<PathBuf>,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify a backup: file hashes, SQLite integrity, and — with your password
+    /// — that it is actually recoverable with your current credentials.
+    #[command(long_about = "Verify a backup (PRD §4.11 `backup verify`).\n\n\
+Runs three checks:\n  \
+1. HASHES     — every file matches the BLAKE3 hash in the manifest.\n  \
+2. INTEGRITY  — every SQLite file opens and passes PRAGMA integrity_check.\n  \
+3. RECOVERABLE— unlock the backup with your master password + Secret Key, \
+unwrap each vault key, and decrypt one item.\n\n\
+Checks 1-2 need no password. Check 3 proves the backup is recoverable with your \
+CURRENT credentials; a wrong password fails check 3 (exit 2) while checks 1-2 \
+still pass. Pass --no-recover to skip check 3.")]
+    Verify {
+        /// The backup to verify: a timestamp (looked up under --from) or a full
+        /// path to a backup directory.
+        #[arg(value_name = "TIMESTAMP_OR_PATH")]
+        backup: String,
+        /// Where to resolve a bare timestamp (default: <profile>/backups).
+        #[arg(long, value_name = "DIR")]
+        from: Option<PathBuf>,
+        /// Skip check 3 (the credential-based recoverability check).
+        #[arg(long)]
+        no_recover: bool,
+    },
+    /// Restore a full profile (or a single item) from a backup.
+    #[command(long_about = "Restore from a backup (PRD §4.11).\n\n\
+FULL RESTORE (default): replaces the live profile with the backup. Your current \
+live files are FIRST moved to <profile>/backups/pre-restore-<ts>/ (never \
+deleted), then the backup is copied into place atomically. Refused if a daemon \
+is running for this profile — run `localpass daemon stop` first.\n\n\
+SINGLE ITEM (--item): decrypts one item from the backup and re-creates it in \
+the live vault as a NEW version (not a byte-copy); the op chain stays valid. \
+Requires your password to open the backup.")]
+    Restore {
+        /// The backup to restore from: a timestamp (under --from) or a path.
+        #[arg(value_name = "TIMESTAMP_OR_PATH")]
+        backup: String,
+        /// Where to resolve a bare timestamp (default: <profile>/backups).
+        #[arg(long, value_name = "DIR")]
+        from: Option<PathBuf>,
+        /// Restore only this single item (title or id) instead of the whole
+        /// profile. Requires --vault to name the source/destination vault.
+        #[arg(long, value_name = "TITLE_OR_ID")]
+        item: Option<String>,
+        /// The vault (name or id) for a single-item restore.
+        #[arg(long, default_value = "personal", value_name = "NAME_OR_ID")]
+        vault: String,
+        /// Skip the confirmation prompt for a full restore.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+/// `localpass init [--kit-out <path>]`
+#[derive(Debug, Args)]
+pub struct InitArgs {
+    /// Also write the Emergency Kit to this file (outside the profile). The kit
+    /// is always printed to stdout regardless; this additionally saves a copy.
+    /// The file contains your Secret Key — print it, store it offline, delete it.
+    #[arg(long, value_name = "PATH")]
+    pub kit_out: Option<PathBuf>,
+
+    /// Format for the --kit-out file (text or html).
+    #[arg(long = "kit-format", value_enum, default_value = "text")]
+    pub kit_format: KitFormat,
+}
+
+/// `localpass kit [--out <path>] [--format text|html]`
+#[derive(Debug, Args)]
+#[command(long_about = "(Re)generate the Emergency Kit file (PRD §4.11).\n\n\
+The kit contains your Secret Key display string, the profile path, the creation \
+date, step-by-step recovery instructions, and the no-recovery doctrine. It \
+requires unlock and reads the on-device Secret Key file; if that file is \
+missing, pass --secret-key to supply it.\n\n\
+WHERE IT GOES: writing the kit INTO the profile defeats its purpose, so this \
+command REFUSES to write inside the profile directory. With no --out it writes \
+to your Documents directory. The file contains your Secret Key in cleartext — \
+print it, store it offline, then DELETE the file.\n\n\
+FORMAT: text (default) or html (a print-friendly single file).")]
+pub struct KitArgs {
+    /// Where to write the kit. Must be OUTSIDE the profile directory. Default:
+    /// <Documents>/localpass-emergency-kit.<ext>.
+    #[arg(long, value_name = "PATH")]
+    pub out: Option<PathBuf>,
+
+    /// Output format.
+    #[arg(long, value_enum, default_value = "text")]
+    pub format: KitFormat,
+
+    /// Supply the Secret Key display string directly (required if the on-device
+    /// secret-key file is missing).
+    #[arg(long, value_name = "LP1-...")]
+    pub secret_key: Option<String>,
+}
+
+/// Output format for the Emergency Kit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum KitFormat {
+    /// A plain-text `.txt` file.
+    Text,
+    /// A print-friendly single-file HTML document.
+    Html,
 }
 
 /// `localpass daemon ...`
@@ -426,6 +572,48 @@ pub enum VaultCommand {
     Create {
         /// The vault name.
         name: String,
+    },
+    /// Show per-vault storage statistics (items, versions, trash, index
+    /// segments, file size) — the PRD's "very visible storage statistics".
+    Stats {
+        /// The vault (name or id).
+        #[arg(long, default_value = "personal", value_name = "NAME_OR_ID")]
+        vault: String,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Prune old item versions to reclaim local storage (PRD §11 #8). The
+    /// current version is never touched; ops are never touched.
+    #[command(
+        long_about = "Prune old item versions (PRD §11 #8, keep-forever + prune tooling).\n\n\
+Removes item versions that are (a) NOT the current version, (b) beyond the \
+newest --keep-last of each item, and (c) older than --older-than if given. The \
+current version always survives. The op log is NEVER touched — prune is a LOCAL \
+storage-reclaim operation; pruned versions stay reconstructable from ops until \
+log compaction exists.\n\n\
+--dry-run prints the report without deleting. A real run asks for confirmation \
+unless --force."
+    )]
+    Prune {
+        /// The vault (name or id).
+        #[arg(long, default_value = "personal", value_name = "NAME_OR_ID")]
+        vault: String,
+        /// Keep the newest N versions of each item (default 10).
+        #[arg(long, default_value_t = 10, value_name = "N")]
+        keep_last: u32,
+        /// Only prune versions older than this age (e.g. `365d`, `12h`, `30m`).
+        #[arg(long, value_name = "DURATION")]
+        older_than: Option<String>,
+        /// Show what would be pruned without deleting anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the confirmation prompt for a real prune.
+        #[arg(long)]
+        force: bool,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
