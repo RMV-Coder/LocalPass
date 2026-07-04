@@ -35,6 +35,10 @@ fn shutdown_terminates_run() {
         autolock: Duration::from_secs(600),
         username: username.clone(),
         verbose: false,
+        // These tests exercise the control protocol only; don't bind the fixed,
+        // system-wide SSH agent endpoint (avoids contention with the dedicated
+        // ssh_agent test and any real agent).
+        no_ssh_agent: true,
     };
 
     // Run the server loop in a thread.
@@ -94,6 +98,10 @@ fn wrong_profile_and_lock_idempotent() {
         autolock: Duration::from_secs(600),
         username: username.clone(),
         verbose: false,
+        // These tests exercise the control protocol only; don't bind the fixed,
+        // system-wide SSH agent endpoint (avoids contention with the dedicated
+        // ssh_agent test and any real agent).
+        no_ssh_agent: true,
     };
     let handle = std::thread::spawn(move || server::run(cfg));
     assert!(wait_ready(&username, Duration::from_secs(5)));

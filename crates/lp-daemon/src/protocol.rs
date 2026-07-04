@@ -350,6 +350,12 @@ pub enum Response {
         /// Seconds remaining until idle auto-lock when unlocked (`None` when
         /// locked or when auto-lock is disabled).
         idle_remaining_secs: Option<u64>,
+        /// The SSH agent endpoint label (pipe name / socket path) when the agent
+        /// is enabled, else `None` (started with `--no-ssh-agent`).
+        ssh_agent_endpoint: Option<String>,
+        /// How many SSH identities the agent is currently serving (0 when locked
+        /// or when the agent is disabled).
+        ssh_identity_count: usize,
     },
     /// A generic "did it" acknowledgement (Unlock, Lock, mutations).
     Ok {

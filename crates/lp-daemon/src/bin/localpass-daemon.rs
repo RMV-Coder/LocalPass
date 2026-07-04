@@ -8,6 +8,7 @@
 //! ```text
 //!   --profile <DIR>     the single profile directory to serve (required)
 //!   --autolock <SECS>   idle auto-lock timeout in seconds (0 = never)
+//!   --no-ssh-agent      do not serve the SSH agent endpoint (PRD §4.8)
 //!   --verbose           log request kinds + timings to stderr (never secrets)
 //! ```
 //!
@@ -60,6 +61,7 @@ fn run() -> Result<(), String> {
         autolock: Duration::from_secs(autolock_secs),
         username,
         verbose: args.verbose,
+        no_ssh_agent: args.no_ssh_agent,
     };
 
     server::run(config).map_err(|e| e.to_string())
@@ -70,6 +72,7 @@ struct Args {
     profile: Option<PathBuf>,
     autolock: Option<u64>,
     verbose: bool,
+    no_ssh_agent: bool,
 }
 
 /// A tiny hand-rolled argument parser (the daemon has three flags; pulling in
@@ -78,6 +81,7 @@ fn parse_args() -> Result<Args, String> {
     let mut profile = None;
     let mut autolock = None;
     let mut verbose = false;
+    let mut no_ssh_agent = false;
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -98,6 +102,7 @@ fn parse_args() -> Result<Args, String> {
                 );
             }
             "--verbose" => verbose = true,
+            "--no-ssh-agent" => no_ssh_agent = true,
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -106,5 +111,6 @@ fn parse_args() -> Result<Args, String> {
         profile,
         autolock,
         verbose,
+        no_ssh_agent,
     })
 }

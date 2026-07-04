@@ -86,6 +86,15 @@ pub fn endpoint_label(username: &str) -> String {
     format!(r"\\.\pipe\localpass-{}", sanitize_username(username))
 }
 
+/// Encode an arbitrary pipe name (e.g. `\\.\pipe\openssh-ssh-agent`) as a
+/// NUL-terminated UTF-16 vector. Used by the SSH agent listener, which serves a
+/// **fixed** pipe name (the one Windows OpenSSH expects) rather than a
+/// per-user-derived one.
+#[must_use]
+pub fn pipe_name_wide_raw(name: &str) -> Vec<u16> {
+    name.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
 /// Fetch the current process token's user SID as an SDDL string (e.g.
 /// `S-1-5-21-…`). Used to build a DACL that names exactly this user.
 fn current_user_sid_string() -> Result<String> {
@@ -179,7 +188,11 @@ fn wide_ptr_to_string(mut p: *const u16) -> String {
 }
 
 /// A security descriptor built for the current-user-only DACL, freed on drop.
-struct SecurityDescriptor {
+///
+/// `pub(crate)` so the SSH agent listener ([`crate::sshagent::listener`]) can
+/// reuse the exact same current-user-only DACL for its own (differently named)
+/// pipe — the DACL is the authentication for both endpoints (PRD §8 T8).
+pub(crate) struct SecurityDescriptor {
     psd: *mut core::ffi::c_void,
 }
 
@@ -192,7 +205,7 @@ impl SecurityDescriptor {
     /// - `D:` — the DACL section.
     /// - `(A;;GA;;;SID)` — one **A**llow ACE granting **G**eneric **A**ll to the
     ///   named SID and to nobody else. No `Everyone` (`WD`), no `NETWORK` (`NU`).
-    fn current_user_only() -> Result<Self> {
+    pub(crate) fn current_user_only() -> Result<Self> {
         let sid = current_user_sid_string()?;
         let sddl = format!("D:(A;;GA;;;{sid})");
         let wide: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
@@ -219,7 +232,7 @@ impl SecurityDescriptor {
     }
 
     /// A `SECURITY_ATTRIBUTES` referencing this descriptor (non-inheritable).
-    fn attributes(&self) -> SECURITY_ATTRIBUTES {
+    pub(crate) fn attributes(&self) -> SECURITY_ATTRIBUTES {
         SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: self.psd,
@@ -254,7 +267,14 @@ impl Drop for HandleGuard {
 }
 
 /// Create one blocking, byte-mode, duplex pipe instance protected by the DACL.
-fn create_instance(name: &[u16], sa: &SECURITY_ATTRIBUTES, first: bool) -> Result<OwnedHandle> {
+///
+/// `pub(crate)` so the SSH agent listener can create instances of its own
+/// (fixed-name) pipe with the same DACL + `FIRST_PIPE_INSTANCE` semantics.
+pub(crate) fn create_instance(
+    name: &[u16],
+    sa: &SECURITY_ATTRIBUTES,
+    first: bool,
+) -> Result<OwnedHandle> {
     // FILE_FLAG_FIRST_PIPE_INSTANCE on the first instance guarantees we are the
     // sole owner of the name (a second daemon fails to create the first
     // instance). Both PIPE_ACCESS_DUPLEX and FILE_FLAG_FIRST_PIPE_INSTANCE are
@@ -378,6 +398,33 @@ pub struct Connection {
 // A single connection is used from a single worker thread at a time.
 unsafe impl Send for Connection {}
 
+/// Wait for a client to connect on a freshly-created pipe instance `handle`,
+/// then wrap it in a [`Connection`]. Shared by the daemon control listener and
+/// the SSH agent listener. On a connect failure the handle is closed and the
+/// error returned; the caller re-arms a fresh instance.
+///
+/// # Errors
+///
+/// [`Error::Io`] if `ConnectNamedPipe` fails for a reason other than the
+/// already-connected race.
+pub(crate) fn accept_on_instance(instance: OwnedHandle) -> Result<Connection> {
+    let raw = instance.into_raw_handle() as HANDLE;
+    // SAFETY: `raw` is our valid pipe instance handle.
+    let ok = unsafe { ConnectNamedPipe(raw, ptr::null_mut()) };
+    if ok == 0 {
+        let err = io::Error::last_os_error();
+        const ERROR_PIPE_CONNECTED: i32 = 535;
+        if err.raw_os_error() != Some(ERROR_PIPE_CONNECTED) {
+            // SAFETY: close the handle we failed to connect.
+            unsafe {
+                CloseHandle(raw);
+            }
+            return Err(Error::Io(err));
+        }
+    }
+    Ok(Connection { handle: raw })
+}
+
 impl Read for Connection {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         use windows_sys::Win32::Storage::FileSystem::ReadFile;
@@ -460,7 +507,22 @@ impl Drop for Connection {
 /// and transiently handles `ERROR_PIPE_BUSY` (all instances momentarily busy)
 /// by waiting briefly.
 pub fn connect(username: &str) -> Result<Connection> {
-    let name = pipe_name_wide(username);
+    connect_pipe_by_name(&endpoint_label(username))
+}
+
+/// Connect to an arbitrary named pipe (e.g. the fixed SSH agent pipe). Shares
+/// the control-pipe client logic: maps "no such pipe" / access-denied to
+/// [`Error::NotRunning`] and retries transient `ERROR_PIPE_BUSY`.
+///
+/// `pub(crate)` so the SSH agent listener's `wake` path (and agent-pipe tests)
+/// can open the fixed agent pipe by name.
+///
+/// # Errors
+///
+/// [`Error::NotRunning`] if nothing is listening at `name` (or the DACL denied
+/// us); [`Error::Io`] on other failures.
+pub(crate) fn connect_pipe_by_name(name: &str) -> Result<Connection> {
+    let name = pipe_name_wide_raw(name);
     // Retry a bounded number of times on ERROR_PIPE_BUSY.
     for _ in 0..20 {
         // SAFETY: `name` is a NUL-terminated wide pipe name; on success we own

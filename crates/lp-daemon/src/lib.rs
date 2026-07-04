@@ -57,6 +57,8 @@
 //! - [`server`] — the accept loop, workers, and reaper (`localpass-daemon`).
 //! - [`client`] — the connection API the CLI drives, plus [`client::probe`].
 //! - [`spawn`] — launch the `localpass-daemon` binary detached (`daemon start`).
+//! - [`sshagent`] — the SSH agent protocol served on a **second** same-user-only
+//!   endpoint by the same process (vault-backed SSH keys, PRD §4.8).
 //! - [`error`] — the transport/lifecycle error type.
 //!
 //! `unsafe` is confined to the two platform transport modules (the Windows
@@ -74,6 +76,7 @@ pub mod protocol;
 pub mod render;
 pub mod server;
 pub mod spawn;
+pub mod sshagent;
 pub mod transport;
 
 pub use error::{Error, Result};

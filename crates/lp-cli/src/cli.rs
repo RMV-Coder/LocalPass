@@ -175,6 +175,82 @@ pub enum Command {
         #[command(subcommand)]
         command: DeviceCommand,
     },
+
+    /// Manage vault-backed SSH keys and the SSH agent (PRD §4.8).
+    Ssh {
+        #[command(subcommand)]
+        command: SshCommand,
+    },
+}
+
+/// `localpass ssh ...`
+#[derive(Debug, Subcommand)]
+#[command(long_about = "Vault-backed SSH keys and the SSH agent (PRD §4.8).\n\n\
+The background daemon serves an SSH agent on a same-user-only endpoint (Windows \
+named pipe `\\\\.\\pipe\\openssh-ssh-agent`, which Windows OpenSSH uses by \
+default; Unix `$XDG_RUNTIME_DIR/localpass/ssh-agent.sock` — set \
+SSH_AUTH_SOCK to it). Every `ssh_key` item across your unlocked vaults becomes \
+an agent identity; private keys never touch disk and are read from the vault at \
+sign time (a rotated key is used immediately).\n\n\
+`ssh list` shows the identities the agent would serve without needing ssh-add. \
+`ssh generate` creates a keypair in memory and stores it (printing only the \
+public key). `ssh public` prints an item's public key for authorized_keys.\n\n\
+The agent starts with the daemon by default; run `localpass daemon start` (or \
+`localpass unlock`) to bring it up, and `localpass daemon status` to see its \
+endpoint and identity count. On Windows, stop Microsoft's own agent first if it \
+owns the pipe name: `Stop-Service ssh-agent`.")]
+pub enum SshCommand {
+    /// List the identities the agent would serve (fingerprint, comment, algo)
+    /// across all vaults — without needing ssh-add.
+    List {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Generate an SSH keypair in memory and store it as an ssh_key item. Only
+    /// the public key is printed; the private key never touches disk.
+    #[command(
+        long_about = "Generate an SSH keypair and store it in a vault (PRD §4.1).\n\n\
+The keypair is generated IN MEMORY with the OS CSPRNG and stored as an ssh_key \
+item (OpenSSH-format private key inside the encrypted payload, plus the public \
+key and SHA-256 fingerprint). ONLY the public key is printed — the private key \
+is never written to disk or echoed. Once stored, the key is served by the SSH \
+agent automatically."
+    )]
+    Generate {
+        /// The item title for the new key.
+        #[arg(long)]
+        title: String,
+        /// Vault to store the key in (name or id).
+        #[arg(long, default_value = "personal", value_name = "NAME_OR_ID")]
+        vault: String,
+        /// The key algorithm.
+        #[arg(long, value_enum, default_value = "ed25519")]
+        algo: SshAlgo,
+        /// A comment for the public key (default: the title).
+        #[arg(long)]
+        comment: Option<String>,
+        /// Emit machine-readable JSON (the public key + fingerprint).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print an item's public key (for authorized_keys).
+    Public {
+        /// The ssh_key item (title or id).
+        target: String,
+        /// Vault to look in (name or id).
+        #[arg(long, default_value = "personal", value_name = "NAME_OR_ID")]
+        vault: String,
+    },
+}
+
+/// The SSH key algorithms `localpass ssh generate` can produce (PRD §4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SshAlgo {
+    /// Ed25519 (recommended: small, fast, modern).
+    Ed25519,
+    /// RSA-4096.
+    Rsa4096,
 }
 
 /// `localpass sync ...`
@@ -305,7 +381,7 @@ target an external drive or NAS. After a successful create, backups beyond \
 --keep (default 30) are pruned; a failed create never deletes anything.")]
     Create {
         /// Destination root for the timestamped backup dir (default:
-        /// <profile>/backups). Point this at an external drive or NAS.
+        /// `<profile>/backups`). Point this at an external drive or NAS.
         #[arg(long, value_name = "DIR")]
         to: Option<PathBuf>,
         /// How many backups to keep after this create (oldest beyond N pruned).
@@ -315,7 +391,7 @@ target an external drive or NAS. After a successful create, backups beyond \
     /// List available backups (timestamp, size, item counts) from their
     /// manifests.
     List {
-        /// Where to look for backups (default: <profile>/backups).
+        /// Where to look for backups (default: `<profile>/backups`).
         #[arg(long, value_name = "DIR")]
         from: Option<PathBuf>,
         /// Emit machine-readable JSON.
@@ -338,7 +414,7 @@ still pass. Pass --no-recover to skip check 3.")]
         /// path to a backup directory.
         #[arg(value_name = "TIMESTAMP_OR_PATH")]
         backup: String,
-        /// Where to resolve a bare timestamp (default: <profile>/backups).
+        /// Where to resolve a bare timestamp (default: `<profile>/backups`).
         #[arg(long, value_name = "DIR")]
         from: Option<PathBuf>,
         /// Skip check 3 (the credential-based recoverability check).
@@ -358,7 +434,7 @@ Requires your password to open the backup.")]
         /// The backup to restore from: a timestamp (under --from) or a path.
         #[arg(value_name = "TIMESTAMP_OR_PATH")]
         backup: String,
-        /// Where to resolve a bare timestamp (default: <profile>/backups).
+        /// Where to resolve a bare timestamp (default: `<profile>/backups`).
         #[arg(long, value_name = "DIR")]
         from: Option<PathBuf>,
         /// Restore only this single item (title or id) instead of the whole
@@ -402,7 +478,7 @@ print it, store it offline, then DELETE the file.\n\n\
 FORMAT: text (default) or html (a print-friendly single file).")]
 pub struct KitArgs {
     /// Where to write the kit. Must be OUTSIDE the profile directory. Default:
-    /// <Documents>/localpass-emergency-kit.<ext>.
+    /// `<Documents>/localpass-emergency-kit.<ext>`.
     #[arg(long, value_name = "PATH")]
     pub out: Option<PathBuf>,
 

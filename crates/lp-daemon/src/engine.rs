@@ -39,10 +39,16 @@ pub struct State {
     autolock: Duration,
     /// The instant of the last successful request (resets the idle timer).
     last_activity: Instant,
+    /// The SSH agent endpoint label when the agent is enabled, else `None`
+    /// (started with `--no-ssh-agent`). Reported in [`Response::Status`].
+    ssh_agent_endpoint: Option<String>,
 }
 
 impl State {
-    /// A fresh, locked state for `profile` with `autolock` idle timeout.
+    /// A fresh, locked state for `profile` with `autolock` idle timeout and no
+    /// SSH agent endpoint recorded (set later via
+    /// [`set_ssh_agent_endpoint`](Self::set_ssh_agent_endpoint) once the agent
+    /// listener has bound).
     #[must_use]
     pub fn new(profile: PathBuf, autolock: Duration) -> Self {
         Self {
@@ -50,7 +56,15 @@ impl State {
             session: None,
             autolock,
             last_activity: Instant::now(),
+            ssh_agent_endpoint: None,
         }
+    }
+
+    /// Record the SSH agent endpoint label so `status` can report it. Called by
+    /// the server after the agent listener binds (`None` disables reporting when
+    /// the agent is off).
+    pub fn set_ssh_agent_endpoint(&mut self, endpoint: Option<String>) {
+        self.ssh_agent_endpoint = endpoint;
     }
 
     /// The profile this daemon serves.
@@ -69,6 +83,31 @@ impl State {
     #[must_use]
     pub fn is_unlocked(&self) -> bool {
         self.session.is_some()
+    }
+
+    /// Borrow the held session, or `None` when locked. Used by the SSH agent
+    /// listener ([`crate::sshagent`]) to list identities / sign against the
+    /// live unlocked session while holding the state mutex. A locked daemon
+    /// (`None`) serves an empty agent identity list.
+    #[must_use]
+    pub fn session_ref(&self) -> Option<&Session> {
+        self.session.as_ref()
+    }
+
+    /// The number of SSH-agent identities the daemon would currently serve
+    /// (every parseable `ssh_key` item across all unlocked vaults), or `0` when
+    /// locked. Reported by [`crate::protocol::Response::Status`]. Never fails —
+    /// a storage error is reported as `0` (the agent itself degrades the same
+    /// way), and per-item parse problems are skipped by
+    /// [`crate::sshagent::service::collect_identities`].
+    #[must_use]
+    pub fn ssh_identity_count(&self) -> usize {
+        match &self.session {
+            Some(s) => crate::sshagent::service::collect_identities(s)
+                .map(|v| v.len())
+                .unwrap_or(0),
+            None => 0,
+        }
     }
 
     /// Drop the session now (zeroizing key material). Idempotent.
@@ -302,6 +341,7 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
                 .as_ref()
                 .and_then(|s| s.list_vaults().ok())
                 .map(|v| v.len());
+            let ssh_identity_count = state.ssh_identity_count();
             Handled::reply(Response::Status {
                 state: if state.is_unlocked() {
                     LockState::Unlocked
@@ -312,6 +352,8 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
                 vault_count,
                 autolock_secs: state.autolock().as_secs(),
                 idle_remaining_secs: state.idle_remaining_secs(),
+                ssh_agent_endpoint: state.ssh_agent_endpoint.clone(),
+                ssh_identity_count,
             })
         }
 

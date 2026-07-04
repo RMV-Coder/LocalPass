@@ -4,7 +4,7 @@
 //!
 //! # Why this module exists (the one permitted lp-vault change class)
 //!
-//! Every existing [`Vault`](crate::Vault) write path (`create_item`,
+//! Every existing [`Vault`] write path (`create_item`,
 //! `update_item`, …) *authors a new local op*: it assigns **this** device's
 //! `seq`/`lamport`/`prev_hash` and signs with **this** device's Ed25519 key.
 //! That is exactly wrong for a foreign op, which already carries the *authoring*

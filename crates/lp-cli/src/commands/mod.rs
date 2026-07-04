@@ -19,6 +19,7 @@ pub mod kit;
 pub mod password;
 pub mod run;
 pub mod search;
+pub mod ssh;
 pub mod status;
 pub mod sync;
 pub mod vault;

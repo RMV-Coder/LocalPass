@@ -15,6 +15,11 @@
 //! - One **reaper thread** wakes on a short fixed interval and, holding the
 //!   mutex for a few microseconds, drops the session if the idle timeout
 //!   elapsed. It performs no IO under the lock.
+//! - Optionally, one **SSH agent thread** ([`crate::sshagent`]) runs a second
+//!   accept loop on a second same-user-only endpoint, sharing the **same**
+//!   `Arc<Mutex<State>>` and `Arc<AtomicBool>` running flag so it sees the live
+//!   session and lock/auto-lock immediately. It is started by default (disable
+//!   with `--no-ssh-agent`); a bind failure is logged but never fatal.
 //!
 //! Why threaded std over tokio: the workload is a handful of sequential CLI
 //! requests, `lp-vault`'s `Session` is synchronous and `!Sync` (so it must be
@@ -53,12 +58,21 @@ pub struct Config {
     pub username: String,
     /// Whether to log request kinds + timings to stderr (never secrets).
     pub verbose: bool,
+    /// Whether to also serve the SSH agent endpoint (PRD §4.8). The daemon
+    /// starts the agent by default; `--no-ssh-agent` sets this `true` to disable
+    /// it (a bind failure — e.g. the Windows OpenSSH agent service owning the
+    /// pipe name — is logged but never fatal to the control daemon).
+    pub no_ssh_agent: bool,
 }
 
 /// Shared server state: the guarded vault state plus a running flag.
+///
+/// `state` and `running` are held in `Arc`s so the SSH agent listener thread can
+/// share the **same** unlocked-session mutex and shutdown flag — its identity
+/// listing / signing see the live session and lock/auto-lock immediately.
 struct Shared {
-    state: Mutex<State>,
-    running: AtomicBool,
+    state: Arc<Mutex<State>>,
+    running: Arc<AtomicBool>,
     verbose: bool,
     username: String,
 }
@@ -84,9 +98,19 @@ pub fn run(config: Config) -> Result<()> {
         ));
     }
 
+    let state = Arc::new(Mutex::new(State::new(
+        config.profile.clone(),
+        config.autolock,
+    )));
+    let running = Arc::new(AtomicBool::new(true));
+
+    // Bring up the SSH agent endpoint (unless disabled). A bind failure is
+    // logged and the control daemon keeps running — the agent is additive.
+    let agent = start_ssh_agent(&config, &state, &running);
+
     let shared = Arc::new(Shared {
-        state: Mutex::new(State::new(config.profile.clone(), config.autolock)),
-        running: AtomicBool::new(true),
+        state: Arc::clone(&state),
+        running: Arc::clone(&running),
         verbose: config.verbose,
         username: config.username.clone(),
     });
@@ -146,12 +170,68 @@ pub fn run(config: Config) -> Result<()> {
         }
     }
 
+    // Stop the SSH agent thread: wake its blocking accept() and join it, then
+    // release its endpoint.
+    if let Some(handle) = agent {
+        crate::sshagent::listener::wake();
+        let _ = handle.join();
+    }
+
     // Drop the listener to release the endpoint (unlink socket / close pipe).
     drop(listener);
     if shared.verbose {
         log("stopped; endpoint released");
     }
     Ok(())
+}
+
+/// Bring up the SSH agent endpoint on its own thread (PRD §4.8), unless
+/// `--no-ssh-agent` disabled it. Records the endpoint label on the shared state
+/// (so `status` reports it) and returns the serve-thread handle, or `None` when
+/// the agent is disabled or failed to bind (bind failure is logged, never fatal
+/// to the control daemon — the agent is additive).
+fn start_ssh_agent(
+    config: &Config,
+    state: &Arc<Mutex<State>>,
+    running: &Arc<AtomicBool>,
+) -> Option<std::thread::JoinHandle<()>> {
+    use crate::sshagent::listener::AgentListener;
+
+    if config.no_ssh_agent {
+        if config.verbose {
+            log("ssh-agent disabled (--no-ssh-agent)");
+        }
+        return None;
+    }
+
+    match AgentListener::bind() {
+        Ok(mut listener) => {
+            let label = listener.endpoint_label();
+            if config.verbose {
+                log(&format!("ssh-agent listening on {label}"));
+            }
+            // Record the endpoint so `status` can report it.
+            {
+                let mut st = state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                st.set_ssh_agent_endpoint(Some(label));
+            }
+            let state = Arc::clone(state);
+            let running = Arc::clone(running);
+            let verbose = config.verbose;
+            Some(std::thread::spawn(move || {
+                crate::sshagent::listener::serve(&mut listener, &state, &running, verbose);
+            }))
+        }
+        Err(e) => {
+            // The agent is additive: a bind failure (e.g. the Windows OpenSSH
+            // agent service owning the pipe name) must not take down the control
+            // daemon. Log a clear line and continue without the agent.
+            log(&format!("ssh-agent NOT started: {e}"));
+            None
+        }
+    }
 }
 
 /// Serve one connection: read requests, handle them, write responses, until the

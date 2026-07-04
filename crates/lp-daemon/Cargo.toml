@@ -28,6 +28,33 @@ thiserror = { workspace = true }
 # --- Drop-zeroed transient buffers for the master password / secret-key display
 # --- string as they cross the (same-user-only) channel (workspace-pinned). ---
 zeroize = { workspace = true }
+# --- SSH agent key parsing + signing (PRD §4.8 SSH agent). `ssh-key` (RustCrypto)
+# --- parses OpenSSH-format private keys stored in vaults and produces SSH
+# --- signatures. This is a FOREIGN-format exception like `age` in lp-porter
+# --- (LESSONS.md foreign-format crypto boundary): SSH USER keys are foreign
+# --- artifacts; lp-crypto stays the sole home of LocalPass's OWN vault crypto.
+# --- ssh-key reuses the exact RustCrypto/dalek stack lp-crypto already pins
+# --- (ed25519-dalek v2, curve25519-dalek v4, sha2 0.10, zeroize 1) — no
+# --- duplicated crypto surface. Features: ed25519 + rsa (required key algos),
+# --- encryption (so we can DETECT and cleanly reject encrypted-PEM keys rather
+# --- than mis-parse them); `std` for OsRng-backed generation. ECDSA is left off
+# --- (optional per the task; not generated or signed here — see the module docs).
+ssh-key = { version = "0.6", default-features = false, features = [
+    "ed25519",
+    "rsa",
+    "encryption",
+    "std",
+] }
+# --- Pinned to ssh-key's own transitive versions so there is ONE copy of each
+# --- (verified via `cargo tree`): `ssh-encoding` for the public-key blob + agent
+# --- signature wire encoding (draft-miller framing reuses SSH string encoding),
+# --- `signature` for the Signer/Verifier traits, and `rsa` to build a correct
+# --- RSA private key from key components (working around an ssh-key 0.6.7 bug in
+# --- its RsaKeypair→RsaPrivateKey conversion — see sshagent::keys). These are
+# --- already in the tree via ssh-key; naming them just lets us call their APIs. ---
+ssh-encoding = "0.2"
+signature = "2"
+rsa = { version = "0.9", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 # --- Windows named-pipe transport + access control. Feature flags are the
@@ -65,3 +92,13 @@ libc = "0.2"
 assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
+# --- The SSH agent integration test decodes a served public-key blob and
+# --- verifies a signature the agent produced. Same crates/versions the crate
+# --- itself uses (single copy each — verified via `cargo tree`). ---
+ssh-key = { version = "0.6", default-features = false, features = [
+    "ed25519",
+    "rsa",
+    "std",
+] }
+ssh-encoding = "0.2"
+signature = "2"

@@ -68,7 +68,10 @@ fn socket_paths() -> Result<(PathBuf, PathBuf)> {
 }
 
 /// Create the socket directory `0700` if absent, and tighten it if it exists.
-fn ensure_dir_0700(dir: &Path) -> Result<()> {
+///
+/// `pub(crate)` so the SSH agent listener can place its socket dir with the same
+/// owner-only permissions.
+pub(crate) fn ensure_dir_0700(dir: &Path) -> Result<()> {
     if !dir.exists() {
         std::fs::create_dir_all(dir)?;
     }
@@ -77,13 +80,18 @@ fn ensure_dir_0700(dir: &Path) -> Result<()> {
 }
 
 /// Our effective uid.
-fn our_euid() -> u32 {
+///
+/// `pub(crate)` so the SSH agent listener ([`crate::sshagent::listener`]) can
+/// enforce the same peer-uid == euid check on its own socket.
+pub(crate) fn our_euid() -> u32 {
     // SAFETY: geteuid() is always safe; it takes no arguments and cannot fail.
     unsafe { libc::geteuid() }
 }
 
 /// Read the peer's uid from a connected stream via `SO_PEERCRED`.
-fn peer_uid(stream: &UnixStream) -> Result<u32> {
+///
+/// `pub(crate)` for reuse by the SSH agent listener's per-connection check.
+pub(crate) fn peer_uid(stream: &UnixStream) -> Result<u32> {
     let fd = stream.as_raw_fd();
     let mut cred = libc::ucred {
         pid: 0,
