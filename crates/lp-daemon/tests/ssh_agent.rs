@@ -4,15 +4,20 @@
 //! REQUEST_IDENTITIES, SIGN_REQUEST, verify the signature — then lock and confirm
 //! the identity list goes empty.
 //!
-//! # Endpoint sharing note
+//! # Endpoint isolation note
 //!
-//! The agent endpoint is a **fixed, system-wide** name (the Windows pipe
-//! `\\.\pipe\openssh-ssh-agent`, and on Unix a per-user runtime socket). Only one
-//! process/daemon can own it, so this test:
-//!   - holds [`AGENT_LOCK`] for its whole body (serializing the tests here), and
-//!   - **skips gracefully** (prints a note, returns) if the agent endpoint could
-//!     not be bound — e.g. Microsoft's own ssh-agent service already owns the
-//!     Windows pipe. That is an environmental conflict, not a code failure.
+//! In production the agent endpoint is a **fixed, system-wide** name (the Windows
+//! pipe `\\.\pipe\openssh-ssh-agent`, and on Unix a per-user runtime socket) so
+//! OpenSSH finds it with no `SSH_AUTH_SOCK`. Only one process can own that name,
+//! so a real running daemon — or Microsoft's own ssh-agent service — would collide
+//! with this test. To stay hermetic, each test points its daemon **and** client at
+//! a unique endpoint via [`set_isolated_agent_endpoint`] (the
+//! `LOCALPASS_SSH_AGENT_PIPE` / `LOCALPASS_SSH_AGENT_SOCK` override the listener
+//! honors), so nothing on the machine can interfere. The test also:
+//!   - holds [`AGENT_LOCK`] for its whole body, since the endpoint override and the
+//!     `USERNAME`/`USER` env `Client::connect` reads are process-global, and
+//!   - **skips gracefully** if the (now isolated) endpoint still cannot be bound —
+//!     a last-resort guard, not the common path it once was.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -30,6 +35,30 @@ static AGENT_LOCK: Mutex<()> = Mutex::new(());
 
 fn unique_user(tag: &str) -> String {
     format!("lpssh-{tag}-{}", std::process::id())
+}
+
+/// Point this test's daemon *and* client at an isolated agent endpoint, so it can
+/// never collide with a real daemon (or Microsoft's ssh-agent) holding the fixed
+/// production name. The listener reads these envs on both the bind and connect
+/// sides, so they agree. Must run before the server thread binds the agent.
+fn set_isolated_agent_endpoint(tag: &str) {
+    let pid = std::process::id();
+    #[cfg(windows)]
+    {
+        let pipe = format!(r"\\.\pipe\localpass-test-agent-{tag}-{pid}");
+        // SAFETY: serialized by AGENT_LOCK; set before spawning the server thread.
+        unsafe { std::env::set_var("LOCALPASS_SSH_AGENT_PIPE", pipe) };
+    }
+    #[cfg(unix)]
+    {
+        // A unique parent dir (which the listener chmods 0700), not the shared
+        // temp root, so the 0700 doesn't clamp other tests' files.
+        let sock = std::env::temp_dir()
+            .join(format!("lp-ssh-{tag}-{pid}"))
+            .join("agent.sock");
+        // SAFETY: serialized by AGENT_LOCK; set before spawning the server thread.
+        unsafe { std::env::set_var("LOCALPASS_SSH_AGENT_SOCK", sock) };
+    }
 }
 
 /// Create a test account with two ed25519 ssh_key items and a Secret Key file, so
@@ -128,6 +157,7 @@ fn agent_lists_and_signs_and_locks() {
 
     let (tmp, blobs) = make_profile_with_keys();
     let username = unique_user("e2e");
+    set_isolated_agent_endpoint("e2e");
 
     let cfg = Config {
         profile: tmp.path().to_path_buf(),
@@ -262,6 +292,7 @@ fn status_reports_agent_endpoint_and_count() {
 
     let (tmp, _blobs) = make_profile_with_keys();
     let username = unique_user("status");
+    set_isolated_agent_endpoint("status");
     let cfg = Config {
         profile: tmp.path().to_path_buf(),
         autolock: Duration::from_secs(600),

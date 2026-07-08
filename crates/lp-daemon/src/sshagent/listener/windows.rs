@@ -34,12 +34,29 @@ use crate::transport::windows::{
     pipe_name_wide_raw,
 };
 
-/// The fixed pipe name Windows OpenSSH uses by default.
-const AGENT_PIPE_NAME: &str = r"\\.\pipe\openssh-ssh-agent";
+/// The pipe name Windows OpenSSH's `ssh.exe` opens by default. Production always
+/// uses this so the agent is drop-in compatible (no `SSH_AUTH_SOCK` needed).
+const DEFAULT_AGENT_PIPE_NAME: &str = r"\\.\pipe\openssh-ssh-agent";
+
+/// The agent pipe name, honoring the `LOCALPASS_SSH_AGENT_PIPE` override.
+///
+/// The default ([`DEFAULT_AGENT_PIPE_NAME`]) is a **fixed, machine-global** name,
+/// so only one agent can own it — which makes integration tests collide with any
+/// running daemon. Tests set this env var to a unique pipe so each binds its own
+/// isolated endpoint; production leaves it unset for OpenSSH compatibility. Both
+/// the bind (daemon) and connect (client) sides read it, so they always agree.
+fn agent_pipe_name() -> String {
+    std::env::var("LOCALPASS_SSH_AGENT_PIPE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_AGENT_PIPE_NAME.to_string())
+}
 
 /// A named-pipe agent listener holding one pending instance ready to accept.
 pub struct Listener {
     name: Vec<u16>,
+    /// The resolved pipe name this listener bound (for `endpoint_label`).
+    label: String,
     sd: SecurityDescriptor,
     pending: Option<std::os::windows::io::OwnedHandle>,
 }
@@ -56,18 +73,20 @@ impl Listener {
     /// instance. Fails with a clear message when Microsoft's `ssh-agent` service
     /// (or any process) already owns the name.
     pub fn bind() -> Result<Self> {
-        let name = pipe_name_wide_raw(AGENT_PIPE_NAME);
+        let label = agent_pipe_name();
+        let name = pipe_name_wide_raw(&label);
         let sd = SecurityDescriptor::current_user_only()?;
         let sa = sd.attributes();
         let pending = create_instance(&name, &sa, true).map_err(|e| {
             Error::Endpoint(format!(
-                "could not create the SSH agent pipe {AGENT_PIPE_NAME}: {e}. \
+                "could not create the SSH agent pipe {label}: {e}. \
                  If Windows' own OpenSSH agent service holds this name, stop it first: \
                  `Stop-Service ssh-agent` (and optionally `Set-Service ssh-agent -StartupType Disabled`)."
             ))
         })?;
         Ok(Self {
             name,
+            label,
             sd,
             pending: Some(pending),
         })
@@ -90,7 +109,7 @@ impl Listener {
 
     /// The pipe name label.
     pub fn endpoint_label(&self) -> String {
-        AGENT_PIPE_NAME.to_string()
+        self.label.clone()
     }
 }
 
@@ -114,17 +133,17 @@ impl Write for Connection {
 
 /// The pipe name label without binding.
 pub fn endpoint_label() -> String {
-    AGENT_PIPE_NAME.to_string()
+    agent_pipe_name()
 }
 
 /// Wake a blocked `accept()` at shutdown by connecting once to the agent pipe.
 pub fn wake() {
     use crate::transport::windows::connect_pipe_by_name;
-    let _ = connect_pipe_by_name(AGENT_PIPE_NAME);
+    let _ = connect_pipe_by_name(&agent_pipe_name());
 }
 
 /// Connect to the agent pipe as a client (SSH-client side).
 pub fn connect() -> Result<Connection> {
     use crate::transport::windows::connect_pipe_by_name;
-    Ok(Connection(connect_pipe_by_name(AGENT_PIPE_NAME)?))
+    Ok(Connection(connect_pipe_by_name(&agent_pipe_name())?))
 }

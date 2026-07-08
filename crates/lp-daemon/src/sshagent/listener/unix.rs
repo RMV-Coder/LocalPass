@@ -23,7 +23,21 @@ const SOCKET_FILE: &str = "ssh-agent.sock";
 const HOME_FALLBACK_DIR: &str = ".localpass-run";
 
 /// Resolve the agent socket path and its parent directory.
+///
+/// `LOCALPASS_SSH_AGENT_SOCK` overrides the full socket path (its parent is used
+/// as the `0700` directory). The default location is fixed per user, so parallel
+/// integration tests would collide on it; each test points this at a unique path
+/// to bind an isolated socket. Both the bind (daemon) and connect (client) sides
+/// call this, so they always agree. Production leaves it unset.
 fn socket_paths() -> Result<(PathBuf, PathBuf)> {
+    if let Some(sock) = std::env::var_os("LOCALPASS_SSH_AGENT_SOCK").filter(|v| !v.is_empty()) {
+        let sock = PathBuf::from(sock);
+        let dir = sock
+            .parent()
+            .map(PathBuf::from)
+            .ok_or_else(|| Error::Endpoint("LOCALPASS_SSH_AGENT_SOCK has no parent dir".into()))?;
+        return Ok((dir, sock));
+    }
     let (base, sub): (PathBuf, &str) =
         if let Some(rt) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
             (PathBuf::from(rt), RUNTIME_SUBDIR)
