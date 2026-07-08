@@ -130,7 +130,7 @@ These are explicitly out of MVP in the PRD and are correctly **not** built:
 | Team sharing (shared vaults, roles, revocation) | ⛔ (as intended) | Single-user multi-device only; team ops are a named P2 extension point (a new signed `op_kind` gated on admin keys). |
 | Relay (`localpass-relay`) | ⛔ (as intended) | Documented §7.4 extension point; no relay binary. |
 | Local web UI | ⛔ (as intended) | |
-| Attachments | ✅ (post-MVP add) | Implemented (vault-format.md §8): content-addressed encrypted blobs, per-attachment key wrapped by the ItemKey, encrypted filenames, 50 MiB cap. `localpass attach add/list/get/rm`; daemon path-based requests; GUI Attachments section with native file/save pickers. **Local-only** — blobs are not synced yet (follow-up). |
+| Attachments | ✅ (post-MVP add) | Implemented (vault-format.md §8): content-addressed encrypted blobs, per-attachment key wrapped by the ItemKey, encrypted filenames, 50 MiB cap. `localpass attach add/list/get/rm`; daemon path-based requests; GUI Attachments section with native file/save pickers. **Syncs** across devices — metadata via the signed op-log (AttachAdd/AttachDelete ops), encrypted blobs via the shared folder with blake3 tamper-verification on fetch (sync-protocol.md §2/§7). |
 | Passkeys | ⛔ (as intended) | Payload type reserved (code 9), not implemented. |
 | Biometric / YubiKey unlock | ⛔ (as intended) | Password path only; Secret Key in a file (not OS keychain) at MVP. |
 | Plugins | ⛔ (as intended) | |
