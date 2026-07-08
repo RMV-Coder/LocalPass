@@ -40,6 +40,13 @@ tauri-build = { version = "2", features = [] }
 # --- Tauri 2: the OS-webview app shell. The webview renders only; every secret
 # --- crosses into it exclusively through the #[tauri::command] functions here. ---
 tauri = { version = "2", features = [] }
+# --- Native file/save dialogs. Justification: choosing WHICH file to attach and
+# --- WHERE to save a decrypted download is inherently an OS-file-picker task;
+# --- under the app's strict CSP a webview has no reasonable in-page alternative
+# --- (no <input type=file> path access, no filesystem reach). The plugin returns
+# --- only PATHS to the backend — the attachment plaintext never enters the
+# --- webview: the daemon reads the source path and writes the dest path itself.
+tauri-plugin-dialog = "2"
 # --- Serde for the view-model types the commands return (and daemon wire types
 # --- deserialize through lp-daemon's serde derives). ---
 serde = { version = "1", features = ["derive"] }

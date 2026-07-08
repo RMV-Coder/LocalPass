@@ -15,7 +15,8 @@
     "bundle": "node scripts/prepare-sidecar.mjs && tauri build"
   },
   "dependencies": {
-    "@tauri-apps/api": "2.11.1"
+    "@tauri-apps/api": "2.11.1",
+    "@tauri-apps/plugin-dialog": "2.7.1"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "7.1.2",

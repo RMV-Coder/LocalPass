@@ -31,6 +31,10 @@ mod wordlist;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Native file/save pickers for attachments (choosing a source file to
+        // attach and a destination to save a download). The plugin hands the
+        // backend only PATHS; the attachment plaintext never enters the webview.
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::ensure_service,
             commands::status,
@@ -60,6 +64,10 @@ pub fn run() {
             commands::sync_status,
             commands::share_vault_to_device,
             commands::sync_adopt,
+            commands::add_attachment,
+            commands::list_attachments,
+            commands::get_attachment,
+            commands::delete_attachment,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the LocalPass desktop application");

@@ -367,6 +367,78 @@ pub enum Request {
         /// The shared sync-root directory to scan.
         dir: String,
     },
+    /// **Attachments (path-based; no blob bytes cross this channel):** attach a
+    /// file to an item. The caller passes a SOURCE file **path**; the daemon
+    /// reads that file itself (it is the same user) and stores it encrypted via
+    /// [`lp_vault::Vault::add_attachment`]. Answered by
+    /// [`Response::Attachment`].
+    ///
+    /// The attachment plaintext is read daemon↔disk directly and **never
+    /// traverses the pipe** — a strictly stronger boundary than
+    /// [`GetItem`](Request::GetItem)/`reveal`, whose secret values do cross the
+    /// channel. If `filename` is empty the daemon derives it from
+    /// `source_path`'s file name. Oversize sources (> `MAX_ATTACHMENT_BYTES`)
+    /// are rejected with a secret-free message.
+    AddAttachment {
+        /// The profile directory being operated on.
+        profile: String,
+        /// Vault name or id.
+        vault: String,
+        /// Item title or id the attachment binds to.
+        item: String,
+        /// The **source** file path the daemon reads (its bytes never cross the
+        /// pipe).
+        source_path: String,
+        /// The stored filename. Empty ⇒ derived from `source_path`'s base name.
+        filename: String,
+    },
+    /// **Attachments:** list an item's attachments as
+    /// `{attachment_id, filename, size}`. Filenames are vault metadata (like
+    /// item titles) and only cross the same-user pipe. Answered by
+    /// [`Response::Attachments`].
+    ListAttachments {
+        /// The profile directory being operated on.
+        profile: String,
+        /// Vault name or id.
+        vault: String,
+        /// Item title or id.
+        item: String,
+    },
+    /// **Attachments (path-based; no blob bytes cross this channel):** decrypt an
+    /// attachment and write its plaintext to a **destination path** the daemon
+    /// writes to itself. The decrypted bytes go daemon↔disk directly and **never
+    /// enter the response** — a stronger boundary than
+    /// [`GetItem`](Request::GetItem)/`reveal`. Answered by
+    /// [`Response::AttachmentSaved`] carrying only the filename + byte count.
+    ///
+    /// Refuses to overwrite an existing `dest_path` unless `force` is set.
+    GetAttachment {
+        /// The profile directory being operated on.
+        profile: String,
+        /// Vault name or id.
+        vault: String,
+        /// Item title or id.
+        item: String,
+        /// The attachment id (hyphenated) to fetch.
+        attachment_id: String,
+        /// The **destination** file path the daemon writes the plaintext to (its
+        /// bytes never cross the pipe).
+        dest_path: String,
+        /// Overwrite `dest_path` if it already exists (default refuse).
+        force: bool,
+    },
+    /// **Attachments:** delete an attachment by id. Answered by
+    /// [`Response::Ok`].
+    DeleteAttachment {
+        /// The profile directory being operated on.
+        profile: String,
+        /// Vault name or id.
+        vault: String,
+        /// Item title or id.
+        item: String,
+        /// The attachment id (hyphenated) to delete.
+        attachment_id: String,
+    },
     /// Terminate the daemon: drop the session and exit, removing the endpoint.
     Shutdown,
 }
@@ -406,6 +478,10 @@ impl Request {
             Request::SyncStatus { .. } => "SyncStatus",
             Request::ShareVaultToDevice { .. } => "ShareVaultToDevice",
             Request::SyncAdopt { .. } => "SyncAdopt",
+            Request::AddAttachment { .. } => "AddAttachment",
+            Request::ListAttachments { .. } => "ListAttachments",
+            Request::GetAttachment { .. } => "GetAttachment",
+            Request::DeleteAttachment { .. } => "DeleteAttachment",
             Request::Shutdown => "Shutdown",
         }
     }
@@ -564,6 +640,19 @@ pub struct WireAdoptedVault {
     pub vault_id: String,
     /// The vault name once known locally (may be empty until first pull).
     pub name: String,
+}
+
+/// One attachment listing entry rendered for the wire
+/// ([`Response::Attachments`]). Carries **no blob bytes** — just the id, the
+/// (vault-metadata) filename, and the plaintext size.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct WireAttachment {
+    /// The attachment id (hyphenated UUID) — the handle for get/delete.
+    pub attachment_id: String,
+    /// The decrypted filename (vault metadata, not a secret value per se).
+    pub filename: String,
+    /// The plaintext size in bytes.
+    pub size: i64,
 }
 
 /// The unlock/lock state reported by [`Response::Status`].
@@ -760,6 +849,28 @@ pub enum Response {
         /// Secret-free alarm descriptions raised during the adopt pulls.
         alarms: Vec<String>,
     },
+    /// A file was attached (answer to [`Request::AddAttachment`]). Carries the
+    /// new attachment's id + stored filename — **no blob bytes**.
+    Attachment {
+        /// The new attachment id (hyphenated UUID).
+        attachment_id: String,
+        /// The stored filename.
+        filename: String,
+    },
+    /// An item's attachments (answer to [`Request::ListAttachments`]).
+    Attachments {
+        /// The attachments (may be empty). No blob bytes — see [`WireAttachment`].
+        attachments: Vec<WireAttachment>,
+    },
+    /// An attachment's plaintext was written to disk by the daemon (answer to
+    /// [`Request::GetAttachment`]). Carries only the filename + byte count — the
+    /// **plaintext bytes are NOT in this response**; they went daemon↔disk.
+    AttachmentSaved {
+        /// The decrypted filename.
+        filename: String,
+        /// How many plaintext bytes were written to the destination path.
+        bytes_written: u64,
+    },
     /// The requested operation needs an unlocked session and none is held.
     Locked,
     /// This daemon serves a different profile than the request named.
@@ -803,6 +914,9 @@ impl Response {
             Response::SyncPulled { .. } => "SyncPulled",
             Response::SyncStatus { .. } => "SyncStatus",
             Response::SyncAdopted { .. } => "SyncAdopted",
+            Response::Attachment { .. } => "Attachment",
+            Response::Attachments { .. } => "Attachments",
+            Response::AttachmentSaved { .. } => "AttachmentSaved",
             Response::Locked => "Locked",
             Response::WrongProfile { .. } => "WrongProfile",
             Response::Error { .. } => "Error",

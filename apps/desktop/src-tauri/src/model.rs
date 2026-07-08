@@ -274,6 +274,32 @@ pub struct SyncAdoptView {
     pub alarms: Vec<String>,
 }
 
+/// One attachment row for the ItemDetail Attachments section.
+///
+/// Carries **no blob bytes** — just the id, filename, and plaintext size. The
+/// attachment plaintext never enters the webview: adding names a source path
+/// the daemon reads, and saving names a destination path the daemon writes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct AttachmentView {
+    /// The attachment id (hyphenated UUID) — the handle for save/remove.
+    pub id: String,
+    /// The stored filename.
+    pub filename: String,
+    /// The plaintext size in bytes.
+    pub size: i64,
+}
+
+/// The result of a `get_attachment` (save-to-disk). Carries only the filename +
+/// byte count — the **plaintext bytes are never here**; the daemon wrote them
+/// straight to the chosen destination path.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct AttachmentSavedView {
+    /// The decrypted filename.
+    pub filename: String,
+    /// How many plaintext bytes were written to the destination path.
+    pub bytes_written: u64,
+}
+
 /// Map a masked [`WireField`] to a [`FieldView`], **dropping the value of any
 /// secret field**. This is the single choke point that guarantees no secret
 /// value leaves the backend through `get_item`.

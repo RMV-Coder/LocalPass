@@ -13,6 +13,8 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AttachmentSavedView,
+  AttachmentView,
   CreatedAccount,
   DeviceIdentityView,
   EnvEntryView,
@@ -202,4 +204,61 @@ export function shareVaultToDevice(vault: string, deviceId: string): Promise<voi
 /** Adopt vaults shared to this device from a folder, then pull each. */
 export function syncAdopt(dir: string): Promise<SyncAdoptView> {
   return invoke<SyncAdoptView>("sync_adopt", { dir });
+}
+
+// --- Attachments ---------------------------------------------------------
+//
+// PATH-BASED, no blob bytes cross the command boundary. `addAttachment` passes
+// a SOURCE file path the daemon reads itself; `getAttachment` passes a DEST file
+// path the daemon writes itself. The attachment plaintext therefore NEVER enters
+// the webview — a STRONGER boundary than `revealField` (whose value does reach
+// JS). Only paths + metadata (id / filename / size) cross these calls.
+
+/** Attach a file to an item. `sourcePath` is the file the user picked in the
+ *  native open dialog; the daemon reads it and stores it encrypted. Pass `null`
+ *  for `filename` to derive it from the source's base name. Returns the new
+ *  attachment (no blob bytes; `size` is filled by a follow-up `listAttachments`). */
+export function addAttachment(
+  vault: string,
+  item: string,
+  sourcePath: string,
+  filename: string | null = null,
+): Promise<AttachmentView> {
+  return invoke<AttachmentView>("add_attachment", {
+    vault,
+    item,
+    sourcePath,
+    filename,
+  });
+}
+
+/** List an item's attachments (id / filename / size each). No blob bytes. */
+export function listAttachments(vault: string, item: string): Promise<AttachmentView[]> {
+  return invoke<AttachmentView[]>("list_attachments", { vault, item });
+}
+
+/** Save (decrypt to disk) one attachment. `destPath` is the destination the user
+ *  picked in the native save dialog; the daemon writes the plaintext there
+ *  itself — the bytes never enter the webview. Rejects (with a message) if the
+ *  file exists and `force` is false; the caller re-calls with `force = true`
+ *  after confirming an overwrite. */
+export function getAttachment(
+  vault: string,
+  item: string,
+  id: string,
+  destPath: string,
+  force: boolean,
+): Promise<AttachmentSavedView> {
+  return invoke<AttachmentSavedView>("get_attachment", {
+    vault,
+    item,
+    id,
+    destPath,
+    force,
+  });
+}
+
+/** Remove one attachment by id. */
+export function deleteAttachment(vault: string, item: string, id: string): Promise<void> {
+  return invoke<void>("delete_attachment", { vault, item, id });
 }

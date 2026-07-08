@@ -169,3 +169,21 @@ export interface SyncAdoptView {
   applied_total: number;
   alarms: string[];
 }
+
+/** One attachment row on an item. Carries NO blob bytes — just id, filename,
+ *  and plaintext size. The attachment plaintext never enters the webview:
+ *  adding names a source path the daemon reads, saving names a dest path the
+ *  daemon writes. */
+export interface AttachmentView {
+  id: string;
+  filename: string;
+  size: number;
+}
+
+/** The result of saving (decrypting to disk) an attachment. Carries only the
+ *  filename + byte count — the plaintext bytes are never here; the daemon wrote
+ *  them straight to the chosen destination path. */
+export interface AttachmentSavedView {
+  filename: string;
+  bytes_written: number;
+}

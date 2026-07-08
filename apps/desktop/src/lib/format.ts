@@ -58,6 +58,15 @@ export function strengthBand(bits: number): "weak" | "fair" | "strong" | "excell
   return "weak";
 }
 
+/** Format a byte count as a compact human size (B / KiB / MiB) — mirrors the
+ *  CLI's `attach` table. Negative/NaN inputs render as "—". */
+export function humanSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "—";
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${bytes} B`;
+}
+
 /** Group TOTP digits for readability: "123456" -> "123 456". Non-6/8 lengths
  *  are returned unchanged. */
 export function groupTotp(code: string): string {

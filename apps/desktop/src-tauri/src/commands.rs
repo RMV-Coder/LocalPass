@@ -744,6 +744,134 @@ pub fn sync_adopt(dir: String) -> Result<SyncAdoptView, String> {
     }
 }
 
+// --- Attachments ---------------------------------------------------------
+//
+// PATH-BASED, no blob bytes cross the command boundary. `add_attachment` passes
+// a SOURCE file path the daemon reads itself; `get_attachment` passes a DEST
+// file path the daemon writes itself. The attachment plaintext therefore NEVER
+// enters the webview and never crosses this command surface — the bytes travel
+// daemon↔disk only. This is a STRONGER boundary than `reveal_field` (whose
+// secret value does cross into JS). `list_attachments` returns only metadata
+// (id, filename, size). `get_item` masking and the secret boundary are
+// untouched by any of these.
+
+/// Attach a file to an item. `source_path` is the file the user picked in the
+/// native open dialog; the daemon reads it and stores it encrypted. When
+/// `filename` is `None`/empty the daemon derives it from the source's base name.
+/// Returns the new attachment's `{id, filename, size}` — no blob bytes.
+#[tauri::command]
+pub fn add_attachment(
+    vault: String,
+    item: String,
+    source_path: String,
+    filename: Option<String>,
+) -> Result<model::AttachmentView, String> {
+    let profile = daemon::profile_string()?;
+    let resp = daemon::call(&Request::AddAttachment {
+        profile,
+        vault,
+        item,
+        source_path,
+        filename: filename.unwrap_or_default(),
+    })
+    .map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    match resp {
+        // The add response carries the id + filename; the daemon does not echo
+        // the size (it would mean a second query). The frontend refreshes the
+        // full list right after adding, which carries the exact stored size, so
+        // `size` here is a placeholder the refresh replaces. Kept in the view
+        // shape so `add`/`list` return one uniform type.
+        Response::Attachment {
+            attachment_id,
+            filename,
+        } => Ok(model::AttachmentView {
+            id: attachment_id,
+            filename,
+            size: 0,
+        }),
+        other => Err(format!("unexpected daemon response: {}", other.kind())),
+    }
+}
+
+/// List an item's attachments (`{id, filename, size}` each). No blob bytes.
+#[tauri::command]
+pub fn list_attachments(vault: String, item: String) -> Result<Vec<model::AttachmentView>, String> {
+    let profile = daemon::profile_string()?;
+    let resp = daemon::call(&Request::ListAttachments {
+        profile,
+        vault,
+        item,
+    })
+    .map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    match resp {
+        Response::Attachments { attachments } => Ok(attachments
+            .into_iter()
+            .map(|a| model::AttachmentView {
+                id: a.attachment_id,
+                filename: a.filename,
+                size: a.size,
+            })
+            .collect()),
+        other => Err(format!("unexpected daemon response: {}", other.kind())),
+    }
+}
+
+/// Save (decrypt to disk) one attachment. `dest_path` is the destination the
+/// user picked in the native save dialog; the daemon writes the plaintext there
+/// itself. Refuses to overwrite an existing file unless `force` is set — the
+/// frontend re-calls with `force = true` after a confirm. The response carries
+/// only the filename + byte count; **the bytes never enter the webview**.
+#[tauri::command]
+pub fn get_attachment(
+    vault: String,
+    item: String,
+    id: String,
+    dest_path: String,
+    force: bool,
+) -> Result<model::AttachmentSavedView, String> {
+    let profile = daemon::profile_string()?;
+    let resp = daemon::call(&Request::GetAttachment {
+        profile,
+        vault,
+        item,
+        attachment_id: id,
+        dest_path,
+        force,
+    })
+    .map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    match resp {
+        Response::AttachmentSaved {
+            filename,
+            bytes_written,
+        } => Ok(model::AttachmentSavedView {
+            filename,
+            bytes_written,
+        }),
+        other => Err(format!("unexpected daemon response: {}", other.kind())),
+    }
+}
+
+/// Remove one attachment by id. Returns `()` on success.
+#[tauri::command]
+pub fn delete_attachment(vault: String, item: String, id: String) -> Result<(), String> {
+    let profile = daemon::profile_string()?;
+    let resp = daemon::call(&Request::DeleteAttachment {
+        profile,
+        vault,
+        item,
+        attachment_id: id,
+    })
+    .map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    match resp {
+        Response::Ok { .. } => Ok(()),
+        other => Err(format!("unexpected daemon response: {}", other.kind())),
+    }
+}
+
 impl SessionState {
     /// A secret-free message for the error-state variants (used when we need a
     /// `String` rather than a `SessionState`).

@@ -9,12 +9,22 @@
   a seconds-remaining ring.
 -->
 <script lang="ts">
-  import { getItem, revealField, totp as totpApi, deleteItem } from "../lib/api";
-  import type { ItemView, TotpView } from "../lib/types";
-  import { MASK, typeLabel, formatTimestamp, groupTotp } from "../lib/format";
+  import {
+    getItem,
+    revealField,
+    totp as totpApi,
+    deleteItem,
+    listAttachments,
+    addAttachment,
+    getAttachment,
+    deleteAttachment,
+  } from "../lib/api";
+  import type { ItemView, TotpView, AttachmentView } from "../lib/types";
+  import { MASK, typeLabel, formatTimestamp, groupTotp, humanSize } from "../lib/format";
   import { formatDotenv, buildRunCommand } from "../lib/envset";
   import { copyToClipboard } from "../lib/clipboard";
   import { toast } from "../lib/toast";
+  import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 
   interface Props {
     vault: string;
@@ -109,6 +119,95 @@
     toast(ok ? "Command copied" : "Copy failed", ok ? "ok" : "error");
   }
 
+  // --- Attachments ------------------------------------------------------
+  // The attachment list is NON-SECRET metadata (id / filename / size). Crucially
+  // the attachment PLAINTEXT never enters the webview: attaching passes the OS
+  // file-picker's SOURCE path to the daemon (which reads it), and saving passes
+  // a native save-dialog DEST path to the daemon (which writes it). Only paths +
+  // metadata cross the command bridge — a stronger boundary than reveal_field.
+  // We still reset this list on item change (below, in load()) to stay tidy.
+  let attachments = $state<AttachmentView[]>([]);
+  let attachmentsError = $state("");
+  let attaching = $state(false);
+  // Per-attachment busy flags (Save / Remove), keyed by attachment id.
+  let attachBusy = $state<Record<string, boolean>>({});
+  // Remove-confirmation: the attachment id awaiting a confirm, or null.
+  let confirmingRemove = $state<string | null>(null);
+
+  async function loadAttachments() {
+    attachmentsError = "";
+    try {
+      attachments = await listAttachments(vault, itemId);
+    } catch (err) {
+      attachments = [];
+      attachmentsError = typeof err === "string" ? err : "Could not list attachments.";
+    }
+  }
+
+  async function attachFile() {
+    if (attaching) return;
+    // Native OPEN dialog → returns the picked SOURCE path (a string) or null.
+    let picked: string | null;
+    try {
+      const result = await openDialog({ multiple: false, directory: false, title: "Choose a file to attach" });
+      picked = typeof result === "string" ? result : null;
+    } catch (err) {
+      toast(typeof err === "string" ? err : "Could not open the file picker", "error");
+      return;
+    }
+    if (!picked) return; // user cancelled
+    attaching = true;
+    try {
+      // The daemon reads `picked` itself; the file bytes never cross into JS.
+      await addAttachment(vault, itemId, picked);
+      await loadAttachments();
+      toast("File attached", "ok");
+    } catch (err) {
+      toast(typeof err === "string" ? err : "Attach failed", "error");
+    } finally {
+      attaching = false;
+    }
+  }
+
+  async function saveAttachment(att: AttachmentView) {
+    if (attachBusy[att.id]) return;
+    // Native SAVE dialog → returns the chosen DEST path (a string) or null.
+    let dest: string | null;
+    try {
+      dest = await saveDialog({ defaultPath: att.filename, title: "Save attachment as" });
+    } catch (err) {
+      toast(typeof err === "string" ? err : "Could not open the save dialog", "error");
+      return;
+    }
+    if (!dest) return; // user cancelled
+    attachBusy = { ...attachBusy, [att.id]: true };
+    try {
+      // The daemon decrypts and writes to `dest` itself — plaintext never in JS.
+      // The native save dialog already confirmed any overwrite, so force = true.
+      const saved = await getAttachment(vault, itemId, att.id, dest, true);
+      toast(`Saved ${saved.filename} to ${dest}`, "ok");
+    } catch (err) {
+      toast(typeof err === "string" ? err : "Save failed", "error");
+    } finally {
+      attachBusy = { ...attachBusy, [att.id]: false };
+    }
+  }
+
+  async function removeAttachment(att: AttachmentView) {
+    if (attachBusy[att.id]) return;
+    attachBusy = { ...attachBusy, [att.id]: true };
+    try {
+      await deleteAttachment(vault, itemId, att.id);
+      confirmingRemove = null;
+      await loadAttachments();
+      toast("Attachment removed", "ok");
+    } catch (err) {
+      toast(typeof err === "string" ? err : "Remove failed", "error");
+    } finally {
+      attachBusy = { ...attachBusy, [att.id]: false };
+    }
+  }
+
   async function load() {
     loading = true;
     error = "";
@@ -119,12 +218,20 @@
     devCommand = "";
     totp = null;
     stopTotp();
+    // Clear attachment list state on item change (non-secret metadata, but keep
+    // it tidy — same discipline as the other per-item state above).
+    attachments = [];
+    attachmentsError = "";
+    attachBusy = {};
+    confirmingRemove = null;
     try {
       const it = await getItem(vault, itemId);
       item = it;
       if (it.type_str === "totp") {
         await startTotp();
       }
+      // Attachments hang off any item type; load them once the item is known.
+      await loadAttachments();
     } catch (err) {
       item = null;
       error = typeof err === "string" ? err : "Could not load the item.";
@@ -424,5 +531,86 @@
         {/if}
       </div>
     {/if}
+
+    <!--
+      Attachments (available on ALL item types). SECURITY: the attachment
+      plaintext NEVER enters this webview. "Attach file" hands the daemon the OS
+      picker's SOURCE path (the daemon reads it); "Save" hands the daemon a
+      native save-dialog DEST path (the daemon writes it). Only paths + metadata
+      (id / filename / size) cross the bridge — a stronger boundary than the
+      per-field reveal, whose value does reach JS.
+    -->
+    <div class="field-group" style="margin-top:1.5rem;border-top:1px solid var(--border);padding-top:1rem">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:0.5rem">
+        <div class="field-name">Attachments</div>
+        <button class="btn btn-small" type="button" onclick={attachFile} disabled={attaching}>
+          {attaching ? "Attaching…" : "+ Attach file"}
+        </button>
+      </div>
+      <p class="hint" style="margin:0.25rem 0 0.6rem">
+        Files are stored encrypted. Downloads are written straight to the file
+        you choose — the contents never pass through this window.
+      </p>
+
+      {#if attachmentsError}
+        <div class="error" role="alert" aria-live="polite">{attachmentsError}</div>
+      {/if}
+
+      <div aria-live="polite">
+        {#if attachments.length}
+          <div role="list" aria-label="Attachments">
+            {#each attachments as att (att.id)}
+              <div class="field" role="listitem" style="grid-template-columns:1fr auto">
+                <div>
+                  <span style="user-select:text">{att.filename}</span>
+                  <span class="muted" style="margin-left:0.5rem">{humanSize(att.size)}</span>
+                </div>
+                {#if confirmingRemove === att.id}
+                  <div class="field-actions">
+                    <span class="sr-only" role="status">Confirm removing {att.filename}</span>
+                    <span aria-hidden="true" class="muted" style="align-self:center">Remove?</span>
+                    <button
+                      class="btn btn-small"
+                      style="color:var(--danger);border-color:var(--danger)"
+                      onclick={() => removeAttachment(att)}
+                      disabled={attachBusy[att.id]}
+                    >
+                      {attachBusy[att.id] ? "Removing…" : "Remove"}
+                    </button>
+                    <button
+                      class="btn btn-small btn-ghost"
+                      onclick={() => (confirmingRemove = null)}
+                      disabled={attachBusy[att.id]}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                {:else}
+                  <div class="field-actions">
+                    <button
+                      class="btn btn-small"
+                      onclick={() => saveAttachment(att)}
+                      disabled={attachBusy[att.id]}
+                      aria-label={`Save ${att.filename}`}
+                    >
+                      {attachBusy[att.id] ? "…" : "Save"}
+                    </button>
+                    <button
+                      class="btn btn-small btn-ghost"
+                      onclick={() => (confirmingRemove = att.id)}
+                      aria-label={`Remove ${att.filename}`}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        {:else if !attachmentsError}
+          <p class="muted" style="margin:0">No attachments.</p>
+        {/if}
+      </div>
+    </div>
   </div>
 {/if}

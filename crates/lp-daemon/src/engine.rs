@@ -634,6 +634,59 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
         Request::SyncAdopt { dir, .. } => {
             with_session(state, |session| crate::sync::sync_adopt(session, &dir))
         }
+
+        // --- Attachments (path-based; no blob bytes cross the pipe) ---------
+        Request::AddAttachment {
+            vault,
+            item,
+            source_path,
+            filename,
+            ..
+        } => with_session(state, |session| {
+            add_attachment(session, &vault, &item, &source_path, &filename)
+        }),
+
+        Request::ListAttachments { vault, item, .. } => with_session(state, |session| {
+            let v = open_vault(session, &vault)?;
+            let it = find_item(&v, &item)?;
+            let infos = v.list_attachments(it.item_id).map_err(vault_err)?;
+            Ok(Response::Attachments {
+                attachments: infos
+                    .into_iter()
+                    .map(|a| crate::protocol::WireAttachment {
+                        attachment_id: a.attachment_id.to_hyphenated(),
+                        filename: a.filename,
+                        size: a.size_plain,
+                    })
+                    .collect(),
+            })
+        }),
+
+        Request::GetAttachment {
+            vault,
+            item,
+            attachment_id,
+            dest_path,
+            force,
+            ..
+        } => with_session(state, |session| {
+            get_attachment(session, &vault, &item, &attachment_id, &dest_path, force)
+        }),
+
+        Request::DeleteAttachment {
+            vault,
+            item,
+            attachment_id,
+            ..
+        } => with_session(state, |session| {
+            let v = open_vault(session, &vault)?;
+            let it = find_item(&v, &item)?;
+            let att_id = resolve_attachment(&v, it.item_id, &attachment_id)?;
+            v.delete_attachment(att_id).map_err(vault_err)?;
+            Ok(Response::Ok {
+                message: Some("removed".into()),
+            })
+        }),
     };
 
     // Any successfully-handled request (even one returning a usage Error) counts
@@ -671,7 +724,11 @@ fn request_profile(request: &Request) -> Option<&str> {
         | Request::SyncPull { profile, .. }
         | Request::SyncStatus { profile, .. }
         | Request::ShareVaultToDevice { profile, .. }
-        | Request::SyncAdopt { profile, .. } => Some(profile),
+        | Request::SyncAdopt { profile, .. }
+        | Request::AddAttachment { profile, .. }
+        | Request::ListAttachments { profile, .. }
+        | Request::GetAttachment { profile, .. }
+        | Request::DeleteAttachment { profile, .. } => Some(profile),
         Request::Ping | Request::Lock | Request::Shutdown => None,
     }
 }
@@ -1004,6 +1061,163 @@ fn fill_login(session: &Session, item_ref: &str, origin: &str) -> Result<Respons
         username: login_username(&item.payload),
         password: login_password(&item.payload),
     })
+}
+
+/// Handle [`Request::AddAttachment`]: read the SOURCE file **from disk inside
+/// the daemon** (same-user IPC) and store it encrypted. The blob bytes never
+/// crossed the pipe — the caller passed a path, not the data.
+///
+/// The size cap is enforced twice: a friendly up-front check on the file's
+/// metadata length (so an oversize file is rejected before it is read fully),
+/// and again structurally inside [`lp_vault::Vault::add_attachment`] before any
+/// blob is written. An empty `filename` is derived from the source's base name.
+fn add_attachment(
+    session: &Session,
+    vault_ref: &str,
+    item_ref: &str,
+    source_path: &str,
+    filename: &str,
+) -> Result<Response, Response> {
+    let v = open_vault(session, vault_ref)?;
+    let it = find_item(&v, item_ref)?;
+
+    let path = Path::new(source_path);
+
+    // Derive the stored filename: the caller's, else the source's base name.
+    let filename = if filename.trim().is_empty() {
+        path.file_name()
+            .and_then(|f| f.to_str())
+            .map(str::to_string)
+            .ok_or_else(|| usage("could not derive a filename from the source path"))?
+    } else {
+        filename.to_string()
+    };
+
+    // Reject an oversize file BEFORE reading it fully (cheap metadata check).
+    // The vault re-checks the actual byte length before any blob write.
+    if let Ok(meta) = std::fs::metadata(path)
+        && meta.len() > lp_vault::MAX_ATTACHMENT_BYTES as u64
+    {
+        return Err(usage(format!(
+            "the file is larger than the {} MiB attachment limit",
+            lp_vault::MAX_ATTACHMENT_BYTES / (1024 * 1024)
+        )));
+    }
+
+    // Read the source file inside the daemon (its bytes never cross the pipe).
+    let data = std::fs::read(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            usage("the source file does not exist")
+        } else {
+            usage(format!("could not read the source file: {e}"))
+        }
+    })?;
+
+    let id = v
+        .add_attachment(it.item_id, &filename, &data)
+        .map_err(vault_err)?;
+    Ok(Response::Attachment {
+        attachment_id: id.to_hyphenated(),
+        filename,
+    })
+}
+
+/// Handle [`Request::GetAttachment`]: decrypt the attachment and write its
+/// plaintext to `dest_path` **from inside the daemon**. The plaintext bytes go
+/// daemon↔disk directly — they are NOT in the response (a stronger boundary
+/// than a revealed field).
+///
+/// Refuses to overwrite an existing `dest_path` unless `force` is set. Creates
+/// the destination's parent directories; the file is owner-only (0600) on Unix.
+fn get_attachment(
+    session: &Session,
+    vault_ref: &str,
+    item_ref: &str,
+    attachment_ref: &str,
+    dest_path: &str,
+    force: bool,
+) -> Result<Response, Response> {
+    let v = open_vault(session, vault_ref)?;
+    let it = find_item(&v, item_ref)?;
+    let att_id = resolve_attachment(&v, it.item_id, attachment_ref)?;
+
+    let dest = Path::new(dest_path);
+    // Refuse to clobber an existing file unless forced.
+    if dest.exists() && !force {
+        return Err(usage(
+            "the destination file already exists; pass force to overwrite",
+        ));
+    }
+
+    let (filename, data) = v.get_attachment(att_id).map_err(vault_err)?;
+    write_plaintext_0600(dest, &data)
+        .map_err(|e| usage(format!("could not write the destination file: {e}")))?;
+    let bytes_written = data.len() as u64;
+    Ok(Response::AttachmentSaved {
+        filename,
+        bytes_written,
+    })
+}
+
+/// Write `data` to `path`, creating parent dirs and the file owner-only (0600)
+/// on Unix. On Windows the file inherits the parent directory's ACLs (mirrors
+/// the CLI's `attach get` writer). The plaintext lands here because saving a
+/// file inherently materializes it — it never crossed the IPC pipe.
+fn write_plaintext_0600(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    f.write_all(data)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+/// Resolve an attachment reference (its id or its decrypted filename) to an
+/// [`lp_vault::AttachmentId`] within `item_id`. Mirrors the CLI's
+/// `resolve_attachment`: id match first, then a unique-filename match.
+fn resolve_attachment(
+    vault: &Vault<'_>,
+    item_id: lp_vault::ItemId,
+    reference: &str,
+) -> Result<lp_vault::AttachmentId, Response> {
+    let attachments = vault.list_attachments(item_id).map_err(vault_err)?;
+
+    if let Some(id) = parse_id(reference)
+        && attachments.iter().any(|a| a.attachment_id == id)
+    {
+        return Ok(id);
+    }
+
+    let matches: Vec<lp_vault::AttachmentId> = attachments
+        .iter()
+        .filter(|a| a.filename == reference)
+        .map(|a| a.attachment_id)
+        .collect();
+    match matches.as_slice() {
+        [] => Err(usage(format!(
+            "no attachment named or id {reference:?} on this item"
+        ))),
+        [only] => Ok(*only),
+        _ => Err(usage(format!(
+            "attachment name {reference:?} is ambiguous ({} match); use the attachment id",
+            matches.len()
+        ))),
+    }
 }
 
 /// Parse a canonical item payload `Value` into an [`lp_vault::ItemPayload`].
