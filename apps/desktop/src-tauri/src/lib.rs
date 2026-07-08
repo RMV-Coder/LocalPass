@@ -17,6 +17,7 @@
 
 pub mod commands;
 pub mod daemon;
+pub mod dotenv;
 pub mod generate;
 pub mod item_input;
 pub mod model;
@@ -45,6 +46,7 @@ pub fn run() {
             commands::totp,
             commands::generate_password,
             commands::generate_passphrase,
+            commands::parse_dotenv,
             commands::create_item,
             commands::update_item,
             commands::delete_item,

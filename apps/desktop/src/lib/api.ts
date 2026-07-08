@@ -15,6 +15,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   CreatedAccount,
   DeviceIdentityView,
+  EnvEntryView,
   GeneratedView,
   ItemSummaryView,
   ItemView,
@@ -104,6 +105,14 @@ export function generatePassword(length: number, symbols: boolean): Promise<Gene
 /** Generate an EFF-wordlist passphrase (computed in Rust). */
 export function generatePassphrase(words: number, separator: string): Promise<GeneratedView> {
   return invoke<GeneratedView>("generate_passphrase", { words, separator });
+}
+
+/** Parse pasted raw `.env` text into ordered KEY=value entries (computed in
+ *  Rust, mirroring the canonical dotenv rules). Not a secret with respect to the
+ *  daemon: the text is no more sensitive than the entries it becomes and never
+ *  leaves the app. */
+export function parseDotenv(text: string): Promise<EnvEntryView[]> {
+  return invoke<EnvEntryView[]>("parse_dotenv", { text });
 }
 
 /** Create a new item in a vault. Returns the new item's id. Secret values in

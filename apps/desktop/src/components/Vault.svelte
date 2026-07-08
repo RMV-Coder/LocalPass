@@ -312,6 +312,7 @@
       {#key selectedItem}
         <ItemDetail
           vault={selectedVault}
+          vaultName={currentVaultName}
           itemId={selectedItem}
           onEdit={startEdit}
           onDeleted={onItemDeleted}

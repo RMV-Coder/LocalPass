@@ -401,6 +401,20 @@ pub fn generate_passphrase(words: usize, separator: String) -> Result<GeneratedV
     crate::generate::passphrase(words, &separator)
 }
 
+/// Parse pasted raw `.env` text into ordered `KEY=value` entries (no daemon).
+///
+/// Pure and secret-free with respect to the daemon: the pasted text is no more
+/// sensitive than the entries it becomes, and both stay inside the app (this is
+/// the "Paste .env" import in the item form). Parsing lives in Rust so the GUI
+/// shares one tested implementation of the canonical dotenv rules (see
+/// [`crate::dotenv`]): blank/`#` lines skipped, a leading `export ` tolerated,
+/// split on the first `=`, a single matching quote-pair stripped, no
+/// interpolation, non-empty keys; malformed lines are skipped.
+#[tauri::command]
+pub fn parse_dotenv(text: String) -> Vec<crate::dotenv::EnvEntryView> {
+    crate::dotenv::parse(&text)
+}
+
 /// Create a new item in `vault` from typed form input.
 ///
 /// Builds the canonical `ItemPayload` JSON from `input` (see

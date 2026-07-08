@@ -33,6 +33,13 @@ export interface EnvEntryInput {
   value: string;
 }
 
+/** One `KEY=value` entry parsed from pasted `.env` text by `parseDotenv`. Same
+ *  shape as {@link EnvEntryInput}; a distinct name marks it as parser output. */
+export interface EnvEntryView {
+  key: string;
+  value: string;
+}
+
 /** The typed item-form payload sent to `create_item` / `update_item`. Secret
  *  string fields are optional: an edit leaving one undefined preserves the
  *  current (unrevealed) value server-side. */

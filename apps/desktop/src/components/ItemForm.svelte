@@ -14,7 +14,7 @@
   store, never echoed back.
 -->
 <script lang="ts">
-  import { createItem, updateItem, generatePassword } from "../lib/api";
+  import { createItem, updateItem, generatePassword, parseDotenv } from "../lib/api";
   import type { ItemView, NewItemInput, CustomFieldInput, EnvEntryInput } from "../lib/types";
   import { toast } from "../lib/toast";
 
@@ -116,6 +116,69 @@
     envEntries = envEntries.filter((_, idx) => idx !== i);
   }
 
+  // --- Paste .env import ------------------------------------------------
+  // The pasted blob is transient form state: parsed into entries on Import,
+  // then cleared. It is no more secret than the entries themselves and never
+  // leaves the app (parsing runs in the Rust backend). Cleared on unmount too.
+  let showPasteEnv = $state(false);
+  let pasteEnvText = $state("");
+  let pasteBusy = $state(false);
+
+  // Merge parsed entries into `envEntries` with last-wins on duplicate keys
+  // (dotenv semantics). When appending, existing entries keep their position but
+  // a later duplicate key overwrites the earlier value. Blank-key rows from the
+  // manual editor are dropped so they don't shadow a real key.
+  function mergeLastWins(base: EnvEntryInput[], incoming: EnvEntryInput[]): EnvEntryInput[] {
+    const order: string[] = [];
+    const map = new Map<string, string>();
+    for (const e of [...base, ...incoming]) {
+      const key = e.key.trim();
+      if (key.length === 0) continue;
+      if (!map.has(key)) order.push(key);
+      map.set(key, e.value);
+    }
+    return order.map((k) => ({ key: k, value: map.get(k) ?? "" }));
+  }
+
+  async function importEnv(mode: "append" | "replace") {
+    if (pasteBusy) return;
+    pasteBusy = true;
+    error = "";
+    try {
+      const parsed = await parseDotenv(pasteEnvText);
+      if (parsed.length === 0) {
+        toast("No variables found in the pasted text", "error");
+        return;
+      }
+      const incoming: EnvEntryInput[] = parsed.map((e) => ({ key: e.key, value: e.value }));
+      const before = mode === "replace" ? [] : envEntries;
+      // Count keys that already existed (append) or repeat within the paste —
+      // these are overwritten last-wins, reported as a note.
+      const beforeKeys = new Set(before.map((e) => e.key.trim()).filter((k) => k.length > 0));
+      const seen = new Set<string>();
+      let overwritten = 0;
+      for (const e of incoming) {
+        const k = e.key.trim();
+        if (k.length === 0) continue;
+        if (beforeKeys.has(k) || seen.has(k)) overwritten += 1;
+        seen.add(k);
+      }
+      envEntries = mergeLastWins(before, incoming);
+      // Clear the transient paste text after a successful import.
+      pasteEnvText = "";
+      showPasteEnv = false;
+      const note =
+        overwritten > 0
+          ? ` (${overwritten} duplicate key${overwritten === 1 ? "" : "s"} overwritten, last wins)`
+          : "";
+      toast(`Imported ${incoming.length} variable${incoming.length === 1 ? "" : "s"}${note}`, "ok");
+    } catch (err) {
+      toast(typeof err === "string" ? err : "Could not parse the pasted .env", "error");
+    } finally {
+      pasteBusy = false;
+    }
+  }
+
   function buildInput(): NewItemInput {
     const tags = tagsText
       .split(",")
@@ -195,11 +258,14 @@
     }
   }
 
-  // Wipe transient secret form state on teardown.
+  // Wipe transient secret form state on teardown. The pasted .env blob is
+  // transient form state too (it holds the same values as the entries), so it is
+  // cleared here as well.
   $effect(() => () => {
     password = "";
     sshPrivate = "";
     totpSecret = "";
+    pasteEnvText = "";
   });
 </script>
 
@@ -346,6 +412,56 @@
     {/if}
 
     {#if type_str === "env_set"}
+      <div class="field-group">
+        <button
+          class="btn btn-small"
+          type="button"
+          onclick={() => (showPasteEnv = !showPasteEnv)}
+          aria-expanded={showPasteEnv}
+          aria-controls="paste-env-area"
+        >
+          {showPasteEnv ? "Hide paste .env" : "Paste .env"}
+        </button>
+        {#if showPasteEnv}
+          <div id="paste-env-area" style="margin-top:0.5rem">
+            <label for="if-paste-env" class="hint" style="display:block;margin:0 0 0.35em">
+              Paste raw <code>.env</code> content, then choose how to merge it. Blank lines
+              and <code>#</code> comments are ignored; a leading <code>export</code> is fine.
+            </label>
+            <textarea
+              id="if-paste-env"
+              bind:value={pasteEnvText}
+              rows="5"
+              spellcheck="false"
+              autocomplete="off"
+              placeholder={"# paste .env here\nDATABASE_URL=postgres://localhost/db\nexport API_KEY=abc123"}
+              style="width:100%;font-family:var(--mono);padding:0.55em 0.7em;border:1px solid var(--border);border-radius:6px;background:var(--bg-panel);color:var(--text)"
+            ></textarea>
+            <div class="toolbar" style="margin-top:0.4rem">
+              <button
+                class="btn btn-small btn-primary"
+                type="button"
+                onclick={() => importEnv("append")}
+                disabled={pasteBusy || pasteEnvText.trim().length === 0}
+              >
+                {pasteBusy ? "Importing…" : "Append"}
+              </button>
+              <button
+                class="btn btn-small"
+                type="button"
+                onclick={() => importEnv("replace")}
+                disabled={pasteBusy || pasteEnvText.trim().length === 0}
+              >
+                Replace all
+              </button>
+            </div>
+            <p class="hint" style="margin:0.35em 0 0">
+              Duplicate keys use last-wins (matching dotenv). The pasted text is cleared
+              after import.
+            </p>
+          </div>
+        {/if}
+      </div>
       <div class="field-group" role="group" aria-label="Environment variables">
         <p class="field-name" style="margin:0 0 0.35em">Environment variables</p>
         {#each envEntries as entry, i (i)}
