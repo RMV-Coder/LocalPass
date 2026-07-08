@@ -1273,7 +1273,12 @@ impl<'s> Vault<'s> {
     /// Author an op inside `tx`: assign seq/lamport/prev_hash, encrypt the
     /// payload under the VaultKey, sign fields 1..10, and INSERT the `ops` row.
     /// Returns the new op id (stored on the version/tombstone row).
-    fn author_op(
+    ///
+    /// Crate-visible so the sibling [`crate::attachment`] module authors
+    /// `AttachAdd`/`AttachDelete` ops in the same transaction as the attachment
+    /// row write (sync-protocol.md §2) — keeping the per-device chain extended
+    /// and [`verify_local_chain`](Self::verify_local_chain) valid.
+    pub(crate) fn author_op(
         &self,
         tx: &Connection,
         kind: OpKind,
@@ -1438,14 +1443,10 @@ impl OpRow {
             .as_slice()
             .try_into()
             .map_err(|_| Error::Invalid("stored prev_hash not 32 bytes"))?;
-        let kind = match u8::try_from(self.op_kind).ok() {
-            Some(1) => OpKind::Create,
-            Some(2) => OpKind::Update,
-            Some(3) => OpKind::Delete,
-            Some(4) => OpKind::Restore,
-            Some(5) => OpKind::Rewrap,
-            _ => return Err(Error::Invalid("unknown op_kind")),
-        };
+        let kind = u8::try_from(self.op_kind)
+            .ok()
+            .and_then(OpKind::from_code)
+            .ok_or(Error::Invalid("unknown op_kind"))?;
         let target = match &self.target_item_id {
             Some(bytes) => ItemTarget::item(&Id::from_slice(bytes)?),
             None => ItemTarget::none(),

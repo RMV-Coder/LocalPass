@@ -89,17 +89,49 @@ Op wire version 2 (signed region = version byte + fields 1..11, signature = fiel
 | `delete`  | 3 | `{}` (tombstone; metadata in header) |
 | `restore` | 4 | `{ restore_to_version }` |
 | `rewrap`  | 5 | new wrapped ItemKey(s) for new recipient/rotated VaultKey; **no** payload change |
+| `attach_add` | 6 | `{ attachment_id, item_id, version, content_hash, size_plain, wrapped_key_env, filename_env }` — attachment metadata (see below); `target_item` = the owning item |
+| `attach_delete` | 7 | `{ attachment_id }` — attachment tombstone; `target_item` = the owning item |
 
 `update` payloads carry field-level deltas so the merge (§4) can resolve
 per-field, not per-item.
+
+**Attachment ops (6/7).** Attachments are first-class ops so their *metadata*
+syncs through the signed op log; the encrypted **blob** is not in the op payload
+— it ships out-of-band through the file channel (§7), content-addressed and
+re-hashed on arrival (tamper detection for free). In the `attach_add` payload
+(canonical JSON, hex-encoded byte fields): `content_hash` is `BLAKE3(ciphertext
+blob)` — the blob's content address; `wrapped_key_env` is the per-attachment key
+wrapped under the **VaultKey** (not the per-device ItemKey — the ItemKey form is
+not portable because each device re-seals versions under a fresh per-version
+ItemKey); `filename_env` is the filename sealed under the same **VaultKey**. A
+receiving device unwraps both under the shared VaultKey and **re-wraps** them
+under its own current-version ItemKey when it materializes the local
+`attachments` row, so the unchanged local read path (ItemKey-form envelopes)
+works on every device.
+
+**Attachment convergence — exists-iff-add-and-no-delete.** An attachment is
+immutable once created; the only mutation is delete. So the merge rule is simple
+and order-independent (no LWW): an attachment **exists iff there is an
+`attach_add` for its `attachment_id` AND no `attach_delete` for that id**.
+Concurrent adds carry distinct UUIDv7 ids, so both survive. An `attach_delete`
+tombstones the id, so a reordered `attach_add` can never resurrect it (the merge
+re-derives the surviving set from the whole op set on every apply). This needs
+no observed-heads reasoning — it is a pure set difference over ids.
 
 ---
 
 ## 2. Op kinds
 
-`create` / `update` / `delete` / `restore` / `rewrap` (enum above). `rewrap`
-exists so sharing and key-rotation (PRD §4.3, §4.5) ship as ops without
-re-encrypting payloads. All op kinds are signed and chained identically.
+`create` / `update` / `delete` / `restore` / `rewrap` / `attach_add` /
+`attach_delete` (enum above). `rewrap` exists so sharing and key-rotation (PRD
+§4.3, §4.5) ship as ops without re-encrypting payloads. `attach_add` /
+`attach_delete` (kinds 6/7) make **file attachments sync**: their metadata is a
+signed op like any other (so the chain still verifies), while the content-
+addressed encrypted blob ships separately through the file channel (§7). Adding
+`attach_add`/`attach_delete` is an **additive** wire change: a new `op_kind`
+value covered by the existing canonical bytes + signature, needing **no op wire
+version bump** (the layout is unchanged). All op kinds are signed and chained
+identically.
 
 ---
 
@@ -298,7 +330,21 @@ is fully untrusted (§5 protects it).
       <device_id>-<seq_lo>-<seq_hi>.oplog   -- a contiguous seq range from one device
   chain/
     <device_id>.head                     -- last seq + head hash this writer published
+  keys/
+    <device_id>-<vault_id>.wrapped       -- sealed VaultKey for a peer (cross-device share)
+  attachments/
+    <content_hash_hex>.blob              -- content-addressed encrypted attachment blob
 ```
+
+- **`attachments/<content_hash_hex>.blob`** — the encrypted attachment bodies.
+  Content-addressed by `BLAKE3(ciphertext)` (the same `content_hash` an
+  `attach_add` op carries), so a blob is **immutable** once written and shared by
+  identical ciphertexts (dedup). A pusher copies every local blob its live
+  attachments reference into this dir, skipping any already present
+  (content-addressed → idempotent). The channel adds no security: the blob is
+  already E2EE, and a reader verifies it by re-hashing (see §7.3). Attachment
+  *metadata* is **not** here — it rides the signed op log (`ops/`) as
+  `attach_add`/`attach_delete` ops.
 
 - **Per-device subdirectories** so two devices writing concurrently never touch
   the same file (append-only, no write conflicts on the dumb channel — the exact
@@ -328,9 +374,28 @@ fail chain checks if forged) — it can never inject state.
    §7).
 4. Update `chain/<device_id>.head` for devices whose ops this peer re-publishes
    (store-and-forward for offline peers).
+5. **Fetch attachment blobs.** After applying ops (which may have materialized
+   new `attach_add` rows), compute the **referenced-but-missing** set:
+   `content_hash`es referenced by live attachment rows minus blobs already on
+   local disk. For each, read `attachments/<content_hash_hex>.blob` from the
+   channel:
+   - **present** → verify `BLAKE3(bytes) == content_hash` before storing. A
+     **mismatch is an ALARM** (tampered/corrupt blob on the untrusted channel):
+     the bytes are rejected and never stored (fail closed), surfaced to the user,
+     and the attachment stays pending. A match stores the blob locally
+     (atomically) — the attachment becomes readable.
+   - **absent** → the peer has not shipped it yet. Count it **pending** (NOT an
+     error); it arrives on a later pull. A materialized attachment row may thus
+     temporarily lack its local blob.
+
+   Because ingest de-duplicates ops by `op_id` (including duplicates delivered
+   together by overlapping `[1, hi]` segments), an all-at-once pull of many
+   segments is safe: an exact op re-delivered in the same batch is idempotent,
+   not a replay.
 
 Idempotent: re-reading an already-applied segment is a no-op (op_id/seq already
-present; `UNIQUE(device_id, seq)` in `ops`).
+present; `UNIQUE(device_id, seq)` in `ops`); re-fetching a blob already on disk
+is skipped (content-addressed).
 
 ### 7.4 Extension points (out of scope, noted)
 

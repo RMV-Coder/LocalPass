@@ -379,32 +379,163 @@ fn attachment_retrievable_until_item_purged() {
     );
 }
 
-/// Adding/getting/deleting attachments does NOT author ops (local-only in this
-/// wave) and leaves the op chain intact.
+/// Adding an attachment authors ONE AttachAdd op, deleting authors ONE
+/// AttachDelete op, and a get authors none — with the op chain still valid
+/// (sync-protocol.md §2). Getting does not touch the chain.
 #[test]
-fn attachments_do_not_touch_op_chain() {
+fn attachments_author_ops_and_keep_chain_valid() {
     let (dir, session, vault_id, item_id) = setup();
     let vault = session.open_vault(vault_id).unwrap();
 
-    // op count after item create (1 create op).
     let vpath = vault_path(dir.path(), &vault_id);
-    let ops_before: i64 = {
+    let count_ops = || -> i64 {
         let conn = Connection::open(&vpath).unwrap();
         conn.query_row("SELECT COUNT(*) FROM ops", [], |r| r.get(0))
             .unwrap()
     };
+    let count_kind = |kind: i64| -> i64 {
+        let conn = Connection::open(&vpath).unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM ops WHERE op_kind = ?1",
+            params![kind],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+
+    let before = count_ops(); // 1 create op.
 
     let a = vault.add_attachment(item_id, "a.txt", b"aaa").unwrap();
-    vault.get_attachment(a).unwrap();
-    vault.delete_attachment(a).unwrap();
-
-    let ops_after: i64 = {
-        let conn = Connection::open(&vpath).unwrap();
-        conn.query_row("SELECT COUNT(*) FROM ops", [], |r| r.get(0))
-            .unwrap()
-    };
-    assert_eq!(ops_before, ops_after, "attachments must not author ops");
+    assert_eq!(count_ops(), before + 1, "add authors exactly one op");
+    assert_eq!(count_kind(6), 1, "one AttachAdd (kind 6)");
     vault.verify_local_chain().unwrap();
+
+    vault.get_attachment(a).unwrap();
+    assert_eq!(count_ops(), before + 1, "get authors no op");
+
+    vault.delete_attachment(a).unwrap();
+    assert_eq!(count_ops(), before + 2, "delete authors exactly one op");
+    assert_eq!(count_kind(7), 1, "one AttachDelete (kind 7)");
+    vault.verify_local_chain().unwrap();
+}
+
+/// `store_attachment_blob` verifies blake3(bytes) == content_hash before
+/// writing: a matching hash succeeds and lands the blob; a mismatch is rejected
+/// as `Invalid` and writes nothing.
+#[test]
+fn store_attachment_blob_verifies_hash() {
+    let (_dir, session, vault_id, _item_id) = setup();
+    let vault = session.open_vault(vault_id).unwrap();
+
+    let bytes = b"content-addressed ciphertext bytes";
+    let hash_hex = {
+        let h = lp_crypto::blake3_256(bytes);
+        let mut s = String::new();
+        for b in h {
+            s.push_str(&format!("{b:02x}"));
+        }
+        s
+    };
+
+    // Correct hash → stored + readable back byte-identical.
+    vault.store_attachment_blob(&hash_hex, bytes).unwrap();
+    assert_eq!(
+        vault.read_attachment_blob(&hash_hex).unwrap().as_deref(),
+        Some(&bytes[..])
+    );
+    assert!(vault.local_attachment_hashes().unwrap().contains(&hash_hex));
+
+    // Wrong hash for the bytes → rejected, nothing written under that name.
+    let wrong_hex = {
+        let h = lp_crypto::blake3_256(b"different bytes entirely");
+        let mut s = String::new();
+        for b in h {
+            s.push_str(&format!("{b:02x}"));
+        }
+        s
+    };
+    let err = vault.store_attachment_blob(&wrong_hex, bytes).unwrap_err();
+    assert!(
+        matches!(err, lp_vault::Error::Invalid(_)),
+        "hash mismatch must be rejected as Invalid, got {err:?}"
+    );
+    assert!(
+        vault.read_attachment_blob(&wrong_hex).unwrap().is_none(),
+        "a rejected blob must not be written"
+    );
+}
+
+/// `referenced_attachment_hashes` reports live-row content hashes;
+/// `local_attachment_hashes` reports on-disk blobs. After an add they agree;
+/// after removing the blob file (simulating a not-yet-fetched peer state) the
+/// hash is referenced-but-not-local (the pending set).
+#[test]
+fn referenced_vs_local_hashes_track_pending() {
+    let (dir, session, vault_id, item_id) = setup();
+    let vault = session.open_vault(vault_id).unwrap();
+    vault.add_attachment(item_id, "f.bin", b"body").unwrap();
+
+    let referenced = vault.referenced_attachment_hashes().unwrap();
+    let local = vault.local_attachment_hashes().unwrap();
+    assert_eq!(referenced.len(), 1);
+    assert_eq!(local, referenced, "add leaves referenced == local");
+
+    // Remove the on-disk blob → referenced still lists it, local no longer does.
+    let att_dir = attachments_dir(dir.path(), &vault_id);
+    for e in std::fs::read_dir(&att_dir).unwrap() {
+        let p = e.unwrap().path();
+        if p.extension().and_then(|x| x.to_str()) == Some("blob") {
+            std::fs::remove_file(&p).unwrap();
+        }
+    }
+    let referenced2 = vault.referenced_attachment_hashes().unwrap();
+    let local2 = vault.local_attachment_hashes().unwrap();
+    assert_eq!(referenced2.len(), 1, "row still references the hash");
+    assert!(
+        local2.is_empty(),
+        "blob gone → pending (referenced not local)"
+    );
+}
+
+/// Foreign apply, tombstone path: an `attachment_tombstone` removes a row, is
+/// idempotent (removing an absent id is a no-op), and — applied together with an
+/// add for the SAME id in one batch — the tombstone wins (converges to
+/// "deleted", exists-iff-add-and-no-delete; sync-protocol.md §2). The row here
+/// is created via the real `add_attachment` path so its envelopes are valid;
+/// the cross-device *add* materialization (which re-wraps the VaultKey-form op
+/// payload) is exercised end-to-end by the lp-sync two-device round-trip.
+#[test]
+fn foreign_apply_attachment_tombstone_converges() {
+    use lp_vault::Materialization;
+
+    let (_dir, session, vault_id, item_id) = setup();
+    let vault = session.open_vault(vault_id).unwrap();
+
+    // A real attachment (valid ItemKey-form row + one AttachAdd op).
+    let att_id = vault.add_attachment(item_id, "f.bin", b"body").unwrap();
+    assert_eq!(vault.referenced_attachment_hashes().unwrap().len(), 1);
+
+    // Apply a tombstone for it: the row is removed.
+    vault
+        .apply_foreign_ops(&Materialization {
+            attachment_tombstones: vec![att_id],
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(
+        vault.referenced_attachment_hashes().unwrap().is_empty(),
+        "AttachDelete tombstone removes the row"
+    );
+
+    // Idempotent: re-applying the tombstone for the (already-absent) id is a
+    // clean no-op.
+    vault
+        .apply_foreign_ops(&Materialization {
+            attachment_tombstones: vec![att_id],
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(vault.referenced_attachment_hashes().unwrap().is_empty());
 }
 
 // --- helpers --------------------------------------------------------------

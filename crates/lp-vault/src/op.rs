@@ -84,6 +84,31 @@ pub enum OpKind {
     Restore = 4,
     /// A key re-wrap (share/rotate). Reserved; not authored by MVP flows here.
     Rewrap = 5,
+    /// A new attachment added to an item (metadata; the blob ships separately
+    /// through the file channel — sync-protocol.md §2). Payload carries the
+    /// attachment_id, item_id, version, content_hash, size_plain, and the
+    /// already-ItemKey-sealed wrapped-key + filename envelopes.
+    AttachAdd = 6,
+    /// An attachment removed from an item (a tombstone by `attachment_id`;
+    /// sync-protocol.md §2). Payload carries only the `attachment_id`.
+    AttachDelete = 7,
+}
+
+impl OpKind {
+    /// Parse a wire byte into an [`OpKind`], or `None` for an unknown value.
+    #[must_use]
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Create),
+            2 => Some(Self::Update),
+            3 => Some(Self::Delete),
+            4 => Some(Self::Restore),
+            5 => Some(Self::Rewrap),
+            6 => Some(Self::AttachAdd),
+            7 => Some(Self::AttachDelete),
+            _ => None,
+        }
+    }
 }
 
 impl OpKind {

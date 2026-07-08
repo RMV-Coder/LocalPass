@@ -72,6 +72,10 @@ pub struct PushReport {
     pub published: Vec<(DeviceId, u64)>,
     /// Number of segment files written (new; excludes already-present ranges).
     pub segments_written: usize,
+    /// Number of attachment blobs copied into the sync dir this push (new;
+    /// content-addressed, so already-present blobs are skipped — sync-protocol.md
+    /// §7).
+    pub attachments_shipped: usize,
 }
 
 /// Publish this vault's ops (this device's own ops **and** re-publishable peer
@@ -119,6 +123,21 @@ pub fn push(session: &Session, vault: &Vault<'_>) -> Result<PushReport> {
         manifest.devices.insert(device_id.to_hyphenated(), last_seq);
     }
     dir.write_manifest(&manifest)?;
+
+    // Ship attachment blobs (sync-protocol.md §2/§7). Copy every local blob into
+    // the sync dir's `attachments/` unless already present (content-addressed →
+    // idempotent). Metadata already shipped as AttachAdd ops above; the blob is
+    // the out-of-band body a peer fetches and re-hashes to verify.
+    let already: BTreeSet<String> = dir.list_attachment_blob_hashes()?.into_iter().collect();
+    for hash in vault.local_attachment_hashes()? {
+        if already.contains(&hash) {
+            continue;
+        }
+        if let Some(bytes) = vault.read_attachment_blob(&hash)? {
+            dir.write_attachment_blob(&hash, &bytes)?;
+            report.attachments_shipped += 1;
+        }
+    }
     Ok(report)
 }
 
@@ -136,13 +155,27 @@ pub struct PullReport {
     /// Whether a shared-VaultKey blob addressed to this device was found and
     /// imported during this pull (Part D key sharing).
     pub key_imported: bool,
+    /// Number of attachment blobs fetched from the sync dir and verified
+    /// (blake3 == content_hash) into the local vault this pull (sync-protocol.md
+    /// §2/§7).
+    pub attachments_fetched: usize,
+    /// Number of referenced attachment blobs still **pending** — a materialized
+    /// row exists but its blob has not been shipped to the channel yet. NOT an
+    /// error; it arrives on a later pull (sync-protocol.md §7).
+    pub attachments_pending: usize,
+    /// `content_hash`es (hex) of fetched blobs whose `blake3` did **not** match —
+    /// tampered/corrupt bytes on the untrusted channel, rejected (never stored)
+    /// and surfaced as an alarm ([`crate::Alarm::AttachmentBlobTampered`],
+    /// sync-protocol.md §2/§7).
+    pub attachments_tampered: Vec<String>,
 }
 
 impl PullReport {
-    /// Whether any alarm fired (any device quarantined).
+    /// Whether any alarm fired: a device quarantine (§5) OR a tampered
+    /// attachment blob (§2/§7). Both are surfaced, not silently dropped.
     #[must_use]
     pub fn has_alarms(&self) -> bool {
-        !self.quarantines.is_empty()
+        !self.quarantines.is_empty() || !self.attachments_tampered.is_empty()
     }
 }
 
@@ -227,8 +260,49 @@ pub fn pull(session: &Session, vault: &Vault<'_>) -> Result<PullReport> {
             .collect();
         mat.items
             .retain(|it| touched.contains(it.item_id.as_bytes()));
+
+        // Attachment changes: restrict to the items an accepted op actually
+        // touched (an AttachAdd/AttachDelete targets its owning item), so a pull
+        // does not needlessly re-touch attachments of untouched items. Apply is
+        // idempotent either way; this just keeps the write minimal. The tombstone
+        // set is filtered against the ids surviving elsewhere in the batch.
+        mat.attachments
+            .retain(|a| touched.contains(a.item_id.as_bytes()));
+        // Keep every tombstone (removal is idempotent and cheap, and a
+        // tombstone's owning item may not be in `touched` if only the delete op
+        // arrived).
         vault.apply_foreign_ops(&mat)?;
         report.applied = vreport.accepted.len();
+    }
+
+    // Fetch attachment blobs (sync-protocol.md §2/§7). Computed AFTER apply so
+    // newly-materialized rows are counted: referenced-but-missing = the blobs
+    // this vault needs. For each, read it from the sync dir; if present,
+    // store_attachment_blob VERIFIES blake3(bytes) == content_hash before
+    // writing (a mismatch is a surfaced ALARM, never silently accepted); if
+    // absent, it is PENDING (the peer has not shipped it yet — a later pull
+    // completes it, not an error). This runs every pull, so a blob that arrives
+    // after its metadata is picked up even when no new ops applied.
+    {
+        let referenced: BTreeSet<String> =
+            vault.referenced_attachment_hashes()?.into_iter().collect();
+        let local: BTreeSet<String> = vault.local_attachment_hashes()?.into_iter().collect();
+        for hash in referenced.difference(&local) {
+            match dir.read_attachment_blob(hash)? {
+                Some(bytes) => match vault.store_attachment_blob(hash, &bytes) {
+                    Ok(()) => report.attachments_fetched += 1,
+                    Err(lp_vault::Error::Invalid(_)) => {
+                        // Content-hash mismatch: a tampered/corrupt blob on the
+                        // untrusted channel. Surface it as an alarm (§2/§7); the
+                        // bad bytes are never stored (store_attachment_blob failed
+                        // closed), so the attachment stays pending, not poisoned.
+                        report.attachments_tampered.push(hash.clone());
+                    }
+                    Err(e) => return Err(Error::from(e)),
+                },
+                None => report.attachments_pending += 1,
+            }
+        }
     }
 
     // 5) A shared-VaultKey blob addressed to us? Import it (idempotent) and

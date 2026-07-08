@@ -43,8 +43,10 @@ use crate::wire;
 const OPS_DIR: &str = "ops";
 const CHAIN_DIR: &str = "chain";
 const KEYS_DIR: &str = "keys";
+const ATTACH_DIR: &str = "attachments";
 const MANIFEST_FILE: &str = "manifest.json";
 const OPLOG_EXT: &str = "oplog";
+const BLOB_EXT: &str = "blob";
 
 /// The advisory, plaintext channel manifest (sync-protocol.md §7.2).
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -212,6 +214,69 @@ impl SyncDir {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(Error::Io(e)),
         }
+    }
+
+    // --- Attachment blobs (§7 file channel, content-addressed) ------------
+
+    /// Write a content-addressed attachment blob to
+    /// `attachments/<content_hash_hex>.blob`. Immutable once written — a blob
+    /// already present is a byte-identical rewrite (content-addressed), so this
+    /// is idempotent. The caller ships already-encrypted bytes; the channel adds
+    /// no security (the content hash is verified on read by the vault).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] on a write failure.
+    pub fn write_attachment_blob(&self, content_hash_hex: &str, bytes: &[u8]) -> Result<()> {
+        let dir = self.root.join(ATTACH_DIR);
+        fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{content_hash_hex}.{BLOB_EXT}"));
+        write_atomic(&path, bytes)?;
+        Ok(())
+    }
+
+    /// Read a content-addressed attachment blob from the sync dir, or `None` if
+    /// the peer has not shipped it yet (the referenced-but-pending state).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] on a read failure other than not-found.
+    pub fn read_attachment_blob(&self, content_hash_hex: &str) -> Result<Option<Vec<u8>>> {
+        let path = self
+            .root
+            .join(ATTACH_DIR)
+            .join(format!("{content_hash_hex}.{BLOB_EXT}"));
+        match fs::read(&path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(Error::Io(e)),
+        }
+    }
+
+    /// List the `content_hash` (hex) of every attachment blob present in the
+    /// sync dir. Used to skip already-shipped blobs on push.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] on a directory read failure other than not-found.
+    pub fn list_attachment_blob_hashes(&self) -> Result<Vec<String>> {
+        let dir = self.root.join(ATTACH_DIR);
+        let mut out = Vec::new();
+        let entries = match fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+            Err(e) => return Err(Error::Io(e)),
+        };
+        for entry in entries {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some(BLOB_EXT) {
+                continue;
+            }
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                out.push(stem.to_string());
+            }
+        }
+        Ok(out)
     }
 
     /// Remove the sealed VaultKey blob addressed to `me` after a successful

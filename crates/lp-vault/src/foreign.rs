@@ -48,7 +48,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::aad;
 use crate::error::{Error, Result};
-use crate::ids::{DeviceId, Id, ItemId, OpId, VaultId};
+use crate::ids::{AttachmentId, DeviceId, Id, ItemId, OpId, VaultId};
 use crate::op::{ObservedHeads, OpKind};
 use crate::payload::ItemPayload;
 use crate::vault::Vault;
@@ -155,6 +155,38 @@ pub struct TombstoneMaterialization {
     pub op_id: OpId,
 }
 
+/// One attachment row to insert (materialized from an `AttachAdd` op that has
+/// no matching `AttachDelete` tombstone; sync-protocol.md §2). The two envelopes
+/// are the **VaultKey-form** wrapped-key + filename carried in the op payload:
+/// portable across devices (unlike the per-device ItemKey form). On apply the
+/// vault unwraps them under the shared VaultKey and **re-wraps** them under its
+/// own current-version ItemKey for the stored row (see
+/// `Vault::materialize_attachment`). The **blob** is fetched separately (Part C)
+/// — a materialized row may temporarily lack its local blob (the "pending"
+/// state).
+#[derive(Clone, Debug)]
+pub struct AttachmentMaterialization {
+    /// The attachment id.
+    pub attachment_id: AttachmentId,
+    /// The owning item id.
+    pub item_id: ItemId,
+    /// The item version the attachment was recorded against on the author (kept
+    /// for reference; the local row rebinds to this device's current version).
+    pub version: i64,
+    /// BLAKE3 of the ciphertext blob (32 bytes, decoded from the op payload hex).
+    pub content_hash: Vec<u8>,
+    /// The plaintext size in bytes (structural).
+    pub size_plain: i64,
+    /// The **VaultKey-wrapped** per-attachment key (Envelope-v1 bytes, from the
+    /// op payload). Re-wrapped under the local ItemKey on apply.
+    pub wrapped_key_env: Vec<u8>,
+    /// The **VaultKey-sealed** filename (Envelope-v1 bytes, from the op payload).
+    /// Re-sealed under the local ItemKey on apply.
+    pub filename_env: Vec<u8>,
+    /// When the `AttachAdd` op was ingested (unix millis; plaintext structural).
+    pub created_at: i64,
+}
+
 /// The complete result of a merge over a batch of foreign ops: the op rows to
 /// record and the per-item materialized state to write, all applied atomically.
 #[derive(Clone, Debug, Default)]
@@ -165,6 +197,14 @@ pub struct Materialization {
     /// The materialized state of every item touched by this batch. Items not
     /// listed here are left untouched.
     pub items: Vec<ItemMaterialization>,
+    /// Attachments that **exist** after the merge (an `AttachAdd` with no
+    /// `AttachDelete` for its id; sync-protocol.md §2). Inserted idempotently by
+    /// `attachment_id`. The blob ships separately and is not present here.
+    pub attachments: Vec<AttachmentMaterialization>,
+    /// Attachment ids **tombstoned** by an `AttachDelete` — their rows are
+    /// removed (and a reordered `AttachAdd` cannot resurrect them, because the
+    /// merge re-derives the exists-iff-add-and-no-delete set every apply).
+    pub attachment_tombstones: Vec<AttachmentId>,
 }
 
 impl Vault<'_> {
@@ -305,6 +345,26 @@ impl Vault<'_> {
             self.materialize_item(&tx, item)?;
         }
 
+        // 3) Materialize attachment rows (sync-protocol.md §2). The merge already
+        //    enforces exists-iff-add-and-no-delete, but we defend in depth: a
+        //    tombstoned id is removed AND never re-inserted, so an add + delete
+        //    for the same id in one batch nets to "deleted" regardless of vector
+        //    order (the tombstone wins). Concurrent adds have distinct ids.
+        let tombstoned: std::collections::BTreeSet<[u8; 16]> = mat
+            .attachment_tombstones
+            .iter()
+            .map(|id| *id.as_bytes())
+            .collect();
+        for attachment_id in &mat.attachment_tombstones {
+            remove_attachment_row(&tx, attachment_id)?;
+        }
+        for att in &mat.attachments {
+            if tombstoned.contains(att.attachment_id.as_bytes()) {
+                continue;
+            }
+            self.materialize_attachment(&tx, att)?;
+        }
+
         tx.commit()?;
         Ok(())
     }
@@ -394,6 +454,19 @@ impl Vault<'_> {
         self.index_apply_foreign(tx, &item.item_id, item.tombstone.is_some())?;
         Ok(())
     }
+}
+
+/// Remove a tombstoned attachment row (idempotent — a no-op if already gone).
+/// The on-disk blob is left in place: it is content-addressed and may be shared
+/// (dedup) by another row, and the local blob store's authority is the row set.
+/// A future GC can sweep unreferenced blobs; leaving it is harmless and never
+/// loses referenced data.
+fn remove_attachment_row(tx: &Connection, attachment_id: &AttachmentId) -> Result<()> {
+    tx.execute(
+        "DELETE FROM attachments WHERE attachment_id = ?1",
+        params![attachment_id.to_vec()],
+    )?;
+    Ok(())
 }
 
 /// INSERT a [`StoredOp`] verbatim, skipping it if already present (idempotent).
@@ -508,14 +581,10 @@ impl RawOpRow {
             .as_slice()
             .try_into()
             .map_err(|_| Error::Invalid("stored signature not 64 bytes"))?;
-        let op_kind = match u8::try_from(self.op_kind).ok() {
-            Some(1) => OpKind::Create,
-            Some(2) => OpKind::Update,
-            Some(3) => OpKind::Delete,
-            Some(4) => OpKind::Restore,
-            Some(5) => OpKind::Rewrap,
-            _ => return Err(Error::Invalid("unknown op_kind")),
-        };
+        let op_kind = u8::try_from(self.op_kind)
+            .ok()
+            .and_then(OpKind::from_code)
+            .ok_or(Error::Invalid("unknown op_kind"))?;
         Ok(StoredOp {
             op_id: Id::from_slice(&self.op_id)?,
             vault_id: Id::from_slice(&self.vault_id)?,

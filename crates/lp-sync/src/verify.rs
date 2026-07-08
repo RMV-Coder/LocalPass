@@ -29,7 +29,7 @@
 //! quarantines. It performs no I/O and no state mutation, so it is trivially
 //! testable and deterministic.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use lp_crypto::{VerifyingKey, blake3_256};
 use lp_vault::StoredOp;
@@ -168,14 +168,25 @@ fn verify_device_run(
         .map_or_else(|| genesis_hash(&vault_id, &device_id), |b| chain_hash(b));
     let mut last_lamport = chain.last_lamport;
 
+    // op_ids accepted earlier in THIS batch. Overlapping segments (a device
+    // re-published a wider [1, hi] range alongside a narrower one) deliver the
+    // same op multiple times in one read; a later exact duplicate of an op we
+    // just accepted is an idempotent no-op, NOT a replay/regression (which is a
+    // *different* op reusing a seq). Without this, an all-at-once pull of
+    // overlapping segments would false-alarm on the first duplicate.
+    let mut accepted_op_ids: BTreeSet<[u8; 16]> = BTreeSet::new();
+
     for op in run {
-        // Idempotent re-read: an op we already hold is skipped (not re-applied,
-        // not re-verified). It also does not advance our rolling state — the
-        // stored copy already did.
-        if chain.known_op_ids.contains(op.op_id.as_bytes()) {
+        // Idempotent re-read: an op we already hold (locally OR accepted earlier
+        // in this same batch) is skipped — not re-applied, not re-verified, and
+        // it does not advance our rolling state (the first copy already did).
+        if chain.known_op_ids.contains(op.op_id.as_bytes())
+            || accepted_op_ids.contains(op.op_id.as_bytes())
+        {
             report.skipped_idempotent += 1;
-            // If this known op is the one at `expected_seq`, advance past it so
-            // a later new op in the same run stays contiguous.
+            // If this known op is the one at `expected_seq` (only possible for a
+            // locally-known op, never one just accepted — that already advanced
+            // the cursor), advance past it so a later new op stays contiguous.
             if op.seq == expected_seq {
                 expected_seq += 1;
                 prev_full = chain_hash(&wire::encode_op(op));
@@ -225,8 +236,10 @@ fn verify_device_run(
             return quarantine(device_id, op.seq, Alarm::LamportRegression, report);
         }
 
-        // Accept. Advance the rolling state.
+        // Accept. Advance the rolling state and remember this op_id so a later
+        // duplicate in the same batch is treated as idempotent, not a replay.
         report.accepted.push(op.clone());
+        accepted_op_ids.insert(*op.op_id.as_bytes());
         expected_seq += 1;
         prev_full = chain_hash(&wire::encode_op(op));
         last_lamport = op.lamport;

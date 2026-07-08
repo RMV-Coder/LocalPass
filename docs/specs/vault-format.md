@@ -241,9 +241,10 @@ CREATE TABLE index_segments (
 
 -- Attachments. Content-addressed encrypted blobs live in a sibling directory
 -- (<profile>/attachments/<vault_id>/<content_hash_hex>.blob); this table holds
--- references + wrapped per-attachment keys. Local-only in the MVP: attachment
--- blobs are NOT part of the op log and do not sync (a follow-up ships them
--- through the file channel).
+-- references + wrapped per-attachment keys. Attachments SYNC: metadata rides the
+-- signed op log as attach_add/attach_delete ops (sync-protocol.md §2), and the
+-- blobs ship content-addressed through the file channel (sync-protocol.md §7),
+-- re-hashed on arrival against the op's content_hash for tamper detection.
 CREATE TABLE attachments (
     attachment_id     BLOB    PRIMARY KEY,       -- 16 bytes (UUIDv7)
     item_id           BLOB    NOT NULL,
@@ -272,6 +273,8 @@ CREATE INDEX idx_attach_hash     ON attachments (content_hash);
 | `attachments.wrapped_key_env` | `localpass/v1/wrap/attachment-key` \| `vault_id` \| `attachment_id` | ItemKey |
 | `attachments.filename_env` | `localpass/v1/meta/attachment-name` \| `vault_id` \| `attachment_id` | ItemKey |
 | `attachments` blob (on disk) | `localpass/v1/attachment/blob` \| `vault_id` \| `attachment_id` | attachment key |
+| `attach_add` op payload — wrapped key | `localpass/v1/wrap/attachment-key-sync` \| `vault_id` \| `attachment_id` | VaultKey |
+| `attach_add` op payload — filename | `localpass/v1/meta/attachment-name-sync` \| `vault_id` \| `attachment_id` | VaultKey |
 | `ops.payload_env` | `localpass/v1/op/payload` \| `vault_id` \| `op_id` | VaultKey |
 | `index_segments.payload_env` | `localpass/v1/index/segment` \| `vault_id` \| `segment_id` \| `generation` | IndexKey |
 
@@ -473,15 +476,30 @@ column (enumerated in the AAD tables of §2 and §3) is an Envelope v1 blob.
 
 ---
 
-## 8. Attachments (P2 placeholder)
+## 8. Attachments
 
 Attachment *bodies* are stored as content-addressed encrypted blobs under
 `attachments/<content_hash-hex>` (sibling dir, PRD §6.3), not in the DB. Each
 blob is Envelope v1 encrypted under a per-attachment key, which is itself
 wrapped by the owning item's ItemKey (`attachments.wrapped_key_env`). The
 `content_hash` addresses the **ciphertext** blob (BLAKE3), giving dedup across
-identical ciphertexts without a plaintext oracle. Not implemented for MVP;
-the table and directory are reserved so the format need not change to add it.
+identical ciphertexts without a plaintext oracle.
+
+**Attachments sync** (no longer local-only). Metadata travels through the signed
+op log as `attach_add`/`attach_delete` ops (sync-protocol.md §2), authored in the
+**same transaction** as the `attachments` row write so the per-device hash chain
+stays gapless and `verify_local_chain` still passes. The encrypted blobs ship
+separately through the file channel (sync-protocol.md §7.1
+`attachments/<content_hash_hex>.blob`), verified on arrival by re-hashing against
+the op's `content_hash` (a mismatch is a surfaced tamper alarm; a
+referenced-but-not-yet-shipped blob is *pending*, not an error). Because
+per-version ItemKeys differ per device, the `attach_add` op payload carries the
+per-attachment key + filename wrapped under the **VaultKey** (portable); a
+receiving device re-wraps them under its own current-version ItemKey when
+materializing the local row, keeping the on-disk `attachments.wrapped_key_env` /
+`filename_env` in their ItemKey form. Convergence is order-independent: an
+attachment **exists iff there is an `attach_add` for its id and no
+`attach_delete`** for it.
 
 ---
 

@@ -73,8 +73,8 @@ use lp_vault::ids::{DeviceId, ItemId, OpId};
 use lp_vault::op::{ObservedHeads, OpKind};
 use lp_vault::payload::ItemPayload;
 use lp_vault::{
-    ItemMaterialization, Materialization, StoredOp, TombstoneMaterialization,
-    VersionMaterialization,
+    AttachAddPayload, AttachDeletePayload, AttachmentMaterialization, ItemMaterialization,
+    Materialization, StoredOp, TombstoneMaterialization, VersionMaterialization,
 };
 
 use crate::error::Result;
@@ -171,7 +171,10 @@ pub fn materialize(
                 let plaintext = decrypt(&op.op_id, &op.payload_env)?;
                 Some(ItemPayload::from_canonical(&plaintext)?)
             }
-            OpKind::Delete | OpKind::Rewrap => None,
+            // Delete/rewrap carry no item body; attachment ops carry an
+            // *attachment* payload (resolved in `materialize_attachments`), not
+            // an item snapshot — so no item payload is decoded here.
+            OpKind::Delete | OpKind::Rewrap | OpKind::AttachAdd | OpKind::AttachDelete => None,
         };
         by_item
             .entry(*item_id.as_bytes())
@@ -191,6 +194,8 @@ pub fn materialize(
     let mut mat = Materialization {
         ops: ops.to_vec(),
         items: Vec::new(),
+        attachments: Vec::new(),
+        attachment_tombstones: Vec::new(),
     };
     for (item_bytes, mut item_ops) in by_item {
         item_ops.sort_by(MergeOp::cmp_total);
@@ -198,7 +203,112 @@ pub fn materialize(
             mat.items.push(item_mat);
         }
     }
+
+    // Attachment convergence (sync-protocol.md §2): exists iff there is an
+    // AttachAdd for its id AND no AttachDelete for that id. Order-independent —
+    // no LWW. Concurrent adds have distinct UUIDv7 ids so both survive; a delete
+    // tombstones the id so a reordered add cannot resurrect it.
+    materialize_attachments(ops, decrypt, &mut mat)?;
+
     Ok(mat)
+}
+
+/// Resolve the surviving attachment set over the whole op set (sync-protocol.md
+/// §2). An attachment **exists iff** its id has an `AttachAdd` and **no**
+/// `AttachDelete`. Every deleted id becomes a tombstone the apply removes; every
+/// surviving id becomes a row to insert (its blob is fetched separately).
+fn materialize_attachments(
+    ops: &[StoredOp],
+    decrypt: &PayloadDecryptor<'_>,
+    mat: &mut Materialization,
+) -> Result<()> {
+    use std::collections::BTreeSet;
+
+    // First pass: collect every AttachDelete's target id (the tombstone set).
+    let mut deleted: BTreeSet<String> = BTreeSet::new();
+    for op in ops {
+        if op.op_kind == OpKind::AttachDelete {
+            let plaintext = decrypt(&op.op_id, &op.payload_env)?;
+            let payload: AttachDeletePayload =
+                serde_json::from_slice(&plaintext).map_err(|_| {
+                    crate::Error::Vault(lp_vault::Error::Invalid("attach-delete payload"))
+                })?;
+            deleted.insert(payload.attachment_id);
+        }
+    }
+
+    // Second pass: every AttachAdd whose id is NOT tombstoned survives. Dedup by
+    // attachment_id so a re-observed AttachAdd yields a single row (idempotent).
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for op in ops {
+        if op.op_kind != OpKind::AttachAdd {
+            continue;
+        }
+        let plaintext = decrypt(&op.op_id, &op.payload_env)?;
+        let payload: AttachAddPayload = serde_json::from_slice(&plaintext)
+            .map_err(|_| crate::Error::Vault(lp_vault::Error::Invalid("attach-add payload")))?;
+        if deleted.contains(&payload.attachment_id) || !seen.insert(payload.attachment_id.clone()) {
+            continue;
+        }
+        mat.attachments
+            .push(attachment_from_payload(&payload, op.created_at)?);
+    }
+
+    // Emit tombstones for every deleted id (idempotent removal on apply).
+    for id_hex in &deleted {
+        mat.attachment_tombstones.push(parse_id(id_hex)?);
+    }
+    Ok(())
+}
+
+/// Build an [`AttachmentMaterialization`] from a decoded `AttachAdd` payload.
+fn attachment_from_payload(
+    payload: &AttachAddPayload,
+    created_at: i64,
+) -> Result<AttachmentMaterialization> {
+    Ok(AttachmentMaterialization {
+        attachment_id: parse_id(&payload.attachment_id)?,
+        item_id: parse_id(&payload.item_id)?,
+        version: payload.version,
+        content_hash: hex_bytes(&payload.content_hash)?,
+        size_plain: payload.size_plain,
+        wrapped_key_env: hex_bytes(&payload.wrapped_key_env)?,
+        filename_env: hex_bytes(&payload.filename_env)?,
+        created_at,
+    })
+}
+
+/// Parse a 32-char hex id (the AAD id encoding) into an [`ItemId`]/[`AttachmentId`].
+fn parse_id(hex: &str) -> Result<lp_vault::ids::Id> {
+    let bytes = hex_bytes(hex)?;
+    lp_vault::ids::Id::from_slice(&bytes).map_err(crate::Error::Vault)
+}
+
+/// Decode an even-length lowercase-hex string into bytes.
+fn hex_bytes(hex: &str) -> Result<Vec<u8>> {
+    if !hex.len().is_multiple_of(2) {
+        return Err(crate::Error::Vault(lp_vault::Error::Invalid(
+            "attach payload: odd-length hex",
+        )));
+    }
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    let b = hex.as_bytes();
+    for pair in b.chunks_exact(2) {
+        let hi =
+            (pair[0] as char)
+                .to_digit(16)
+                .ok_or(crate::Error::Vault(lp_vault::Error::Invalid(
+                    "attach payload: bad hex",
+                )))?;
+        let lo =
+            (pair[1] as char)
+                .to_digit(16)
+                .ok_or(crate::Error::Vault(lp_vault::Error::Invalid(
+                    "attach payload: bad hex",
+                )))?;
+        out.push(((hi << 4) | lo) as u8);
+    }
+    Ok(out)
 }
 
 /// Materialize one item from its ops (already sorted ascending by total order).

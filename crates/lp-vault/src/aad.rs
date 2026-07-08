@@ -164,6 +164,32 @@ pub fn attachment_blob(vault_id: &Id, attachment_id: &Id) -> Vec<u8> {
     ])
 }
 
+/// The per-attachment key wrapped under the **VaultKey** for the sync op payload
+/// (sync-protocol.md §2). Distinct from [`attachment_key`] (the ItemKey-wrapped
+/// on-disk row form): the op-payload form is VaultKey-reachable so ANY paired
+/// device can unwrap it and re-wrap under its own per-device ItemKey when
+/// materializing the row. Binds vault + attachment id (anti-cut-and-paste).
+#[must_use]
+pub fn attachment_key_sync(vault_id: &Id, attachment_id: &Id) -> Vec<u8> {
+    join(&[
+        "localpass/v1/wrap/attachment-key-sync",
+        &id_hex(vault_id),
+        &id_hex(attachment_id),
+    ])
+}
+
+/// The attachment filename sealed under the **VaultKey** for the sync op payload
+/// (sync-protocol.md §2). Distinct from [`attachment_name`] (the ItemKey-sealed
+/// on-disk form) for the same reason as [`attachment_key_sync`].
+#[must_use]
+pub fn attachment_name_sync(vault_id: &Id, attachment_id: &Id) -> Vec<u8> {
+    join(&[
+        "localpass/v1/meta/attachment-name-sync",
+        &id_hex(vault_id),
+        &id_hex(attachment_id),
+    ])
+}
+
 /// `ops.payload_env` — op payload encrypted under the VaultKey.
 #[must_use]
 pub fn op_payload(vault_id: &Id, op_id: &Id) -> Vec<u8> {

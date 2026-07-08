@@ -179,16 +179,10 @@ pub fn decode_segment(body: &[u8]) -> Result<Vec<StoredOp>> {
     Ok(ops)
 }
 
-/// Map an op-kind wire byte to [`OpKind`].
+/// Map an op-kind wire byte to [`OpKind`] (covers kinds 1..7, sync-protocol.md
+/// §2 — Create..Rewrap plus AttachAdd/AttachDelete).
 fn decode_kind(b: u8) -> Result<OpKind> {
-    match b {
-        1 => Ok(OpKind::Create),
-        2 => Ok(OpKind::Update),
-        3 => Ok(OpKind::Delete),
-        4 => Ok(OpKind::Restore),
-        5 => Ok(OpKind::Rewrap),
-        _ => Err(Error::Malformed("unknown op_kind byte")),
-    }
+    OpKind::from_code(b).ok_or(Error::Malformed("unknown op_kind byte"))
 }
 
 /// A minimal forward-only byte cursor with length-checked takes.

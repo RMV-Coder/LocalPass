@@ -38,6 +38,11 @@ pub enum Alarm {
     /// The op's `lamport` is less than the author's previous op's lamport —
     /// a non-monotone author clock (sync-protocol.md §5 step 4).
     LamportRegression,
+    /// A fetched attachment blob's `blake3` did not equal the op's
+    /// `content_hash` — a tampered or corrupt blob on the untrusted file
+    /// channel. The bad bytes are rejected (never stored); the attachment stays
+    /// pending (sync-protocol.md §2/§7 content-address verification).
+    AttachmentBlobTampered,
 }
 
 impl Alarm {
@@ -51,6 +56,7 @@ impl Alarm {
             Alarm::SeqReplay => "seq_replay",
             Alarm::ChainMismatch => "chain_mismatch",
             Alarm::LamportRegression => "lamport_regression",
+            Alarm::AttachmentBlobTampered => "attachment_blob_tampered",
         }
     }
 }
@@ -64,6 +70,9 @@ impl core::fmt::Display for Alarm {
             Alarm::SeqReplay => "sequence replay / fork",
             Alarm::ChainMismatch => "hash-chain mismatch (rewritten history)",
             Alarm::LamportRegression => "Lamport clock regression",
+            Alarm::AttachmentBlobTampered => {
+                "attachment blob content-hash mismatch (tampered or corrupt)"
+            }
         };
         f.write_str(human)
     }
