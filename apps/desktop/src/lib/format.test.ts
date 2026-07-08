@@ -8,6 +8,7 @@ import {
   formatEntropy,
   strengthBand,
   groupTotp,
+  humanSize,
   MASK,
 } from "./format";
 
@@ -67,5 +68,25 @@ describe("MASK", () => {
   it("is a non-empty fixed placeholder with no real characters", () => {
     expect(MASK.length).toBeGreaterThan(0);
     expect(/[a-zA-Z0-9]/.test(MASK)).toBe(false);
+  });
+});
+
+describe("humanSize", () => {
+  it("renders bytes under 1 KiB as B", () => {
+    expect(humanSize(0)).toBe("0 B");
+    expect(humanSize(512)).toBe("512 B");
+    expect(humanSize(1023)).toBe("1023 B");
+  });
+  it("renders KiB with one decimal", () => {
+    expect(humanSize(1024)).toBe("1.0 KiB");
+    expect(humanSize(1536)).toBe("1.5 KiB");
+  });
+  it("renders MiB with one decimal", () => {
+    expect(humanSize(1024 * 1024)).toBe("1.0 MiB");
+    expect(humanSize(5 * 1024 * 1024)).toBe("5.0 MiB");
+  });
+  it("renders invalid/negative sizes as em-dash", () => {
+    expect(humanSize(-1)).toBe("—");
+    expect(humanSize(Number.NaN)).toBe("—");
   });
 });
