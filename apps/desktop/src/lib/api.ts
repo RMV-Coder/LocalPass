@@ -60,6 +60,11 @@ export function listVaults(): Promise<VaultView[]> {
   return invoke<VaultView[]>("list_vaults");
 }
 
+/** Create a new vault by name; resolves to the new vault id. */
+export function createVault(name: string): Promise<string> {
+  return invoke<string>("create_vault", { name });
+}
+
 /** Items in a vault (masked; no secret values). */
 export function listItems(vault: string): Promise<ItemSummaryView[]> {
   return invoke<ItemSummaryView[]>("list_items", { vault });

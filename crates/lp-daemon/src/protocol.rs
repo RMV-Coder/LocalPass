@@ -113,6 +113,14 @@ pub enum Request {
         /// The profile directory being operated on.
         profile: String,
     },
+    /// Create a new vault by name (requires an unlocked session). Answered by
+    /// [`Response::Ok`] whose `message` is the new vault id.
+    CreateVault {
+        /// The profile directory being operated on.
+        profile: String,
+        /// The human-readable vault name.
+        name: String,
+    },
     /// List all live items in a vault (metadata + non-secret fields only).
     ListItems {
         /// The profile directory being operated on.
@@ -282,6 +290,7 @@ impl Request {
             Request::CreateAccount { .. } => "CreateAccount",
             Request::Lock => "Lock",
             Request::ListVaults { .. } => "ListVaults",
+            Request::CreateVault { .. } => "CreateVault",
             Request::ListItems { .. } => "ListItems",
             Request::GetItem { .. } => "GetItem",
             Request::History { .. } => "History",

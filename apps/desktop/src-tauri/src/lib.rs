@@ -37,6 +37,7 @@ pub fn run() {
             commands::unlock,
             commands::lock,
             commands::list_vaults,
+            commands::create_vault,
             commands::list_items,
             commands::get_item,
             commands::reveal_field,

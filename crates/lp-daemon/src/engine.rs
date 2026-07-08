@@ -383,6 +383,13 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
             })
         }),
 
+        Request::CreateVault { name, .. } => with_session(state, |session| {
+            let id = session.create_vault(&name).map_err(vault_err)?;
+            Ok(Response::Ok {
+                message: Some(id.to_hyphenated()),
+            })
+        }),
+
         Request::ListItems { vault, .. } => with_session(state, |session| {
             let v = open_vault(session, &vault)?;
             let items = v.list_items().map_err(vault_err)?;
@@ -591,6 +598,7 @@ fn request_profile(request: &Request) -> Option<&str> {
         | Request::Unlock { profile, .. }
         | Request::CreateAccount { profile, .. }
         | Request::ListVaults { profile }
+        | Request::CreateVault { profile, .. }
         | Request::ListItems { profile, .. }
         | Request::GetItem { profile, .. }
         | Request::History { profile, .. }

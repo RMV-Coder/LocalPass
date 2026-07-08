@@ -268,6 +268,19 @@ pub fn list_vaults() -> Result<Vec<VaultView>, String> {
     }
 }
 
+/// Create a new vault by name (requires an unlocked session). Returns the new
+/// vault id. Carries no secret.
+#[tauri::command]
+pub fn create_vault(name: String) -> Result<String, String> {
+    let profile = daemon::profile_string()?;
+    let resp = daemon::call(&Request::CreateVault { profile, name }).map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    match resp {
+        Response::Ok { message } => Ok(message.unwrap_or_default()),
+        other => Err(format!("unexpected daemon response: {}", other.kind())),
+    }
+}
+
 /// List the items in `vault` (metadata + non-secret fields only).
 #[tauri::command]
 pub fn list_items(vault: String) -> Result<Vec<ItemSummaryView>, String> {

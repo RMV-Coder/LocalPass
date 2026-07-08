@@ -8,7 +8,7 @@
   reveals happen inside ItemDetail.
 -->
 <script lang="ts">
-  import { listVaults, listItems, search as searchApi, getItem } from "../lib/api";
+  import { listVaults, createVault, listItems, search as searchApi, getItem } from "../lib/api";
   import type { VaultView, ItemSummaryView, ItemView } from "../lib/types";
   import { typeLabel, formatTimestamp } from "../lib/format";
   import ItemDetail from "./ItemDetail.svelte";
@@ -45,6 +45,29 @@
     query = "";
     view = "item";
     await refreshItems();
+  }
+
+  // New-vault inline form state.
+  let creatingVault = $state(false);
+  let newVaultName = $state("");
+  let vaultBusy = $state(false);
+
+  async function submitNewVault() {
+    const name = newVaultName.trim();
+    if (!name || vaultBusy) return;
+    vaultBusy = true;
+    error = "";
+    try {
+      const id = await createVault(name);
+      newVaultName = "";
+      creatingVault = false;
+      await loadVaults();
+      await selectVault(id); // jump into the new vault
+    } catch (err) {
+      error = typeof err === "string" ? err : "Could not create the vault.";
+    } finally {
+      vaultBusy = false;
+    }
   }
 
   async function refreshItems() {
@@ -138,9 +161,36 @@
 <div class="shell {selectedItem || view === 'generator' ? 'show-items' : ''}">
   <!-- Vault sidebar -->
   <nav class="pane vault-pane" aria-label="Vaults">
-    <div class="pane-header">
-      <p class="pane-title">Vaults</p>
+    <div class="pane-header" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+      <p class="pane-title" style="margin:0">Vaults</p>
+      <button
+        class="btn btn-small"
+        onclick={() => { creatingVault = !creatingVault; newVaultName = ""; }}
+        aria-expanded={creatingVault}
+        title="Create a new vault"
+      >+ New</button>
     </div>
+    {#if creatingVault}
+      <form class="new-vault" onsubmit={(e) => { e.preventDefault(); submitNewVault(); }}>
+        <label class="sr-only" for="new-vault-name">New vault name</label>
+        <input
+          id="new-vault-name"
+          type="text"
+          placeholder="Vault name (e.g. work)"
+          bind:value={newVaultName}
+          autocomplete="off"
+          disabled={vaultBusy}
+        />
+        <div class="new-vault-actions">
+          <button class="btn btn-small btn-primary" type="submit" disabled={vaultBusy || !newVaultName.trim()}>
+            {vaultBusy ? "Creating…" : "Create"}
+          </button>
+          <button class="btn btn-small" type="button" onclick={() => { creatingVault = false; }} disabled={vaultBusy}>
+            Cancel
+          </button>
+        </div>
+      </form>
+    {/if}
     {#if vaults.length === 0}
       <p class="empty">No vaults yet.</p>
     {:else}
