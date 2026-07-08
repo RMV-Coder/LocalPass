@@ -85,6 +85,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Status { json } => commands::status::run(&profile_dir, src, no_daemon, *json),
         Command::Vault { command } => commands::vault::run(&profile_dir, src, no_daemon, command),
         Command::Item { command } => commands::item::run(&profile_dir, src, no_daemon, command),
+        Command::Attach { command } => commands::attach::run(&profile_dir, src, command),
         Command::Search {
             query,
             item_type,

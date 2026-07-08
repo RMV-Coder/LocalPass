@@ -54,6 +54,12 @@ fn item_key_aad_str(vault_id: &VaultId, item_id: &ItemId, version: i64) -> Strin
 /// PRAGMAs). The [`VaultKey`] zeroizes on drop with the vault handle.
 pub struct Vault<'s> {
     path: std::path::PathBuf,
+    /// The per-vault attachments base directory
+    /// (`<profile>/attachments/<vault_id_hyphenated>/`, vault-format.md §1/§8).
+    /// Content-addressed encrypted blobs live directly under it; blob bytes are
+    /// never stored in SQLite. Threaded in at [`open`](Self::open) so the public
+    /// `Session::open_vault` signature is unchanged.
+    attachments_base: std::path::PathBuf,
     vault_id: VaultId,
     vault_key: VaultKey,
     /// The encrypted search index handle (holds the derived IndexKey).
@@ -144,6 +150,7 @@ impl<'s> Vault<'s> {
     /// the file's `format_version`.
     pub(crate) fn open(
         path: std::path::PathBuf,
+        attachments_base: std::path::PathBuf,
         vault_id: VaultId,
         vault_key: VaultKey,
         session: &'s Session,
@@ -153,6 +160,7 @@ impl<'s> Vault<'s> {
         let index = SearchIndex::new(vault_id, &vault_key)?;
         Ok(Self {
             path,
+            attachments_base,
             vault_id,
             vault_key,
             index,
@@ -1124,6 +1132,18 @@ impl<'s> Vault<'s> {
     /// the storage layer; only VaultKey `open`/`seal` results cross the boundary.
     pub(crate) fn vault_key_ref(&self) -> &VaultKey {
         &self.vault_key
+    }
+
+    /// The vault file path (crate-internal; the attachment module opens its own
+    /// connection to read/write the `attachments` table).
+    pub(crate) fn vault_path_ref(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// This vault's per-vault attachments base directory (crate-internal; the
+    /// attachment module writes/reads content-addressed blobs under it).
+    pub(crate) fn attachments_base_ref(&self) -> &std::path::Path {
+        &self.attachments_base
     }
 
     /// Seal a materialized foreign version's payload under a fresh local ItemKey

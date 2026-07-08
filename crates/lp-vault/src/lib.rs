@@ -85,6 +85,7 @@
 
 pub mod aad;
 pub mod account;
+pub mod attachment;
 pub mod audit;
 pub mod backup;
 pub mod canonical;
@@ -98,6 +99,7 @@ pub mod payload;
 pub mod vault;
 
 pub use account::{AccountStore, DeviceIdentityInfo, PeerDevice, Session};
+pub use attachment::{AttachmentInfo, MAX_ATTACHMENT_BYTES};
 pub use audit::{AuditKind, AuditRecord};
 pub use error::{Error, Result};
 pub use foreign::{
@@ -110,7 +112,7 @@ pub use foreign::{
 pub use backup::{
     BackupInfo, BackupManifest, ManifestFile, RestoreReport, VerifyReport, restore_single_item,
 };
-pub use ids::{DeviceId, FolderId, Id, ItemId, OpId, VaultId};
+pub use ids::{AttachmentId, DeviceId, FolderId, Id, ItemId, OpId, VaultId};
 pub use lp_crypto::SecretKey;
 pub use op::{OP_WIRE_VERSION, ObservedHeads};
 pub use payload::{Field, FieldKind, ItemPayload, TypeData};

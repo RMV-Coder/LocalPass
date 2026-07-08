@@ -263,11 +263,14 @@ CREATE TABLE attachments (
     content_hash      BLOB    NOT NULL,
     size_plain        INTEGER NOT NULL,
     wrapped_key_env   BLOB    NOT NULL,
-    filename_env      BLOB    NOT NULL
+    filename_env      BLOB    NOT NULL,
+    created_at        INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX idx_versions_item ON item_versions (item_id, version);
 CREATE INDEX idx_ops_lamport    ON ops (lamport, device_id);
 CREATE INDEX idx_ops_device_seq ON ops (device_id, seq);
+CREATE INDEX idx_attachments_item ON attachments (item_id);
+CREATE INDEX idx_attachments_hash ON attachments (content_hash);
 "#;
 
 /// Read `meta.format_version` and reject a file newer than this build supports

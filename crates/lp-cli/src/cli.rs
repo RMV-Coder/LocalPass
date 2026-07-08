@@ -98,6 +98,14 @@ pub enum Command {
         command: ItemCommand,
     },
 
+    /// Store, list, download, and remove encrypted file attachments on an item
+    /// (PRD §4.1). Blobs are encrypted at rest beside the vault; the plaintext
+    /// only leaves the vault when you explicitly `attach get --out <path>`.
+    Attach {
+        #[command(subcommand)]
+        command: AttachCommand,
+    },
+
     /// Search items by title, tag, or type across a vault.
     Search {
         /// The query text (matched case-insensitively).
@@ -1055,6 +1063,82 @@ pub enum ItemCommand {
         /// Vault to look in (name or id).
         #[arg(long, default_value = "personal", value_name = "NAME_OR_ID")]
         vault: String,
+    },
+}
+
+/// `localpass attach ...`
+#[derive(Debug, Subcommand)]
+#[command(long_about = "Encrypted file attachments on an item (PRD §4.1).\n\n\
+Store an arbitrary file (a certificate, a service-account.json, a binary secret) \
+encrypted at rest, bound to an item. Blobs live beside the vault as \
+content-addressed ciphertext — the bytes are NEVER stored in the database and \
+NEVER leave the vault except when you explicitly run `attach get --out <path>`, \
+which writes the decrypted file to a path you choose.\n\n\
+Each attachment is sealed with its own key, wrapped by the item's key, so a \
+stolen vault file (without your master password + Secret Key) reveals neither \
+the file contents nor its name.\n\n\
+LIMITATION: attachments are LOCAL-ONLY in this build — they are not part of the \
+sync op log, so they do not replicate to your other devices yet. There is a \
+50 MiB size cap per file.\n\n\
+This command always unlocks directly (the daemon-proxied path is a later wave).")]
+pub enum AttachCommand {
+    /// Attach a file to an item (reads the file, encrypts it into the vault).
+    Add {
+        /// The item to attach to (title or id).
+        item: String,
+        /// Path to the file to attach.
+        path: PathBuf,
+        /// Vault the item lives in (name or id).
+        #[arg(long, default_value = "personal", value_name = "NAME_OR_ID")]
+        vault: String,
+        /// Store under this filename instead of the source file's name.
+        #[arg(long, value_name = "FILENAME")]
+        name: Option<String>,
+    },
+    /// List an item's attachments (id, name, size). Never prints blob bytes.
+    List {
+        /// The item (title or id).
+        item: String,
+        /// Vault the item lives in (name or id).
+        #[arg(long, default_value = "personal", value_name = "NAME_OR_ID")]
+        vault: String,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Download (decrypt) an attachment to a file you choose.
+    #[command(long_about = "Write a decrypted attachment to a path you choose.\n\n\
+The attachment is identified by its id (from `attach list`) or its name. The \
+decrypted plaintext lands at <path> — that is inherent to saving a file; treat \
+the destination as sensitive. On Unix the file is written with 0600 \
+permissions. Refuses to overwrite an existing file unless --force.")]
+    Get {
+        /// The item the attachment belongs to (title or id).
+        item: String,
+        /// The attachment to fetch: its id or its name.
+        attachment: String,
+        /// Where to write the decrypted file.
+        #[arg(long, value_name = "PATH")]
+        out: PathBuf,
+        /// Vault the item lives in (name or id).
+        #[arg(long, default_value = "personal", value_name = "NAME_OR_ID")]
+        vault: String,
+        /// Overwrite the output path if it already exists.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Remove an attachment (confirm unless --force).
+    Rm {
+        /// The item the attachment belongs to (title or id).
+        item: String,
+        /// The attachment id to remove.
+        attachment: String,
+        /// Vault the item lives in (name or id).
+        #[arg(long, default_value = "personal", value_name = "NAME_OR_ID")]
+        vault: String,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        force: bool,
     },
 }
 

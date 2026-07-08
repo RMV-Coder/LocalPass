@@ -88,6 +88,8 @@ pub type FolderId = Id;
 pub type OpId = Id;
 /// A device identifier.
 pub type DeviceId = Id;
+/// An attachment identifier.
+pub type AttachmentId = Id;
 
 #[cfg(test)]
 mod tests {

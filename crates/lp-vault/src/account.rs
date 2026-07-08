@@ -37,6 +37,10 @@ use crate::vault::Vault;
 pub const ACCOUNT_FILE: &str = "account.localpass";
 /// The subdirectory holding per-vault files.
 pub const VAULTS_DIR: &str = "vaults";
+/// The subdirectory holding content-addressed attachment blobs (vault-format.md
+/// §1/§8). One per-vault subdir lives under it so a vault's blobs travel with
+/// the vault file.
+pub const ATTACHMENTS_DIR: &str = "attachments";
 
 /// KDF code for Argon2id (vault-format.md §2 `kdf_params.kdf`).
 const KDF_ARGON2ID: i64 = 1;
@@ -823,7 +827,13 @@ impl Session {
         .map_err(Error::from_crypto)?;
         let vault_key = VaultKey::from_inner(vault_key_inner);
 
-        Vault::open(self.vault_path(&vault_id), vault_id, vault_key, self)
+        Vault::open(
+            self.vault_path(&vault_id),
+            self.attachments_base(&vault_id),
+            vault_id,
+            vault_key,
+            self,
+        )
     }
 
     /// List all live (non-deleted) vaults as `(id, decrypted name)`.
@@ -1542,6 +1552,17 @@ impl Session {
         self.dir
             .join(VAULTS_DIR)
             .join(format!("{}.vault", vault_id.to_hyphenated()))
+    }
+
+    /// The per-vault attachments base directory:
+    /// `<profile>/attachments/<vault_id_hyphenated>/` (vault-format.md §1/§8).
+    /// Blobs for this vault live directly under it, content-addressed by the
+    /// BLAKE3 hex of their ciphertext. Derived from `self.dir` so the public
+    /// [`open_vault`](Self::open_vault) signature never had to change.
+    pub(crate) fn attachments_base(&self, vault_id: &VaultId) -> PathBuf {
+        self.dir
+            .join(ATTACHMENTS_DIR)
+            .join(vault_id.to_hyphenated())
     }
 }
 

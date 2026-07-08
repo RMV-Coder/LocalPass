@@ -130,6 +130,40 @@ pub fn folder_name(vault_id: &Id, folder_id: &Id) -> Vec<u8> {
     ])
 }
 
+/// `attachments.wrapped_key_env` — the per-attachment key wrapped under the
+/// owning item's ItemKey (vault-format.md §3).
+#[must_use]
+pub fn attachment_key(vault_id: &Id, attachment_id: &Id) -> Vec<u8> {
+    join(&[
+        "localpass/v1/wrap/attachment-key",
+        &id_hex(vault_id),
+        &id_hex(attachment_id),
+    ])
+}
+
+/// `attachments.filename_env` — the attachment filename sealed under the owning
+/// item's ItemKey (vault-format.md §3).
+#[must_use]
+pub fn attachment_name(vault_id: &Id, attachment_id: &Id) -> Vec<u8> {
+    join(&[
+        "localpass/v1/meta/attachment-name",
+        &id_hex(vault_id),
+        &id_hex(attachment_id),
+    ])
+}
+
+/// The on-disk attachment blob — ciphertext encrypted under the per-attachment
+/// key (vault-format.md §3). Binds the vault + attachment id so a blob cannot be
+/// relocated to a different attachment or vault.
+#[must_use]
+pub fn attachment_blob(vault_id: &Id, attachment_id: &Id) -> Vec<u8> {
+    join(&[
+        "localpass/v1/attachment/blob",
+        &id_hex(vault_id),
+        &id_hex(attachment_id),
+    ])
+}
+
 /// `ops.payload_env` — op payload encrypted under the VaultKey.
 #[must_use]
 pub fn op_payload(vault_id: &Id, op_id: &Id) -> Vec<u8> {
@@ -186,6 +220,34 @@ mod tests {
         let i = Id::from_bytes([0u8; 16]);
         let aad = String::from_utf8(item_key(&v, &i, 123)).unwrap();
         assert!(aad.ends_with("|123"));
+    }
+
+    #[test]
+    fn attachment_aads_are_distinct_and_well_formed() {
+        let v = Id::from_bytes([0x11; 16]);
+        let a = Id::from_bytes([0x22; 16]);
+        let key = String::from_utf8(attachment_key(&v, &a)).unwrap();
+        let name = String::from_utf8(attachment_name(&v, &a)).unwrap();
+        let blob = String::from_utf8(attachment_blob(&v, &a)).unwrap();
+        assert_eq!(
+            key,
+            "localpass/v1/wrap/attachment-key|11111111111111111111111111111111|22222222222222222222222222222222"
+        );
+        assert_eq!(
+            name,
+            "localpass/v1/meta/attachment-name|11111111111111111111111111111111|22222222222222222222222222222222"
+        );
+        assert_eq!(
+            blob,
+            "localpass/v1/attachment/blob|11111111111111111111111111111111|22222222222222222222222222222222"
+        );
+        // The three purposes must never collide with one another.
+        assert_ne!(attachment_key(&v, &a), attachment_name(&v, &a));
+        assert_ne!(attachment_key(&v, &a), attachment_blob(&v, &a));
+        assert_ne!(attachment_name(&v, &a), attachment_blob(&v, &a));
+        // Different attachment id → different AAD (anti-cut-and-paste).
+        let a2 = Id::from_bytes([0x33; 16]);
+        assert_ne!(attachment_key(&v, &a), attachment_key(&v, &a2));
     }
 
     #[test]

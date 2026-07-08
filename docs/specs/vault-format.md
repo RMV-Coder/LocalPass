@@ -239,8 +239,11 @@ CREATE TABLE index_segments (
     payload_env       BLOB    NOT NULL           -- Envelope v1 over segment, IndexKey-wrapped
 );
 
--- Attachments (P2 placeholder). Content-addressed blobs live in a sibling
--- directory; this table holds references + wrapped per-attachment keys.
+-- Attachments. Content-addressed encrypted blobs live in a sibling directory
+-- (<profile>/attachments/<vault_id>/<content_hash_hex>.blob); this table holds
+-- references + wrapped per-attachment keys. Local-only in the MVP: attachment
+-- blobs are NOT part of the op log and do not sync (a follow-up ships them
+-- through the file channel).
 CREATE TABLE attachments (
     attachment_id     BLOB    PRIMARY KEY,       -- 16 bytes (UUIDv7)
     item_id           BLOB    NOT NULL,
@@ -248,12 +251,15 @@ CREATE TABLE attachments (
     content_hash      BLOB    NOT NULL,          -- 32 bytes BLAKE3 of CIPHERTEXT blob (addressing)
     size_plain        INTEGER NOT NULL,          -- plaintext length, structural
     wrapped_key_env   BLOB    NOT NULL,          -- Envelope v1 over attachment key, ItemKey-wrapped
-    filename_env      BLOB    NOT NULL           -- Envelope v1 over filename
+    filename_env      BLOB    NOT NULL,          -- Envelope v1 over filename
+    created_at        INTEGER NOT NULL DEFAULT 0 -- unix millis, plaintext (structural)
 );
 
-CREATE INDEX idx_versions_item ON item_versions (item_id, version);
-CREATE INDEX idx_ops_lamport    ON ops (lamport, device_id);
-CREATE INDEX idx_ops_device_seq ON ops (device_id, seq);
+CREATE INDEX idx_versions_item   ON item_versions (item_id, version);
+CREATE INDEX idx_ops_lamport     ON ops (lamport, device_id);
+CREATE INDEX idx_ops_device_seq  ON ops (device_id, seq);
+CREATE INDEX idx_attach_item     ON attachments (item_id);
+CREATE INDEX idx_attach_hash     ON attachments (content_hash);
 ```
 
 **AAD for vault-file envelopes** (out-of-band, reconstructed at decrypt time):

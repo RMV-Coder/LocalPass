@@ -6,6 +6,7 @@
 //!
 //! [`PasswordSource`]: crate::unlock::PasswordSource
 
+pub mod attach;
 pub mod audit;
 pub mod backup;
 pub mod browser;
