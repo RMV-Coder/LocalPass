@@ -14,11 +14,17 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   CreatedAccount,
+  DeviceIdentityView,
   GeneratedView,
   ItemSummaryView,
   ItemView,
   NewItemInput,
+  PeerView,
   SessionState,
+  SyncAdoptView,
+  SyncPullView,
+  SyncPushView,
+  SyncStatusView,
   TotpView,
   VaultView,
 } from "./types";
@@ -115,4 +121,76 @@ export function updateItem(vault: string, id: string, input: NewItemInput): Prom
 /** Move an item to the trash (30-day retention). */
 export function deleteItem(vault: string, id: string): Promise<void> {
   return invoke<void>("delete_item", { vault, id });
+}
+
+// --- Devices & Sync ------------------------------------------------------
+//
+// Every call here is SECRET-FREE. Device identity strings + fingerprints are
+// public (public keys + a hash). The vault-key share is sealed inside the
+// daemon/engine; `shareVaultToDevice` only names a device id. Sync alarms
+// (quarantine/tamper) come back as strings for the UI to surface prominently.
+
+/** Parse a pasted LPDEV1 identity string and return its fingerprint, for the
+ *  user to compare out-of-band before trusting. Display-only and PUBLIC — the
+ *  daemon re-checks the fingerprint when trusting, so this cannot widen trust.
+ *  Rejects for a malformed string. */
+export function previewFingerprint(identityString: string): Promise<string> {
+  return invoke<string>("preview_fingerprint", { identityString });
+}
+
+/** This device's public identity (id, LPDEV1 string, fingerprint) to hand to
+ *  another device. Nothing here is a secret. */
+export function exportIdentity(): Promise<DeviceIdentityView> {
+  return invoke<DeviceIdentityView>("export_identity");
+}
+
+/** The trusted peer devices (label / fingerprint / when). All public. */
+export function listPeers(): Promise<PeerView[]> {
+  return invoke<PeerView[]>("list_peers");
+}
+
+/** Trust a peer from its identity string, AFTER the user confirmed its
+ *  fingerprint out-of-band. `expectedFingerprint` is the confirmed value; the
+ *  daemon re-checks it against the identity string and refuses on a mismatch or
+ *  an empty confirmation. There is no auto-trust. */
+export function trustDevice(
+  identityString: string,
+  expectedFingerprint: string,
+  label: string | null,
+): Promise<PeerView> {
+  return invoke<PeerView>("trust_device", {
+    identityString,
+    expectedFingerprint,
+    label,
+  });
+}
+
+/** Enroll a vault for file-based sync under the shared folder `dir`. */
+export function syncSetup(vault: string, dir: string): Promise<void> {
+  return invoke<void>("sync_setup", { vault, dir });
+}
+
+/** Publish this device's ops for a vault to the shared folder. */
+export function syncPush(vault: string): Promise<SyncPushView> {
+  return invoke<SyncPushView>("sync_push", { vault });
+}
+
+/** Verify + merge peers' ops for a vault. Any alarms are returned for the UI. */
+export function syncPull(vault: string): Promise<SyncPullView> {
+  return invoke<SyncPullView>("sync_pull", { vault });
+}
+
+/** Per-device sync status for a vault (seq marks + pending/quarantine). */
+export function syncStatus(vault: string): Promise<SyncStatusView> {
+  return invoke<SyncStatusView>("sync_status", { vault });
+}
+
+/** Seal a vault's key to a trusted peer device (sealed inside the daemon). */
+export function shareVaultToDevice(vault: string, deviceId: string): Promise<void> {
+  return invoke<void>("share_vault_to_device", { vault, deviceId });
+}
+
+/** Adopt vaults shared to this device from a folder, then pull each. */
+export function syncAdopt(dir: string): Promise<SyncAdoptView> {
+  return invoke<SyncAdoptView>("sync_adopt", { dir });
 }

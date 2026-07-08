@@ -48,6 +48,16 @@ pub fn run() {
             commands::create_item,
             commands::update_item,
             commands::delete_item,
+            commands::preview_fingerprint,
+            commands::export_identity,
+            commands::list_peers,
+            commands::trust_device,
+            commands::sync_setup,
+            commands::sync_push,
+            commands::sync_pull,
+            commands::sync_status,
+            commands::share_vault_to_device,
+            commands::sync_adopt,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the LocalPass desktop application");

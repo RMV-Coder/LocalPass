@@ -19,6 +19,15 @@ path = "src/bin/localpass-daemon.rs"
 # --- boundary, LESSONS.md). ---
 lp-vault = { path = "../lp-vault" }
 lp-crypto = { path = "../lp-crypto" }
+# --- The file-based sync engine (device pairing + vault sync; sync-protocol.md
+# --- §5/§6/§7). The daemon exposes the fully-built engine to its clients (the
+# --- GUI): every sync request runs against the held Session. The daemon holds no
+# --- sync state of its own — enrollment/keys live in the account store + channel
+# --- dir; lp-sync's public fns (`engine::{setup,push,pull,status,adopt,
+# --- share_vault_to_device}` + `identity::DeviceIdentity`) do all the crypto,
+# --- so no secret crosses the daemon API (identity strings/fingerprints are
+# --- public; the shared VaultKey is sealed inside the engine). ---
+lp-sync = { path = "../lp-sync" }
 # --- Length-prefixed JSON wire protocol (versioned {"v":1,...} envelopes). serde
 # --- derives the request/response model; serde_json is the on-wire encoding. No
 # --- secret ever appears in a Debug/log render — request Debug is kind-only. ---

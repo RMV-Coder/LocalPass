@@ -274,6 +274,99 @@ pub enum Request {
         /// The page origin the fill is for (re-validated against the item's URL).
         origin: String,
     },
+    /// **Device pairing:** export this device's public identity (device id,
+    /// identity string, fingerprint) for the user to hand to another device.
+    /// Answered by [`Response::DeviceIdentity`]. Everything returned is
+    /// **public** (public keys + a hash) — no secret crosses this request.
+    ExportIdentity {
+        /// The profile directory being operated on.
+        profile: String,
+    },
+    /// **Device pairing:** list the trusted peer devices (their pinned public
+    /// keys, rendered as fingerprints). Answered by [`Response::Peers`]. No
+    /// secret; fingerprints are public.
+    ListPeers {
+        /// The profile directory being operated on.
+        profile: String,
+    },
+    /// **Device pairing (security-critical):** trust a peer device from its
+    /// exported identity string, **after** confirming its fingerprint.
+    ///
+    /// The daemon parses `identity_string`, computes its fingerprint, and — if
+    /// `expected_fingerprint` is non-empty — **requires** it to equal the
+    /// computed fingerprint (else refuses with a "fingerprint mismatch" error).
+    /// This enforces the out-of-band fingerprint confirmation server-side; the
+    /// GUI must never auto-trust. Answered by [`Response::PeerTrusted`]. The
+    /// identity string / fingerprint are public — no secret crosses here.
+    TrustDevice {
+        /// The profile directory being operated on.
+        profile: String,
+        /// The peer's exported `LPDEV1-…` identity string.
+        identity_string: String,
+        /// The fingerprint the user confirmed matches the other device
+        /// out-of-band. Empty means "not confirmed" → the daemon refuses.
+        expected_fingerprint: String,
+        /// An optional human label for the peer ("laptop").
+        label: Option<String>,
+    },
+    /// **Sync:** enroll a vault for file-based sync under a shared directory
+    /// (`localpass sync setup`). Answered by [`Response::Ok`].
+    SyncSetup {
+        /// The profile directory being operated on.
+        profile: String,
+        /// Vault name or id.
+        vault: String,
+        /// The shared sync-root directory (both devices watch it).
+        dir: String,
+    },
+    /// **Sync:** publish this device's ops to the channel (`localpass sync
+    /// push`). Answered by [`Response::SyncPushed`]. No secret — ops are
+    /// ciphertext on the channel.
+    SyncPush {
+        /// The profile directory being operated on.
+        profile: String,
+        /// Vault name or id.
+        vault: String,
+    },
+    /// **Sync:** verify + merge peers' ops into this vault (`localpass sync
+    /// pull`). Answered by [`Response::SyncPulled`], whose `alarms` surface any
+    /// quarantine/tamper events (secret-free strings). No secret crosses here;
+    /// a shared VaultKey is unsealed inside the engine, never on the wire.
+    SyncPull {
+        /// The profile directory being operated on.
+        profile: String,
+        /// Vault name or id.
+        vault: String,
+    },
+    /// **Sync:** per-device seq marks + pending/quarantine counts (`localpass
+    /// sync status`). Answered by [`Response::SyncStatus`]. Secret-free.
+    SyncStatus {
+        /// The profile directory being operated on.
+        profile: String,
+        /// Vault name or id.
+        vault: String,
+    },
+    /// **Sync:** seal this vault's key to a trusted peer device and ship it via
+    /// the channel (`localpass vault share-to-device`). Answered by
+    /// [`Response::Ok`]. The sealed key never crosses this API as plaintext —
+    /// the request names only a (public) device id; the seal happens inside the
+    /// engine.
+    ShareVaultToDevice {
+        /// The profile directory being operated on.
+        profile: String,
+        /// Vault name or id.
+        vault: String,
+        /// The recipient peer's device id (hyphenated UUID).
+        device_id: String,
+    },
+    /// **Sync:** adopt vaults shared to this device from a sync root, then pull
+    /// each (`localpass sync adopt`). Answered by [`Response::SyncAdopted`].
+    SyncAdopt {
+        /// The profile directory being operated on.
+        profile: String,
+        /// The shared sync-root directory to scan.
+        dir: String,
+    },
     /// Terminate the daemon: drop the session and exit, removing the endpoint.
     Shutdown,
 }
@@ -304,6 +397,15 @@ impl Request {
             Request::RestoreVersion { .. } => "RestoreVersion",
             Request::MatchLogins { .. } => "MatchLogins",
             Request::FillLogin { .. } => "FillLogin",
+            Request::ExportIdentity { .. } => "ExportIdentity",
+            Request::ListPeers { .. } => "ListPeers",
+            Request::TrustDevice { .. } => "TrustDevice",
+            Request::SyncSetup { .. } => "SyncSetup",
+            Request::SyncPush { .. } => "SyncPush",
+            Request::SyncPull { .. } => "SyncPull",
+            Request::SyncStatus { .. } => "SyncStatus",
+            Request::ShareVaultToDevice { .. } => "ShareVaultToDevice",
+            Request::SyncAdopt { .. } => "SyncAdopt",
             Request::Shutdown => "Shutdown",
         }
     }
@@ -423,6 +525,45 @@ pub struct LoginCandidate {
     pub username: String,
     /// The vault name the item lives in (for display / disambiguation).
     pub vault: String,
+}
+
+/// A trusted peer device rendered for the wire ([`Response::Peers`]). All
+/// fields are **public** — the fingerprint is a hash of public keys, never a
+/// secret.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct WirePeer {
+    /// The peer's device id (hyphenated UUID).
+    pub device_id: String,
+    /// The peer's out-of-band comparison fingerprint (`xxxx-xxxx-xxxx-xxxx`).
+    pub fingerprint: String,
+    /// An optional user label ("laptop").
+    pub label: Option<String>,
+    /// When this trust was recorded (unix millis).
+    pub verified_at: i64,
+}
+
+/// Per-device sync marks rendered for the wire ([`Response::SyncStatus`]).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct WireSyncDevice {
+    /// The device id (hyphenated UUID).
+    pub device_id: String,
+    /// Whether this is the local (self) device.
+    pub is_self: bool,
+    /// Whether this device is a trusted peer (or self).
+    pub trusted: bool,
+    /// Highest `seq` applied locally for this device.
+    pub local_seq: u64,
+    /// Highest `seq` this device has published to the channel.
+    pub channel_seq: u64,
+}
+
+/// One adopted vault rendered for the wire ([`Response::SyncAdopted`]).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct WireAdoptedVault {
+    /// The adopted vault id (hyphenated UUID).
+    pub vault_id: String,
+    /// The vault name once known locally (may be empty until first pull).
+    pub name: String,
 }
 
 /// The unlock/lock state reported by [`Response::Status`].
@@ -552,6 +693,73 @@ pub enum Response {
         /// The login password (the secret).
         password: String,
     },
+    /// This device's public identity (answer to [`Request::ExportIdentity`]).
+    /// Everything here is **public** (public keys + a hash); no secret.
+    DeviceIdentity {
+        /// This device's id (hyphenated UUID).
+        device_id: String,
+        /// The compact, CRC-checked `LPDEV1-…` identity string to hand to a peer.
+        identity_string: String,
+        /// The out-of-band comparison fingerprint (`xxxx-xxxx-xxxx-xxxx`).
+        fingerprint: String,
+    },
+    /// The trusted peer devices (answer to [`Request::ListPeers`]). Public.
+    Peers {
+        /// The peers (may be empty).
+        peers: Vec<WirePeer>,
+    },
+    /// A peer was trusted (answer to [`Request::TrustDevice`]). Carries the
+    /// trusted device's public id + fingerprint + label so the UI can confirm.
+    PeerTrusted {
+        /// The trusted device id (hyphenated UUID).
+        device_id: String,
+        /// The confirmed fingerprint (`xxxx-xxxx-xxxx-xxxx`).
+        fingerprint: String,
+        /// The label recorded for the peer, if any.
+        label: Option<String>,
+    },
+    /// The outcome of a [`Request::SyncPush`]. No secret — ops are ciphertext.
+    SyncPushed {
+        /// Number of device chains published to the channel.
+        published: usize,
+        /// Number of segment files freshly written this push.
+        segments_written: usize,
+    },
+    /// The outcome of a [`Request::SyncPull`]. `alarms` are secret-free
+    /// descriptions of any quarantine/tamper events — surfaced prominently by
+    /// the UI, never swallowed.
+    SyncPulled {
+        /// Number of foreign ops verified and applied.
+        applied: usize,
+        /// Number of ops held pending (an earlier op has not arrived yet).
+        pending: usize,
+        /// Whether a shared-VaultKey blob addressed to this device was imported.
+        key_imported: bool,
+        /// Secret-free alarm descriptions (empty when clean).
+        alarms: Vec<String>,
+    },
+    /// The per-device sync status (answer to [`Request::SyncStatus`]).
+    SyncStatus {
+        /// Whether the vault is enrolled for sync.
+        enrolled: bool,
+        /// The enrolled sync-root (if any; a plain path, non-secret).
+        root: Option<String>,
+        /// Per-device seq marks.
+        devices: Vec<WireSyncDevice>,
+        /// Ops currently held pending across all peers.
+        pending: usize,
+        /// Secret-free alarm descriptions currently in effect.
+        alarms: Vec<String>,
+    },
+    /// The outcome of a [`Request::SyncAdopt`].
+    SyncAdopted {
+        /// The vaults adopted from the shared folder (may be empty).
+        adopted: Vec<WireAdoptedVault>,
+        /// Total ops applied across all adopted vaults' initial pulls.
+        applied_total: usize,
+        /// Secret-free alarm descriptions raised during the adopt pulls.
+        alarms: Vec<String>,
+    },
     /// The requested operation needs an unlocked session and none is held.
     Locked,
     /// This daemon serves a different profile than the request named.
@@ -588,6 +796,13 @@ impl Response {
             Response::RawPayload { .. } => "RawPayload",
             Response::LoginCandidates { .. } => "LoginCandidates",
             Response::Fill { .. } => "Fill",
+            Response::DeviceIdentity { .. } => "DeviceIdentity",
+            Response::Peers { .. } => "Peers",
+            Response::PeerTrusted { .. } => "PeerTrusted",
+            Response::SyncPushed { .. } => "SyncPushed",
+            Response::SyncPulled { .. } => "SyncPulled",
+            Response::SyncStatus { .. } => "SyncStatus",
+            Response::SyncAdopted { .. } => "SyncAdopted",
             Response::Locked => "Locked",
             Response::WrongProfile { .. } => "WrongProfile",
             Response::Error { .. } => "Error",

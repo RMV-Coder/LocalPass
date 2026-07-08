@@ -175,6 +175,105 @@ pub struct CreatedAccount {
     pub vault_count: usize,
 }
 
+/// This device's public identity, shown on the Devices screen so the user can
+/// hand it to another device. Everything here is **public** (public keys + a
+/// hash) — the identity string and fingerprint are safe to display and copy.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DeviceIdentityView {
+    /// This device's id (hyphenated UUID).
+    pub device_id: String,
+    /// The compact `LPDEV1-…` identity string to hand to a peer.
+    pub identity_string: String,
+    /// The out-of-band comparison fingerprint (`xxxx-xxxx-xxxx-xxxx`).
+    pub fingerprint: String,
+}
+
+/// A trusted peer device row for the Devices screen. All public.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PeerView {
+    /// The peer's device id (hyphenated UUID).
+    pub device_id: String,
+    /// The peer's fingerprint (`xxxx-xxxx-xxxx-xxxx`).
+    pub fingerprint: String,
+    /// An optional user label.
+    pub label: Option<String>,
+    /// When this trust was recorded (unix millis).
+    pub verified_at: i64,
+}
+
+/// The outcome of a `sync_push`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SyncPushView {
+    /// Number of device chains published.
+    pub published: usize,
+    /// Number of segment files freshly written.
+    pub segments_written: usize,
+}
+
+/// The outcome of a `sync_pull`. `alarms` are secret-free strings surfaced
+/// prominently by the UI (quarantine/tamper events are never swallowed).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SyncPullView {
+    /// Number of foreign ops verified and applied.
+    pub applied: usize,
+    /// Number of ops held pending.
+    pub pending: usize,
+    /// Whether a shared VaultKey addressed to this device was imported.
+    pub key_imported: bool,
+    /// Secret-free alarm descriptions (empty when clean).
+    pub alarms: Vec<String>,
+}
+
+/// One per-device row in the sync status view.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SyncDeviceView {
+    /// The device id (hyphenated UUID).
+    pub device_id: String,
+    /// Whether this is the local (self) device.
+    pub is_self: bool,
+    /// Whether this device is a trusted peer (or self).
+    pub trusted: bool,
+    /// Highest `seq` applied locally for this device.
+    pub local_seq: u64,
+    /// Highest `seq` this device has published to the channel.
+    pub channel_seq: u64,
+}
+
+/// The per-device sync status for a vault.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SyncStatusView {
+    /// Whether the vault is enrolled for sync.
+    pub enrolled: bool,
+    /// The enrolled sync-root path (if any).
+    pub root: Option<String>,
+    /// Per-device seq marks.
+    pub devices: Vec<SyncDeviceView>,
+    /// Ops currently held pending.
+    pub pending: usize,
+    /// Secret-free alarm descriptions currently in effect.
+    pub alarms: Vec<String>,
+}
+
+/// One adopted vault in a `sync_adopt` result.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct AdoptedVaultView {
+    /// The adopted vault id (hyphenated UUID).
+    pub vault_id: String,
+    /// The vault name once known locally (may be empty until first pull).
+    pub name: String,
+}
+
+/// The outcome of a `sync_adopt`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SyncAdoptView {
+    /// The vaults adopted from the shared folder.
+    pub adopted: Vec<AdoptedVaultView>,
+    /// Total ops applied across all adopted vaults' initial pulls.
+    pub applied_total: usize,
+    /// Secret-free alarm descriptions raised during the adopt pulls.
+    pub alarms: Vec<String>,
+}
+
 /// Map a masked [`WireField`] to a [`FieldView`], **dropping the value of any
 /// secret field**. This is the single choke point that guarantees no secret
 /// value leaves the backend through `get_item`.

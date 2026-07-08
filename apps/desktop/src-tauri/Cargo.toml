@@ -50,6 +50,15 @@ serde_json = "1"
 # --- No key material or master password is ever held here beyond the single
 # --- unlock() call that forwards the password straight to the daemon. ---
 lp-daemon = { path = "../../../crates/lp-daemon" }
+# --- The sync engine's device-identity parsing (public keys only). Used ONLY by
+# --- the `preview_fingerprint` command, which parses a pasted LPDEV1 string and
+# --- returns its fingerprint for the user to compare — a PUBLIC value, no
+# --- session/secret involved. Keeping the fingerprint algorithm in lp-sync (one
+# --- place) rather than reimplementing BLAKE3 in the webview avoids a JS crypto
+# --- dependency and a second, divergent implementation. Trust is still enforced
+# --- in the daemon (`TrustDevice` re-checks the fingerprint), so this preview is
+# --- display-only and cannot widen trust. ---
+lp-sync = { path = "../../../crates/lp-sync" }
 # --- Profile-directory resolution reuse: `directories` yields the same default
 # --- profile path the CLI uses (%APPDATA%\localpass etc.), so the GUI unlocks
 # --- the same account store the CLI and daemon serve. ---

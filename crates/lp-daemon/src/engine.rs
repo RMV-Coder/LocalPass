@@ -583,6 +583,57 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
         Request::FillLogin {
             item_id, origin, ..
         } => with_session(state, |session| fill_login(session, &item_id, &origin)),
+
+        // --- Device pairing (sync-protocol.md §6) --------------------------
+        Request::ExportIdentity { .. } => with_session(state, crate::sync::export_identity),
+
+        Request::ListPeers { .. } => with_session(state, crate::sync::list_peers),
+
+        Request::TrustDevice {
+            identity_string,
+            expected_fingerprint,
+            label,
+            ..
+        } => with_session(state, |session| {
+            crate::sync::trust_device(
+                session,
+                &identity_string,
+                &expected_fingerprint,
+                label.as_deref(),
+            )
+        }),
+
+        // --- Vault sync (sync-protocol.md §5/§7) ---------------------------
+        Request::SyncSetup { vault, dir, .. } => with_session(state, |session| {
+            let v = open_vault(session, &vault)?;
+            crate::sync::sync_setup(session, &v, &dir)
+        }),
+
+        Request::SyncPush { vault, .. } => with_session(state, |session| {
+            let v = open_vault(session, &vault)?;
+            crate::sync::sync_push(session, &v)
+        }),
+
+        Request::SyncPull { vault, .. } => with_session(state, |session| {
+            let v = open_vault(session, &vault)?;
+            crate::sync::sync_pull(session, &v)
+        }),
+
+        Request::SyncStatus { vault, .. } => with_session(state, |session| {
+            let v = open_vault(session, &vault)?;
+            crate::sync::sync_status(session, &v)
+        }),
+
+        Request::ShareVaultToDevice {
+            vault, device_id, ..
+        } => with_session(state, |session| {
+            let v = open_vault(session, &vault)?;
+            crate::sync::share_vault_to_device(session, &v, &device_id)
+        }),
+
+        Request::SyncAdopt { dir, .. } => {
+            with_session(state, |session| crate::sync::sync_adopt(session, &dir))
+        }
     };
 
     // Any successfully-handled request (even one returning a usage Error) counts
@@ -611,7 +662,16 @@ fn request_profile(request: &Request) -> Option<&str> {
         | Request::DeleteItem { profile, .. }
         | Request::RestoreVersion { profile, .. }
         | Request::MatchLogins { profile, .. }
-        | Request::FillLogin { profile, .. } => Some(profile),
+        | Request::FillLogin { profile, .. }
+        | Request::ExportIdentity { profile }
+        | Request::ListPeers { profile }
+        | Request::TrustDevice { profile, .. }
+        | Request::SyncSetup { profile, .. }
+        | Request::SyncPush { profile, .. }
+        | Request::SyncPull { profile, .. }
+        | Request::SyncStatus { profile, .. }
+        | Request::ShareVaultToDevice { profile, .. }
+        | Request::SyncAdopt { profile, .. } => Some(profile),
         Request::Ping | Request::Lock | Request::Shutdown => None,
     }
 }

@@ -105,3 +105,60 @@ export interface GeneratedView {
   secret: string;
   entropy_bits: number;
 }
+
+/** This device's public identity for the Devices screen. Everything here is
+ *  PUBLIC (public keys + a hash) — safe to display and copy, never a secret. */
+export interface DeviceIdentityView {
+  device_id: string;
+  identity_string: string;
+  fingerprint: string;
+}
+
+/** A trusted peer device row. All fields public. */
+export interface PeerView {
+  device_id: string;
+  fingerprint: string;
+  label: string | null;
+  verified_at: number;
+}
+
+export interface SyncPushView {
+  published: number;
+  segments_written: number;
+}
+
+/** The outcome of a pull. `alarms` are secret-free strings surfaced prominently
+ *  by the UI — quarantine/tamper events are never swallowed. */
+export interface SyncPullView {
+  applied: number;
+  pending: number;
+  key_imported: boolean;
+  alarms: string[];
+}
+
+export interface SyncDeviceView {
+  device_id: string;
+  is_self: boolean;
+  trusted: boolean;
+  local_seq: number;
+  channel_seq: number;
+}
+
+export interface SyncStatusView {
+  enrolled: boolean;
+  root: string | null;
+  devices: SyncDeviceView[];
+  pending: number;
+  alarms: string[];
+}
+
+export interface AdoptedVaultView {
+  vault_id: string;
+  name: string;
+}
+
+export interface SyncAdoptView {
+  adopted: AdoptedVaultView[];
+  applied_total: number;
+  alarms: string[];
+}

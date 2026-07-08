@@ -14,13 +14,14 @@
   import ItemDetail from "./ItemDetail.svelte";
   import ItemForm from "./ItemForm.svelte";
   import Generator from "./Generator.svelte";
+  import Devices from "./Devices.svelte";
 
   let vaults = $state<VaultView[]>([]);
   let selectedVault = $state<string>(""); // vault id
   let items = $state<ItemSummaryView[]>([]);
   let selectedItem = $state<string>(""); // item id
   let query = $state("");
-  let view = $state<"item" | "generator" | "form">("item");
+  let view = $state<"item" | "generator" | "form" | "devices">("item");
   let loadingItems = $state(false);
   let error = $state("");
   let itemListEl: HTMLUListElement | undefined = $state();
@@ -158,7 +159,7 @@
   );
 </script>
 
-<div class="shell {selectedItem || view === 'generator' ? 'show-items' : ''}">
+<div class="shell {selectedItem || view === 'generator' || view === 'devices' ? 'show-items' : ''}">
   <!-- Vault sidebar -->
   <nav class="pane vault-pane" aria-label="Vaults">
     <div class="pane-header" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
@@ -218,6 +219,16 @@
         }}
       >
         <span class="row-title">Generator</span>
+      </button>
+      <button
+        class="row {view === 'devices' ? 'selected' : ''}"
+        aria-current={view === "devices"}
+        onclick={() => {
+          view = "devices";
+          selectedItem = "";
+        }}
+      >
+        <span class="row-title">Devices &amp; Sync</span>
       </button>
     </div>
   </nav>
@@ -286,6 +297,8 @@
   <main class="pane" aria-label="Details" aria-live="polite">
     {#if view === "generator"}
       <Generator />
+    {:else if view === "devices"}
+      <Devices {vaults} {selectedVault} />
     {:else if view === "form" && selectedVault}
       {#key editing?.id ?? "new"}
         <ItemForm

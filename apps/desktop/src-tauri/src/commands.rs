@@ -33,8 +33,9 @@ use zeroize::Zeroize;
 use crate::daemon::{self, DaemonError};
 use crate::item_input::{self, NewItemInput};
 use crate::model::{
-    self, CreatedAccount, GeneratedView, ItemSummaryView, ItemView, SessionState, TotpView,
-    VaultView,
+    self, AdoptedVaultView, CreatedAccount, DeviceIdentityView, GeneratedView, ItemSummaryView,
+    ItemView, PeerView, SessionState, SyncAdoptView, SyncDeviceView, SyncPullView, SyncPushView,
+    SyncStatusView, TotpView, VaultView,
 };
 
 /// Map a [`DaemonError`] into the `SessionState`-flavoured error the UI shows.
@@ -479,6 +480,252 @@ pub fn delete_item(vault: String, id: String) -> Result<(), String> {
     check_response_error(&resp)?;
     match resp {
         Response::Ok { .. } => Ok(()),
+        other => Err(format!("unexpected daemon response: {}", other.kind())),
+    }
+}
+
+// --- Devices & Sync (device pairing + vault sync) ------------------------
+//
+// Every command here is **secret-free**. Device identity strings and
+// fingerprints are public (public keys + a hash). The vault-key share is sealed
+// inside `lp-sync`; these commands only name a (public) device id. Sync alarms
+// (quarantine/tamper) are surfaced as strings for the UI to show prominently —
+// they are never swallowed. Trusting a device REQUIRES a fingerprint the user
+// confirmed out-of-band; the daemon re-checks it (see `trust_device`).
+
+/// Parse a pasted `LPDEV1-…` identity string and return its **fingerprint** so
+/// the UI can show the user what to compare out-of-band before trusting.
+///
+/// This is a **pure, public** computation (no daemon, no session, no secret) —
+/// it parses the string's embedded public keys and derives the same fingerprint
+/// `lp-sync` uses everywhere, so there is exactly one fingerprint algorithm. It
+/// is **display-only**: the actual trust decision goes through
+/// [`trust_device`], where the daemon independently re-derives and re-checks the
+/// fingerprint, so a wrong/stale preview here can never widen trust. Returns an
+/// `Err` for a malformed string (wrong prefix, bad CRC, wrong length).
+#[tauri::command]
+pub fn preview_fingerprint(identity_string: String) -> Result<String, String> {
+    lp_sync::identity::DeviceIdentity::from_export_string(&identity_string)
+        .map(|id| id.fingerprint())
+        .map_err(|_| "invalid device identity string".to_string())
+}
+
+/// Export this device's public identity (id, `LPDEV1-…` string, fingerprint) so
+/// the user can hand it to another device. Nothing here is a secret.
+#[tauri::command]
+pub fn export_identity() -> Result<DeviceIdentityView, String> {
+    let profile = daemon::profile_string()?;
+    let resp = daemon::call(&Request::ExportIdentity { profile }).map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    match resp {
+        Response::DeviceIdentity {
+            device_id,
+            identity_string,
+            fingerprint,
+        } => Ok(DeviceIdentityView {
+            device_id,
+            identity_string,
+            fingerprint,
+        }),
+        other => Err(format!("unexpected daemon response: {}", other.kind())),
+    }
+}
+
+/// List the trusted peer devices (label / fingerprint / when). All public.
+#[tauri::command]
+pub fn list_peers() -> Result<Vec<PeerView>, String> {
+    let profile = daemon::profile_string()?;
+    let resp = daemon::call(&Request::ListPeers { profile }).map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    match resp {
+        Response::Peers { peers } => Ok(peers
+            .into_iter()
+            .map(|p| PeerView {
+                device_id: p.device_id,
+                fingerprint: p.fingerprint,
+                label: p.label,
+                verified_at: p.verified_at,
+            })
+            .collect()),
+        other => Err(format!("unexpected daemon response: {}", other.kind())),
+    }
+}
+
+/// Trust a peer device from its identity string, **after** the user confirmed
+/// its fingerprint out-of-band.
+///
+/// The `expected_fingerprint` is the value the user compared against the other
+/// device and confirmed (via the "fingerprints match" checkbox in the UI). It is
+/// passed straight to the daemon, which **re-computes and re-checks** it against
+/// the identity string and refuses on a mismatch or an empty confirmation — so
+/// the confirmation is a server-side invariant, never client-only. This is the
+/// security-critical pairing step; there is no auto-trust path.
+#[tauri::command]
+pub fn trust_device(
+    identity_string: String,
+    expected_fingerprint: String,
+    label: Option<String>,
+) -> Result<PeerView, String> {
+    let profile = daemon::profile_string()?;
+    let resp = daemon::call(&Request::TrustDevice {
+        profile,
+        identity_string,
+        expected_fingerprint,
+        label,
+    })
+    .map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    match resp {
+        Response::PeerTrusted {
+            device_id,
+            fingerprint,
+            label,
+        } => Ok(PeerView {
+            device_id,
+            fingerprint,
+            label,
+            verified_at: 0,
+        }),
+        other => Err(format!("unexpected daemon response: {}", other.kind())),
+    }
+}
+
+/// Enroll `vault` for file-based sync under the shared folder `dir`. Both
+/// machines watch the same folder; LocalPass encrypts everything, the folder is
+/// untrusted.
+#[tauri::command]
+pub fn sync_setup(vault: String, dir: String) -> Result<(), String> {
+    let profile = daemon::profile_string()?;
+    let resp = daemon::call(&Request::SyncSetup {
+        profile,
+        vault,
+        dir,
+    })
+    .map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    match resp {
+        Response::Ok { .. } => Ok(()),
+        other => Err(format!("unexpected daemon response: {}", other.kind())),
+    }
+}
+
+/// Publish this device's ops for `vault` to the shared folder. No secret — ops
+/// are ciphertext on the channel.
+#[tauri::command]
+pub fn sync_push(vault: String) -> Result<SyncPushView, String> {
+    let profile = daemon::profile_string()?;
+    let resp = daemon::call(&Request::SyncPush { profile, vault }).map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    match resp {
+        Response::SyncPushed {
+            published,
+            segments_written,
+        } => Ok(SyncPushView {
+            published,
+            segments_written,
+        }),
+        other => Err(format!("unexpected daemon response: {}", other.kind())),
+    }
+}
+
+/// Verify + merge peers' ops for `vault` from the shared folder. Any alarms
+/// (quarantine/tamper) are returned for the UI to surface prominently.
+#[tauri::command]
+pub fn sync_pull(vault: String) -> Result<SyncPullView, String> {
+    let profile = daemon::profile_string()?;
+    let resp = daemon::call(&Request::SyncPull { profile, vault }).map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    match resp {
+        Response::SyncPulled {
+            applied,
+            pending,
+            key_imported,
+            alarms,
+        } => Ok(SyncPullView {
+            applied,
+            pending,
+            key_imported,
+            alarms,
+        }),
+        other => Err(format!("unexpected daemon response: {}", other.kind())),
+    }
+}
+
+/// The per-device sync status for `vault` (seq marks + pending/quarantine).
+#[tauri::command]
+pub fn sync_status(vault: String) -> Result<SyncStatusView, String> {
+    let profile = daemon::profile_string()?;
+    let resp = daemon::call(&Request::SyncStatus { profile, vault }).map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    match resp {
+        Response::SyncStatus {
+            enrolled,
+            root,
+            devices,
+            pending,
+            alarms,
+        } => Ok(SyncStatusView {
+            enrolled,
+            root,
+            devices: devices
+                .into_iter()
+                .map(|d| SyncDeviceView {
+                    device_id: d.device_id,
+                    is_self: d.is_self,
+                    trusted: d.trusted,
+                    local_seq: d.local_seq,
+                    channel_seq: d.channel_seq,
+                })
+                .collect(),
+            pending,
+            alarms,
+        }),
+        other => Err(format!("unexpected daemon response: {}", other.kind())),
+    }
+}
+
+/// Seal `vault`'s key to a trusted peer device and ship it via the shared
+/// folder. The key is sealed inside the daemon/engine; this command names only
+/// the (public) device id.
+#[tauri::command]
+pub fn share_vault_to_device(vault: String, device_id: String) -> Result<(), String> {
+    let profile = daemon::profile_string()?;
+    let resp = daemon::call(&Request::ShareVaultToDevice {
+        profile,
+        vault,
+        device_id,
+    })
+    .map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    match resp {
+        Response::Ok { .. } => Ok(()),
+        other => Err(format!("unexpected daemon response: {}", other.kind())),
+    }
+}
+
+/// Adopt vaults shared to this device from the folder `dir`, then pull each so
+/// its items materialize. Returns the adopted vaults + any alarms.
+#[tauri::command]
+pub fn sync_adopt(dir: String) -> Result<SyncAdoptView, String> {
+    let profile = daemon::profile_string()?;
+    let resp = daemon::call(&Request::SyncAdopt { profile, dir }).map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    match resp {
+        Response::SyncAdopted {
+            adopted,
+            applied_total,
+            alarms,
+        } => Ok(SyncAdoptView {
+            adopted: adopted
+                .into_iter()
+                .map(|a| AdoptedVaultView {
+                    vault_id: a.vault_id,
+                    name: a.name,
+                })
+                .collect(),
+            applied_total,
+            alarms,
+        }),
         other => Err(format!("unexpected daemon response: {}", other.kind())),
     }
 }

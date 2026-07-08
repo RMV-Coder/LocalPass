@@ -2114,6 +2114,7 @@ dependencies = [
  "directories",
  "getrandom 0.3.4",
  "lp-daemon",
+ "lp-sync",
  "serde",
  "serde_json",
  "tauri",
@@ -2163,6 +2164,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "lp-crypto",
+ "lp-sync",
  "lp-vault",
  "rsa",
  "serde",
@@ -2173,6 +2175,18 @@ dependencies = [
  "thiserror 2.0.18",
  "windows-sys 0.59.0",
  "zeroize",
+]
+
+[[package]]
+name = "lp-sync"
+version = "0.1.0"
+dependencies = [
+ "lp-crypto",
+ "lp-vault",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]

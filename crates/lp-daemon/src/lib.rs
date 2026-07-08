@@ -81,6 +81,7 @@ pub mod render;
 pub mod server;
 pub mod spawn;
 pub mod sshagent;
+pub mod sync;
 pub mod transport;
 
 pub use error::{Error, Result};
