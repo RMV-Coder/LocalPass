@@ -1314,6 +1314,7 @@ dependencies = [
  "assert_cmd",
  "libc",
  "lp-crypto",
+ "lp-sync",
  "lp-vault",
  "predicates",
  "rsa",
