@@ -118,3 +118,72 @@ fn share_adopt_and_bidirectional_sync_between_real_devices() {
     }
     vault_b.verify_local_chain().unwrap();
 }
+
+/// Adopting a vault whose name collides with one this device already has (both
+/// "personal") disambiguates the incoming copy so name-based lookup stays
+/// unambiguous — the bug a real two-device CLI round-trip surfaced.
+#[test]
+fn adopting_a_same_named_vault_is_disambiguated() {
+    // Both devices have a "personal" vault (as the CLI/GUI create at init).
+    let dir_a = tempfile::tempdir().unwrap();
+    let (session_a, _sk_a) = AccountStore::create(dir_a.path(), "pw-a").unwrap();
+    let personal_a = session_a.create_vault("personal").unwrap();
+
+    let dir_b = tempfile::tempdir().unwrap();
+    let (session_b, _sk_b) = AccountStore::create(dir_b.path(), "pw-b").unwrap();
+    session_b.create_vault("personal").unwrap();
+
+    // Mutual trust.
+    let ident_a = session_a.device_public_identity();
+    let ident_b = session_b.device_public_identity();
+    session_a
+        .trust_peer_device(
+            &ident_b.device_id,
+            &ident_b.ed25519_pub,
+            &ident_b.x25519_pub,
+            None,
+        )
+        .unwrap();
+    session_b
+        .trust_peer_device(
+            &ident_a.device_id,
+            &ident_a.ed25519_pub,
+            &ident_a.x25519_pub,
+            None,
+        )
+        .unwrap();
+
+    // A shares its "personal" vault to B, who already has a "personal".
+    let root = tempfile::tempdir().unwrap();
+    engine::setup(&session_a, personal_a, root.path()).unwrap();
+    engine::share_vault_to_device(&session_a, personal_a, &ident_b.device_id).unwrap();
+    let adopted = engine::adopt(&session_b, root.path()).unwrap();
+    assert_eq!(adopted, vec![personal_a]);
+
+    // B now has two distinct vault names: its own "personal" and the adopted
+    // one, disambiguated to "personal (shared)".
+    let names: Vec<String> = session_b
+        .list_vaults()
+        .unwrap()
+        .into_iter()
+        .map(|(_, n)| n)
+        .collect();
+    assert!(
+        names.contains(&"personal".to_string()),
+        "own default kept: {names:?}"
+    );
+    assert!(
+        names.contains(&"personal (shared)".to_string()),
+        "adopted vault disambiguated: {names:?}"
+    );
+    // The adopted vault opens by its now-unique name.
+    assert!(
+        session_b
+            .list_vaults()
+            .unwrap()
+            .iter()
+            .filter(|(_, n)| n == "personal")
+            .count()
+            == 1
+    );
+}

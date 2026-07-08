@@ -553,6 +553,28 @@ fn split_share_blob(blob: &[u8]) -> Result<(&[u8], &[u8])> {
     Ok((sealed_key, sealed_name))
 }
 
+/// Return a vault name that does not collide with any in `existing`.
+///
+/// If `desired` is free it is returned unchanged. Otherwise a `" (shared)"`
+/// suffix is appended (then `" (shared 2)"`, `" (shared 3)"`, …) until a free
+/// name is found. Used when adopting a vault shared from another device so two
+/// vaults never share a name locally (which would make name-based lookup
+/// ambiguous). Pure and deterministic.
+fn disambiguate_vault_name(existing: &[String], desired: &str) -> String {
+    let taken = |candidate: &str| existing.iter().any(|n| n == candidate);
+    if !taken(desired) {
+        return desired.to_string();
+    }
+    let base = format!("{desired} (shared)");
+    if !taken(&base) {
+        return base;
+    }
+    (2..)
+        .map(|n| format!("{desired} (shared {n})"))
+        .find(|candidate| !taken(candidate))
+        .expect("an unbounded counter always yields a free name")
+}
+
 /// This device's identity: the live keypairs and their public bytes.
 ///
 /// Private keypairs are held in memory for the [`Session`] lifetime and dropped
@@ -1280,6 +1302,26 @@ impl Session {
             .open(sealed_name, &aad::share_vault_name(vault_id, &me))
             .map_err(Error::from_crypto)?;
 
+        // Disambiguate the incoming name against the vaults this device already
+        // has, so adopting a vault shared from another device does not leave two
+        // vaults with the same name (e.g. both "personal") — which would make
+        // name-based lookup ambiguous and force the user to paste a UUID. Vault
+        // names are local, per-vault, and AccountKey-sealed here, so renaming
+        // the local copy is purely a registry concern and does not affect the
+        // sharer or the synced op log. On a re-adopt the vault is already
+        // registered and `register_shared_vault` no-ops before this name is
+        // used, so no double-suffixing occurs.
+        let name = match String::from_utf8(name) {
+            Ok(desired) => {
+                let existing: Vec<String> =
+                    self.list_vaults()?.into_iter().map(|(_, n)| n).collect();
+                disambiguate_vault_name(&existing, &desired).into_bytes()
+            }
+            // A non-UTF-8 vault name should never occur (create/import seal UTF-8),
+            // but if it did we keep the bytes verbatim rather than fail the import.
+            Err(e) => e.into_bytes(),
+        };
+
         let wrapped = wrap_key(
             self.account_key.inner(),
             vault_key.inner(),
@@ -1573,5 +1615,39 @@ impl core::fmt::Debug for Session {
             .field("device_id", &self.device.device_id)
             .field("account_key", &"<redacted>")
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::disambiguate_vault_name;
+
+    #[test]
+    fn disambiguate_leaves_a_free_name_unchanged() {
+        let existing = vec!["work".to_string(), "personal".to_string()];
+        assert_eq!(disambiguate_vault_name(&existing, "shared"), "shared");
+        assert_eq!(disambiguate_vault_name(&[], "personal"), "personal");
+    }
+
+    #[test]
+    fn disambiguate_appends_shared_on_a_collision() {
+        let existing = vec!["personal".to_string()];
+        assert_eq!(
+            disambiguate_vault_name(&existing, "personal"),
+            "personal (shared)"
+        );
+    }
+
+    #[test]
+    fn disambiguate_counts_up_when_shared_is_also_taken() {
+        let existing = vec![
+            "personal".to_string(),
+            "personal (shared)".to_string(),
+            "personal (shared 2)".to_string(),
+        ];
+        assert_eq!(
+            disambiguate_vault_name(&existing, "personal"),
+            "personal (shared 3)"
+        );
     }
 }
