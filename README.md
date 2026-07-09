@@ -21,7 +21,7 @@ status against the PRD (including what is still partial or deferred).
 | `lp-sync` — sync engine | ✅ Signed op-log ingest + deterministic merge, file-based shipping, cross-device key sharing (live LAN/mDNS transport is a documented follow-up) |
 | `lp-porter` — import/export | ✅ 1Password/Bitwarden/LastPass/CSV/`.env` import, age-encrypted archive export (KDBX import stubbed) |
 | `lp-native-host` — browser bridge | ✅ Fill-scoped native-messaging host (the extension UI itself is not yet built) |
-| `apps/desktop` — Tauri GUI (MPL-2.0) | ◑ Read/search/reveal/TOTP/generate shell; item create/edit from the GUI is a follow-up |
+| `apps/desktop` — Tauri GUI (MPL-2.0) | ✅ Zero-terminal: account creation, item CRUD, search, reveal/copy, live TOTP, generator, `.env` secure documents, encrypted attachments, and device linking + sync — bundles the daemon and auto-starts it |
 
 ## Building
 
@@ -44,6 +44,36 @@ cargo run -p lp-cli -- generate --words 5
 ```
 
 **Print your Emergency Kit and store it offline.** There is no cloud reset: losing your master password, Secret Key, and devices means the data is gone — by design.
+
+## Desktop app (GUI)
+
+The [`apps/desktop`](apps/desktop) Tauri app is a zero-terminal way to use LocalPass — create your account, browse and edit items, reveal/copy secrets, read live TOTP codes, manage `.env` documents and attachments, and link + sync devices. It's a thin daemon **client** and holds no key material; secret handling stays in Rust behind an explicit-gesture boundary. See [apps/desktop/README.md](apps/desktop/README.md) for the architecture and security notes.
+
+There is no pre-built download yet, so you build the installer from source.
+
+**Prerequisites (Windows):** stable Rust (MSVC toolchain), [Node.js](https://nodejs.org) v24+, and WebView2 (already bundled with Windows 11).
+
+```powershell
+cd apps/desktop
+npm install
+npm run bundle          # builds the daemon, stages it as a sidecar, runs `tauri build`
+```
+
+The installer is written to `apps/desktop/src-tauri/target/release/bundle/` as an NSIS `.exe` (and/or MSI). Run it to install. The daemon ships **inside** the install and the app auto-starts it on launch, so the installed app is fully self-contained — nothing else to set up.
+
+> The installer is **unsigned** (pre-1.0), so Windows SmartScreen shows an "unrecognized app" prompt — click **More info → Run anyway**.
+
+Two shortcuts if you'd rather not build a full installer:
+
+```powershell
+# Run the app directly (dev mode); needs the daemon on PATH — see below.
+cd apps/desktop && npm install && npm run tauri dev
+
+# Put the CLI + daemon on PATH (also satisfies the GUI's dev-mode daemon lookup).
+cargo install --path crates/lp-cli --path crates/lp-daemon
+```
+
+macOS and Linux builds use the same `npm run bundle` command (producing a `.dmg` / `.AppImage` / `.deb`), but are not yet CI-verified — see [docs/mvp-acceptance.md](docs/mvp-acceptance.md).
 
 ## Security model (short version)
 
