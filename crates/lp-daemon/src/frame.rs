@@ -70,9 +70,14 @@ enum ReadOutcome {
     Eof,
 }
 
-/// Fill `buf` exactly, but map a clean EOF *before the first byte* to
-/// [`ReadOutcome::Eof`]. An EOF partway through a prefix is a truncated frame
-/// and surfaces as an [`io::ErrorKind::UnexpectedEof`].
+/// Fill `buf` exactly, but map a peer disconnect *before the first byte* to
+/// [`ReadOutcome::Eof`]. A clean EOF (0-byte read) and an abrupt reset
+/// (`ConnectionReset`/`BrokenPipe`/…) at the frame boundary are indistinguishable
+/// in intent — the peer went away before this frame — so both become `Eof`, which
+/// the response reader surfaces as [`Error::Closed`] (the shutdown-race signal a
+/// `status`/`probe` treats as "not running"). A disconnect or EOF *partway*
+/// through a prefix (`read > 0`) is a truncated frame and stays an
+/// [`io::ErrorKind::UnexpectedEof`] error.
 fn read_exact_or_eof<R: Read>(r: &mut R, buf: &mut [u8]) -> Result<ReadOutcome> {
     let mut read = 0;
     while read < buf.len() {
@@ -85,10 +90,27 @@ fn read_exact_or_eof<R: Read>(r: &mut R, buf: &mut [u8]) -> Result<ReadOutcome> 
             }
             Ok(n) => read += n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) if read == 0 && is_peer_disconnect(e.kind()) => {
+                return Ok(ReadOutcome::Eof);
+            }
             Err(e) => return Err(Error::Io(e)),
         }
     }
     Ok(ReadOutcome::Filled)
+}
+
+/// Error kinds that mean the peer closed or reset the connection out from under
+/// us (as opposed to a recoverable or genuinely unexpected transport error).
+/// A daemon shutting down resets/closes pending connections; on Linux that
+/// arrives as `ConnectionReset`, elsewhere as a clean EOF or `BrokenPipe`.
+fn is_peer_disconnect(kind: io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::UnexpectedEof
+    )
 }
 
 /// Write a [`Request`] as a versioned, length-prefixed frame.
@@ -207,6 +229,49 @@ mod tests {
         match read_request(&mut cur) {
             Err(Error::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof),
             other => panic!("expected UnexpectedEof, got {other:?}"),
+        }
+    }
+
+    /// A reader that plays back a scripted sequence of read outcomes.
+    struct ScriptReader(std::collections::VecDeque<io::Result<Vec<u8>>>);
+    impl Read for ScriptReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            match self.0.pop_front() {
+                Some(Ok(data)) => {
+                    let n = data.len().min(buf.len());
+                    buf[..n].copy_from_slice(&data[..n]);
+                    Ok(n)
+                }
+                Some(Err(e)) => Err(e),
+                None => Ok(0),
+            }
+        }
+    }
+
+    #[test]
+    fn reset_at_frame_boundary_is_closed() {
+        // A peer reset before any byte of the response (the Linux shutdown race)
+        // must read as a clean close, not a transport error.
+        let mut r = ScriptReader(std::collections::VecDeque::from([Err(io::Error::from(
+            io::ErrorKind::ConnectionReset,
+        ))]));
+        match read_response(&mut r) {
+            Err(Error::Closed) => {}
+            other => panic!("expected Closed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reset_midframe_stays_an_error() {
+        // A reset *after* some prefix bytes is a genuine truncation, not a clean
+        // boundary close — it must remain an error.
+        let mut r = ScriptReader(std::collections::VecDeque::from([
+            Ok(vec![1u8, 0u8]),
+            Err(io::Error::from(io::ErrorKind::ConnectionReset)),
+        ]));
+        match read_request(&mut r) {
+            Err(Error::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::ConnectionReset),
+            other => panic!("expected Io(ConnectionReset), got {other:?}"),
         }
     }
 }
