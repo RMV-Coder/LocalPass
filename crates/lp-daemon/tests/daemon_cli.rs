@@ -1,10 +1,11 @@
 //! End-to-end daemon integration tests driving the real `localpass` binary.
 //!
 //! Each test uses a fresh tempdir profile and an **isolated endpoint**: the
-//! daemon endpoint is per-user (named pipe `localpass-<username>` / per-user
-//! socket dir), so every test overrides `USERNAME`/`USER` with a unique value so
-//! concurrent tests never collide on one endpoint. The spawned daemon inherits
-//! that env, so client and daemon agree on the same isolated endpoint.
+//! daemon endpoint embeds the username (named pipe `localpass-<username>` on
+//! Windows / socket `daemon-<username>.sock` on Unix), so every test overrides
+//! `USERNAME`/`USER` with a unique value and concurrent tests never collide on
+//! one endpoint. The spawned daemon inherits that env, so client and daemon
+//! agree on the same isolated endpoint.
 //!
 //! Windows note (LESSONS.md): these exercise detached child-process spawning and
 //! named-pipe IPC; they are run via `cargo test`, which the harness drives from
@@ -45,7 +46,7 @@ impl DaemonProfile {
         let mut cmd = Command::cargo_bin("localpass").expect("built binary");
         cmd.env("LOCALPASS_PASSWORD", TEST_PASSWORD)
             .env("USERNAME", &self.endpoint_user) // Windows endpoint name
-            .env("USER", &self.endpoint_user) // Unix (ignored for path, kept consistent)
+            .env("USER", &self.endpoint_user) // Unix socket file name
             .arg("--profile")
             .arg(self.path());
         cmd

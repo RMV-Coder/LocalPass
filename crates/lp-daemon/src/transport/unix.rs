@@ -1,31 +1,35 @@
-//! Unix domain socket transport with `SO_PEERCRED` peer-uid enforcement.
+//! Unix domain socket transport with peer-uid enforcement (`SO_PEERCRED` on
+//! Linux, `getpeereid` on macOS/BSD).
 //!
 //! # Endpoint
 //!
-//! The socket lives at `$XDG_RUNTIME_DIR/localpass/daemon.sock`. When
+//! The socket lives at `$XDG_RUNTIME_DIR/localpass/daemon-<username>.sock`. When
 //! `XDG_RUNTIME_DIR` is unset (some minimal environments), we fall back to
-//! `~/.localpass-run/daemon.sock`. The containing directory is created `0700`
-//! and the socket is `chmod 0600` immediately after bind — so at the filesystem
-//! level only the owner can reach it.
+//! `~/.localpass-run/daemon-<username>.sock`. The containing directory is created
+//! `0700` and the socket is `chmod 0600` immediately after bind — so at the
+//! filesystem level only the owner can reach it.
 //!
 //! # Access control (defense in depth)
 //!
 //! File permissions alone are the first line, but a same-uid-but-different
 //! intent process on a misconfigured system could still connect, and on some
 //! platforms socket-file permissions are not enforced. So **every accepted
-//! connection's peer uid is read via `SO_PEERCRED` and compared to our
-//! `geteuid()`** — a mismatch is rejected and the connection dropped
+//! connection's peer uid is read via the platform peer-credential call
+//! (`SO_PEERCRED` / `getpeereid`) and compared to our `geteuid()`** — a mismatch
+//! is rejected and the connection dropped
 //! (PRD §7.3 OS peer credentials, §8 T8). The secret-bearing channel is trusted
 //! only because both the permission gate and the peer check agree the far end is
 //! us.
 //!
 //! # `username` on Unix
 //!
-//! Unlike Windows (where the pipe name embeds the sanitized username), the Unix
-//! socket path is already per-user via `$XDG_RUNTIME_DIR` / `$HOME`. The
-//! `username` argument is accepted for interface symmetry but not used to build
-//! the path; per-user isolation comes from the runtime dir and the `0700`
-//! parent.
+//! The runtime dir (`$XDG_RUNTIME_DIR`, else `$HOME`) already scopes the socket
+//! to the real user. The socket **file name** additionally embeds the sanitized
+//! `username` (mirroring the Windows pipe name), so a single real user can run
+//! independent daemons under distinct logical usernames — which is exactly how
+//! the integration tests isolate: each overrides `USER`/`USERNAME` and gets its
+//! own `daemon-<username>.sock`. Without this, parallel tests sharing one real
+//! uid (and thus one runtime dir) would collide on a single socket.
 
 #![cfg(unix)]
 // This module calls `getsockopt(SO_PEERCRED)` and `geteuid` for the peer-uid
@@ -43,15 +47,16 @@ use crate::error::{Error, Result};
 
 /// Directory (under the runtime dir or `$HOME`) holding the daemon socket.
 const RUNTIME_SUBDIR: &str = "localpass";
-/// The socket file name.
-const SOCKET_FILE: &str = "daemon.sock";
 /// Fallback runtime directory under `$HOME` when `XDG_RUNTIME_DIR` is unset.
 const HOME_FALLBACK_DIR: &str = ".localpass-run";
 
-/// Resolve the socket path and its parent directory.
+/// Resolve the socket path and its parent directory for `username`.
 ///
-/// `$XDG_RUNTIME_DIR/localpass/daemon.sock`, else `~/.localpass-run/daemon.sock`.
-fn socket_paths() -> Result<(PathBuf, PathBuf)> {
+/// `$XDG_RUNTIME_DIR/localpass/daemon-<username>.sock`, else
+/// `~/.localpass-run/daemon-<username>.sock`. `username` is already sanitized to
+/// `[a-z0-9._-]` by [`super::sanitize_username`], so it is a safe single path
+/// component.
+fn socket_paths(username: &str) -> Result<(PathBuf, PathBuf)> {
     let (base, sub): (PathBuf, &str) =
         if let Some(rt) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
             (PathBuf::from(rt), RUNTIME_SUBDIR)
@@ -63,7 +68,7 @@ fn socket_paths() -> Result<(PathBuf, PathBuf)> {
             ));
         };
     let dir = base.join(sub);
-    let sock = dir.join(SOCKET_FILE);
+    let sock = dir.join(format!("daemon-{username}.sock"));
     Ok((dir, sock))
 }
 
@@ -88,9 +93,14 @@ pub(crate) fn our_euid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
-/// Read the peer's uid from a connected stream via `SO_PEERCRED`.
+/// Read the peer's effective uid from a connected stream.
+///
+/// Linux/Android expose it through `getsockopt(SO_PEERCRED)` (a `ucred` struct);
+/// macOS and the BSDs use `getpeereid(2)`. Both return the connected peer's
+/// effective uid, which the caller compares to our euid.
 ///
 /// `pub(crate)` for reuse by the SSH agent listener's per-connection check.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub(crate) fn peer_uid(stream: &UnixStream) -> Result<u32> {
     let fd = stream.as_raw_fd();
     let mut cred = libc::ucred {
@@ -119,6 +129,27 @@ pub(crate) fn peer_uid(stream: &UnixStream) -> Result<u32> {
     Ok(cred.uid)
 }
 
+/// macOS/BSD peer-uid via `getpeereid` (Linux's `SO_PEERCRED` is absent there).
+///
+/// `pub(crate)` for reuse by the SSH agent listener's per-connection check.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+pub(crate) fn peer_uid(stream: &UnixStream) -> Result<u32> {
+    let fd = stream.as_raw_fd();
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    // SAFETY: `fd` is a valid connected socket fd for the stream's lifetime;
+    // `uid`/`gid` are valid, correctly typed out-params for getpeereid.
+    let rc =
+        unsafe { libc::getpeereid(fd, std::ptr::addr_of_mut!(uid), std::ptr::addr_of_mut!(gid)) };
+    if rc != 0 {
+        return Err(Error::Platform(format!(
+            "getpeereid failed: {}",
+            io::Error::last_os_error()
+        )));
+    }
+    Ok(uid)
+}
+
 /// A bound Unix-socket listener that unlinks the socket on drop.
 pub struct Listener {
     inner: UnixListener,
@@ -131,8 +162,8 @@ impl Listener {
     ///
     /// A stale socket file from a previous run is unlinked first (if binding
     /// fails with `AddrInUse` we surface it — a live daemon owns the endpoint).
-    pub fn bind(_username: &str) -> Result<Self> {
-        let (dir, path) = socket_paths()?;
+    pub fn bind(username: &str) -> Result<Self> {
+        let (dir, path) = socket_paths(username)?;
         ensure_dir_0700(&dir)?;
 
         // Remove a stale socket file. A live peer would still hold the endpoint;
@@ -230,15 +261,15 @@ fn connect_path(path: &Path) -> Result<UnixStream> {
 }
 
 /// Client connect.
-pub fn connect(_username: &str) -> Result<Connection> {
-    let (_dir, path) = socket_paths()?;
+pub fn connect(username: &str) -> Result<Connection> {
+    let (_dir, path) = socket_paths(username)?;
     let stream = connect_path(&path)?;
     Ok(Connection { stream })
 }
 
 /// The socket path label for diagnostics.
-pub fn endpoint_label(_username: &str) -> String {
-    match socket_paths() {
+pub fn endpoint_label(username: &str) -> String {
+    match socket_paths(username) {
         Ok((_dir, path)) => path.display().to_string(),
         Err(_) => "<unresolved unix socket>".to_string(),
     }

@@ -13,11 +13,12 @@
 //!   authentication: a process running as another user simply cannot open the
 //!   pipe (PRD §7.3, §8 T8). See the `windows` submodule.
 //! - **Unix:** a `SOCK_STREAM` domain socket at
-//!   `$XDG_RUNTIME_DIR/localpass/daemon.sock` (fallback
-//!   `~/.localpass-run/daemon.sock`). The directory is `0700` and the socket is
-//!   `0600`, and **every** accepted connection's peer uid is checked against our
-//!   euid via `SO_PEERCRED` — a mismatch is rejected. Permissions plus the peer
-//!   check are the authentication. See the `unix` submodule.
+//!   `$XDG_RUNTIME_DIR/localpass/daemon-<username>.sock` (fallback
+//!   `~/.localpass-run/daemon-<username>.sock`). The directory is `0700` and the
+//!   socket is `0600`, and **every** accepted connection's peer uid is checked
+//!   against our euid via the platform peer-credential call (`SO_PEERCRED` on
+//!   Linux, `getpeereid` on macOS/BSD) — a mismatch is rejected. Permissions plus
+//!   the peer check are the authentication. See the `unix` submodule.
 //!
 //! Both platforms expose the same three things through this module:
 //!
