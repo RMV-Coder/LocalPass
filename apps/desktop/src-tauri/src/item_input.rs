@@ -496,6 +496,42 @@ mod tests {
     }
 
     #[test]
+    fn env_set_edit_with_entries_replaces_full_set() {
+        // The GUI now prefills the edit form with the item's existing variables
+        // (revealed), so a non-empty submit carries the FULL set and replaces —
+        // editing one entry must not drop the others.
+        let current = json!({
+            "v": 1, "type": "env_set",
+            "entries": [
+                { "key": "FOO", "value": "old" },
+                { "key": "BAR", "value": "2" }
+            ],
+            "title": "Old", "fields": []
+        });
+        let mut input = base("env_set");
+        input.env_entries = vec![
+            EnvEntryInput {
+                key: "FOO".into(),
+                value: "new".into(),
+            }, // changed
+            EnvEntryInput {
+                key: "BAR".into(),
+                value: "2".into(),
+            }, // kept
+            EnvEntryInput {
+                key: "BAZ".into(),
+                value: "3".into(),
+            }, // added
+        ];
+        let p = build_payload(&input, Some(&current)).unwrap();
+        let entries = p["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 3, "the submitted full set replaces");
+        assert_eq!(entries[0]["key"], "FOO");
+        assert_eq!(entries[0]["value"], "new", "changed value applied");
+        assert_eq!(entries[2]["key"], "BAZ", "added entry present");
+    }
+
+    #[test]
     fn totp_edit_preserves_secret() {
         let current = json!({
             "v": 1, "type": "totp", "secret_b32": "JBSWY3DPEHPK3PXP",

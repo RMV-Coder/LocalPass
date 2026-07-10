@@ -12,9 +12,15 @@
   the current (unrevealed) value server-side. New secret values live only in
   component-local form state and go straight to the backend on submit — never a
   store, never echoed back.
+
+  ENV-SET EXCEPTION: editing an env-set inherently means editing its variables,
+  so on edit we reveal + prefill the existing entries (the same gesture-driven,
+  audit-logged reveal path as "Export as .env"). This is deliberate: a partial
+  edit must carry the full set, or the non-empty replace would drop the rest.
+  Those values are wiped on teardown like every other secret here.
 -->
 <script lang="ts">
-  import { createItem, updateItem, generatePassword, parseDotenv } from "../lib/api";
+  import { createItem, updateItem, generatePassword, parseDotenv, revealField } from "../lib/api";
   import type { ItemView, NewItemInput, CustomFieldInput, EnvEntryInput } from "../lib/types";
   import { toast } from "../lib/toast";
 
@@ -65,9 +71,41 @@
   // Secret value inputs (blank on edit = keep current).
   let password = $state("");
 
-  // env-set entries. ItemView does not surface env entries as regular fields,
-  // so on edit the user re-enters/adds entries (create is the primary path).
+  // env-set entries. On EDIT these are prefilled from the item's existing
+  // variables so the user edits the FULL set — adding one entry must not drop
+  // the rest (submitting a non-empty env_entries replaces all server-side). The
+  // KEYs come from the item's fields; each VALUE is revealed via the same
+  // gesture-driven, audit-logged path as "Export as .env". Values live only in
+  // component-local state and are wiped on teardown (below).
   let envEntries = $state<EnvEntryInput[]>([]);
+  let envLoading = $state(false);
+  let envLoadError = $state("");
+  let envLoaded = false; // guard so the reveal runs exactly once
+
+  async function loadEnvEntriesForEdit() {
+    if (envLoaded || !seed || seed.type_str !== "env_set") return;
+    envLoaded = true;
+    const keys = seed.fields.map((f) => f.name);
+    if (keys.length === 0) return;
+    envLoading = true;
+    envLoadError = "";
+    try {
+      const loaded: EnvEntryInput[] = [];
+      for (const key of keys) {
+        loaded.push({ key, value: await revealField(vault, seed.id, key) });
+      }
+      envEntries = loaded;
+    } catch (err) {
+      // On failure leave envEntries empty: an empty env_entries on submit
+      // PRESERVES the existing variables server-side, so nothing is lost — but
+      // warn the user (adding a new entry while the rest are unloaded would
+      // replace them). See the alert in the template.
+      envLoadError =
+        typeof err === "string" ? err : "Could not load the existing variables.";
+    } finally {
+      envLoading = false;
+    }
+  }
 
   // ssh-key.
   let sshAlgo = $state(fieldVal("algo"));
@@ -227,9 +265,15 @@
     return input;
   }
 
+  // On an env-set edit, reveal + prefill the existing variables once. The parent
+  // remounts this component per edited item (via {#key}), so this runs on mount.
+  $effect(() => {
+    loadEnvEntriesForEdit();
+  });
+
   async function submit(e: Event) {
     e.preventDefault();
-    if (busy) return;
+    if (busy || envLoading) return; // don't save mid-reveal (would drop entries)
     if (title.trim().length === 0) {
       error = "A title is required.";
       return;
@@ -266,6 +310,8 @@
     sshPrivate = "";
     totpSecret = "";
     pasteEnvText = "";
+    // env values revealed for editing are secret too — wipe them on teardown.
+    envEntries = [];
   });
 </script>
 
@@ -464,6 +510,14 @@
       </div>
       <div class="field-group" role="group" aria-label="Environment variables">
         <p class="field-name" style="margin:0 0 0.35em">Environment variables</p>
+        {#if envLoading}
+          <p class="hint" style="margin:0 0 0.4rem" role="status">Loading existing variables…</p>
+        {:else if envLoadError}
+          <div class="error" role="alert" style="margin:0 0 0.4rem">
+            {envLoadError} You can add new variables, but adding them without the
+            existing ones loaded would replace them — cancel and retry instead.
+          </div>
+        {/if}
         {#each envEntries as entry, i (i)}
           <div class="toolbar" style="margin-bottom:0.4rem">
             <input
