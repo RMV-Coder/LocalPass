@@ -190,6 +190,63 @@ pub fn ensure_audit_table(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Idempotent, forward-only migration bringing a vault file's `attachments`
+/// schema up to date (vault-format.md §9: additive, no `format_version` bump).
+/// Two eras of vault predate today's schema: those created before attachments
+/// existed at all (no `attachments` table), and those created after the table
+/// but before the `created_at` column (added with attachment sync) — the latter
+/// makes every attachment query fail with *"no such column: created_at"*. Safe to
+/// call on every vault open; a no-op once the schema is current.
+///
+/// # Errors
+///
+/// [`crate::Error::Sqlite`] if the DDL/ALTER cannot be applied.
+pub fn ensure_attachments_schema(conn: &Connection) -> Result<()> {
+    // Vaults predating attachments entirely: create the table + its indexes.
+    conn.execute_batch(
+        r#"
+CREATE TABLE IF NOT EXISTS attachments (
+    attachment_id     BLOB    PRIMARY KEY,
+    item_id           BLOB    NOT NULL,
+    version           INTEGER NOT NULL,
+    content_hash      BLOB    NOT NULL,
+    size_plain        INTEGER NOT NULL,
+    wrapped_key_env   BLOB    NOT NULL,
+    filename_env      BLOB    NOT NULL,
+    created_at        INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_attachments_item ON attachments (item_id);
+CREATE INDEX IF NOT EXISTS idx_attachments_hash ON attachments (content_hash);
+"#,
+    )?;
+    // Vaults that have the table but predate `created_at`: add the column.
+    // SQLite has no `ADD COLUMN IF NOT EXISTS`, so gate on `PRAGMA table_info`.
+    // `DEFAULT 0` backfills any existing rows to the epoch (sorts oldest),
+    // matching the fresh-vault schema default in [`VAULT_DDL`].
+    if !column_exists(conn, "attachments", "created_at")? {
+        conn.execute_batch(
+            "ALTER TABLE attachments ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0",
+        )?;
+    }
+    Ok(())
+}
+
+/// Whether `table` has a column named `column`, via `PRAGMA table_info`. `table`
+/// is a trusted internal literal (never user input), so interpolating it into
+/// the pragma — which cannot take a bound parameter for the table name — is safe.
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        // Column 1 of table_info is the column name.
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// The DDL for a vault file (`<vault_id>.vault`), verbatim from
 /// vault-format.md §3 (including indexes).
 pub const VAULT_DDL: &str = r#"
@@ -307,4 +364,53 @@ pub fn now_millis() -> i64 {
     // Fits in i64 for any realistic date; saturating on the astronomically
     // unlikely overflow keeps this total.
     i64::try_from(dur.as_millis()).unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A vault created after attachments but before the sync `created_at` column
+    /// gets the column added, so the `ORDER BY created_at` query stops failing.
+    #[test]
+    fn migration_adds_created_at_to_pre_sync_attachments() {
+        let conn = Connection::open_in_memory().unwrap();
+        // The pre-sync attachments table: same columns minus `created_at`.
+        conn.execute_batch(
+            "CREATE TABLE attachments (
+                attachment_id   BLOB PRIMARY KEY,
+                item_id         BLOB NOT NULL,
+                version         INTEGER NOT NULL,
+                content_hash    BLOB NOT NULL,
+                size_plain      INTEGER NOT NULL,
+                wrapped_key_env BLOB NOT NULL,
+                filename_env    BLOB NOT NULL
+            );",
+        )
+        .unwrap();
+        assert!(!column_exists(&conn, "attachments", "created_at").unwrap());
+
+        ensure_attachments_schema(&conn).unwrap();
+        assert!(column_exists(&conn, "attachments", "created_at").unwrap());
+
+        // The exact query shape that was failing now resolves.
+        conn.execute_batch(
+            "SELECT attachment_id, version, size_plain, filename_env, created_at \
+             FROM attachments ORDER BY created_at",
+        )
+        .unwrap();
+
+        // Idempotent: a second run is a no-op (no duplicate-column error).
+        ensure_attachments_schema(&conn).unwrap();
+    }
+
+    /// A vault predating attachments entirely gets the table created.
+    #[test]
+    fn migration_creates_attachments_table_when_absent() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_attachments_schema(&conn).unwrap();
+        assert!(column_exists(&conn, "attachments", "created_at").unwrap());
+        // Idempotent on an already-current schema too.
+        ensure_attachments_schema(&conn).unwrap();
+    }
 }
