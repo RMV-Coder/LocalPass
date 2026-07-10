@@ -15,6 +15,7 @@
   import ItemForm from "./ItemForm.svelte";
   import Generator from "./Generator.svelte";
   import Devices from "./Devices.svelte";
+  import Security from "./Security.svelte";
   import Help from "./Help.svelte";
 
   interface Props {
@@ -29,7 +30,7 @@
   let items = $state<ItemSummaryView[]>([]);
   let selectedItem = $state<string>(""); // item id
   let query = $state("");
-  let view = $state<"item" | "generator" | "form" | "devices" | "help">("item");
+  let view = $state<"item" | "generator" | "form" | "devices" | "security" | "help">("item");
   let loadingItems = $state(false);
   let error = $state("");
   let itemListEl: HTMLUListElement | undefined = $state();
@@ -168,7 +169,7 @@
   );
 </script>
 
-<div class="shell {selectedItem || view === 'generator' || view === 'devices' || view === 'help' ? 'show-items' : ''}">
+<div class="shell {selectedItem || view === 'generator' || view === 'devices' || view === 'security' || view === 'help' ? 'show-items' : ''}">
   <!-- Vault sidebar -->
   <nav class="pane vault-pane" aria-label="Vaults">
     <div class="pane-header" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
@@ -228,6 +229,16 @@
         }}
       >
         <span class="row-title">Generator</span>
+      </button>
+      <button
+        class="row {view === 'security' ? 'selected' : ''}"
+        aria-current={view === "security"}
+        onclick={() => {
+          view = "security";
+          selectedItem = "";
+        }}
+      >
+        <span class="row-title">Security</span>
       </button>
       <button
         class="row {view === 'devices' ? 'selected' : ''}"
@@ -316,6 +327,8 @@
   <main class="pane" aria-label="Details" aria-live="polite">
     {#if view === "generator"}
       <Generator />
+    {:else if view === "security"}
+      <Security vault={selectedVault} vaultName={currentVaultName} />
     {:else if view === "help"}
       <Help />
     {:else if view === "devices"}

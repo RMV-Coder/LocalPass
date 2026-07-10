@@ -19,7 +19,9 @@
 //! All functions in this module are pure (no IO, no daemon), so they are cheap
 //! to unit-test exhaustively — see the tests at the bottom.
 
-use lp_daemon::protocol::{LockState, Response, WireField, WireItem, WireItemSummary};
+use lp_daemon::protocol::{
+    LockState, Response, WireField, WireItem, WireItemSummary, WirePasswordHealth,
+};
 use serde::Serialize;
 
 /// The lock/availability state the UI switches on. `serde` renders this as a
@@ -347,6 +349,46 @@ pub fn summary_view(s: &WireItemSummary) -> ItemSummaryView {
         type_str: s.type_str.clone(),
         updated_at: s.updated_at,
         tags: s.tags.clone(),
+    }
+}
+
+/// One password-health verdict for the Security ("Watchtower") view. Carries
+/// **no secret value** — mirrors [`WirePasswordHealth`].
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PasswordHealthView {
+    /// Item id (hyphenated).
+    pub item_id: String,
+    /// Item title.
+    pub title: String,
+    /// Secret field name (e.g. `password`).
+    pub field: String,
+    /// Value length in characters.
+    pub length: usize,
+    /// Estimated entropy in bits.
+    pub entropy_bits: f64,
+    /// Coarse strength: `weak` / `fair` / `strong` / `excellent`.
+    pub strength: String,
+    /// Issue tokens: any of `short` / `weak` / `common` / `reused`.
+    pub issues: Vec<String>,
+    /// Group id shared by items reusing the same value; `null` if unique.
+    pub reuse_group: Option<u32>,
+    /// Days since last update, if known.
+    pub age_days: Option<i64>,
+}
+
+/// Map a daemon [`WirePasswordHealth`] to the GUI view (no secret value).
+#[must_use]
+pub fn health_view(w: &WirePasswordHealth) -> PasswordHealthView {
+    PasswordHealthView {
+        item_id: w.item_id.clone(),
+        title: w.title.clone(),
+        field: w.field.clone(),
+        length: w.length,
+        entropy_bits: w.entropy_bits,
+        strength: w.strength.clone(),
+        issues: w.issues.clone(),
+        reuse_group: w.reuse_group,
+        age_days: w.age_days,
     }
 }
 

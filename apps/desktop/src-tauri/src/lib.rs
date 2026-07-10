@@ -44,6 +44,7 @@ pub fn run() {
             commands::list_vaults,
             commands::create_vault,
             commands::list_items,
+            commands::password_health,
             commands::get_item,
             commands::reveal_field,
             commands::search,

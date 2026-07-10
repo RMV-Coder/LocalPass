@@ -584,6 +584,20 @@ impl<'s> Vault<'s> {
         self.iter_items(&conn)
     }
 
+    /// Analyze this vault's passwords for weak / short / common / reused secrets
+    /// (the "Watchtower" check). Runs entirely offline. Returns **metadata only**
+    /// — never a secret value — so the report is safe to cross the daemon IPC
+    /// boundary. See [`crate::health`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sqlite`] / [`Error::DecryptionFailed`] if the items cannot be
+    /// listed/decrypted.
+    pub fn password_health(&self) -> Result<Vec<crate::health::PasswordHealth>> {
+        let items = self.list_items()?;
+        Ok(crate::health::analyze(&items, crate::db::now_millis()))
+    }
+
     /// The read hook the encrypted-index layer will build on: an eager list of
     /// `(item_id, decrypted current payload)` over all live items. Kept simple
     /// (a `Vec`, not a trait-bound iterator) so the index can plug in without

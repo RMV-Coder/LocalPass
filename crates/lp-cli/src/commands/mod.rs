@@ -15,6 +15,7 @@ pub mod device;
 pub mod env;
 pub mod export;
 pub mod generate;
+pub mod health;
 pub mod import;
 pub mod init;
 pub mod item;

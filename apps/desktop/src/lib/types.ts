@@ -80,6 +80,19 @@ export interface ItemSummaryView {
   tags: string[];
 }
 
+// One password-health verdict (the Security/Watchtower view). No secret value.
+export interface PasswordHealthView {
+  item_id: string;
+  title: string;
+  field: string;
+  length: number;
+  entropy_bits: number;
+  strength: "weak" | "fair" | "strong" | "excellent";
+  issues: ("short" | "weak" | "common" | "reused")[];
+  reuse_group: number | null;
+  age_days: number | null;
+}
+
 export interface FieldView {
   name: string;
   /** Empty string for a secret field in the masked view. */

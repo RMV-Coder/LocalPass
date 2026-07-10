@@ -128,6 +128,15 @@ pub enum Request {
         /// Vault name or id.
         vault: String,
     },
+    /// Analyze a vault's passwords for weak / short / common / reused secrets (the
+    /// "Watchtower" check). Runs offline. Answered by [`Response::PasswordHealth`],
+    /// which carries **metadata only — never a secret value**.
+    PasswordHealth {
+        /// The profile directory being operated on.
+        profile: String,
+        /// Vault name or id.
+        vault: String,
+    },
     /// Get one item. With `reveal = true` the response carries secret values.
     GetItem {
         /// The profile directory being operated on.
@@ -457,6 +466,7 @@ impl Request {
             Request::ListVaults { .. } => "ListVaults",
             Request::CreateVault { .. } => "CreateVault",
             Request::ListItems { .. } => "ListItems",
+            Request::PasswordHealth { .. } => "PasswordHealth",
             Request::GetItem { .. } => "GetItem",
             Request::History { .. } => "History",
             Request::Search { .. } => "Search",
@@ -582,6 +592,31 @@ pub struct WireItemSummary {
     pub updated_at: i64,
     /// Tags.
     pub tags: Vec<String>,
+}
+
+/// One password-health verdict for the "Watchtower" check
+/// ([`Response::PasswordHealth`]). Carries **no secret value** — only the
+/// metadata needed to render a report.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct WirePasswordHealth {
+    /// Hyphenated item id.
+    pub item_id: String,
+    /// The item title.
+    pub title: String,
+    /// The secret field's name (e.g. `password`).
+    pub field: String,
+    /// The value's length in characters.
+    pub length: usize,
+    /// Estimated entropy in bits.
+    pub entropy_bits: f64,
+    /// Coarse strength bucket: `weak` / `fair` / `strong` / `excellent`.
+    pub strength: String,
+    /// Issue tokens: any of `short` / `weak` / `common` / `reused`.
+    pub issues: Vec<String>,
+    /// A group id shared by items reusing the same value; `None` if unique.
+    pub reuse_group: Option<u32>,
+    /// Days since the item was last updated, if known.
+    pub age_days: Option<i64>,
 }
 
 /// A single non-secret login candidate for browser autofill
@@ -720,6 +755,12 @@ pub enum Response {
     Items {
         /// The summaries.
         items: Vec<WireItemSummary>,
+    },
+    /// A password-health report (the "Watchtower" check). **Carries no secret
+    /// value** — only per-field metadata and issue flags.
+    PasswordHealth {
+        /// One verdict per analyzed secret field.
+        entries: Vec<WirePasswordHealth>,
     },
     /// An item's version history (metadata per version).
     Versions {
@@ -900,6 +941,7 @@ impl Response {
             Response::AccountCreated { .. } => "AccountCreated",
             Response::Vaults { .. } => "Vaults",
             Response::Items { .. } => "Items",
+            Response::PasswordHealth { .. } => "PasswordHealth",
             Response::Versions { .. } => "Versions",
             Response::Item { .. } => "Item",
             Response::Totp { .. } => "Totp",
