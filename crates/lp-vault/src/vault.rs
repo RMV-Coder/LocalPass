@@ -157,6 +157,10 @@ impl<'s> Vault<'s> {
     ) -> Result<Self> {
         let conn = db::open_connection(&path)?;
         db::check_format_version(&conn)?;
+        // Forward-only additive migration: bring an older vault's `attachments`
+        // schema up to date (adds the table / the `created_at` column) so
+        // attachment queries don't fail on vaults created before those existed.
+        db::ensure_attachments_schema(&conn)?;
         let index = SearchIndex::new(vault_id, &vault_key)?;
         Ok(Self {
             path,

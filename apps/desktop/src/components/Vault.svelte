@@ -16,6 +16,13 @@
   import Generator from "./Generator.svelte";
   import Devices from "./Devices.svelte";
 
+  interface Props {
+    /** Called after the set of vaults changes (create/adopt) so the parent can
+     *  refresh session-derived state like the header's vault count. */
+    onVaultsChanged?: () => void;
+  }
+  let { onVaultsChanged }: Props = $props();
+
   let vaults = $state<VaultView[]>([]);
   let selectedVault = $state<string>(""); // vault id
   let items = $state<ItemSummaryView[]>([]);
@@ -64,6 +71,7 @@
       creatingVault = false;
       await loadVaults();
       await selectVault(id); // jump into the new vault
+      onVaultsChanged?.(); // refresh the header vault count
     } catch (err) {
       error = typeof err === "string" ? err : "Could not create the vault.";
     } finally {
@@ -298,7 +306,11 @@
     {#if view === "generator"}
       <Generator />
     {:else if view === "devices"}
-      <Devices {vaults} {selectedVault} />
+      <Devices
+        {vaults}
+        {selectedVault}
+        onVaultsChanged={async () => { await loadVaults(); onVaultsChanged?.(); }}
+      />
     {:else if view === "form" && selectedVault}
       {#key editing?.id ?? "new"}
         <ItemForm

@@ -45,8 +45,11 @@
     vaults: VaultView[];
     /** The currently-selected vault id (defaults the sync/share pickers). */
     selectedVault: string;
+    /** Called after adopting shared vaults, so the parent can refresh its vault
+     *  list and session-derived state (e.g. the header vault count). */
+    onVaultsChanged?: () => void;
   }
-  let { vaults, selectedVault }: Props = $props();
+  let { vaults, selectedVault, onVaultsChanged }: Props = $props();
 
   // This device's identity (public).
   let identity = $state<DeviceIdentityView | null>(null);
@@ -250,6 +253,7 @@
       } else {
         const names = r.adopted.map((a) => a.name || a.vault_id).join(", ");
         adoptResult = `Adopted ${r.adopted.length} vault(s) (${names}); applied ${r.applied_total} op(s).`;
+        onVaultsChanged?.(); // refresh the parent vault list + header count
       }
     } catch (err) {
       adoptError = typeof err === "string" ? err : "Adopt failed.";

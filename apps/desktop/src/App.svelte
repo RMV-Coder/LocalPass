@@ -96,7 +96,7 @@
       <button class="btn btn-small" onclick={doLock}>Lock</button>
     </div>
   </header>
-  <Vault />
+  <Vault onVaultsChanged={refresh} />
 {:else if session && session.state === "no_account"}
   <Onboarding onDone={onOnboarded} />
 {:else if session}
