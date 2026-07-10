@@ -8,10 +8,11 @@
 //! boundary — the daemon owns the session, so it owns the render — at the cost
 //! of a small, well-tested duplication.
 
+use lp_vault::health::PasswordHealth;
 use lp_vault::payload::{FieldKind, TypeData};
 use lp_vault::{Item, ItemPayload};
 
-use crate::protocol::{WireField, WireItem, WireItemSummary};
+use crate::protocol::{WireField, WireItem, WireItemSummary, WirePasswordHealth};
 
 /// The mask shown in place of a secret value (matches the CLI's `output::MASK`).
 pub const MASK: &str = "••••••";
@@ -262,6 +263,23 @@ pub fn item_to_summary(item: &Item) -> WireItemSummary {
         type_str: item.payload.type_data.type_str().to_string(),
         updated_at: item.updated_at,
         tags: item.payload.tags.clone(),
+    }
+}
+
+/// Map a [`PasswordHealth`] verdict to its wire form. Metadata only — the
+/// analyzed secret value is never part of either type (secret boundary).
+#[must_use]
+pub fn health_to_wire(h: &PasswordHealth) -> WirePasswordHealth {
+    WirePasswordHealth {
+        item_id: h.item_id.to_hyphenated(),
+        title: h.title.clone(),
+        field: h.field.clone(),
+        length: h.length,
+        entropy_bits: h.entropy_bits,
+        strength: h.strength.as_str().to_string(),
+        issues: h.issues.iter().map(|i| i.as_str().to_string()).collect(),
+        reuse_group: h.reuse_group,
+        age_days: h.age_days,
     }
 }
 

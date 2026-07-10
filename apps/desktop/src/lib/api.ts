@@ -22,6 +22,7 @@ import type {
   ItemSummaryView,
   ItemView,
   NewItemInput,
+  PasswordHealthView,
   PeerView,
   SessionState,
   SyncAdoptView,
@@ -77,6 +78,12 @@ export function createVault(name: string): Promise<string> {
 /** Items in a vault (masked; no secret values). */
 export function listItems(vault: string): Promise<ItemSummaryView[]> {
   return invoke<ItemSummaryView[]>("list_items", { vault });
+}
+
+// Offline password-health audit ("Watchtower"). Returns metadata only — no
+// secret value ever crosses this boundary.
+export function passwordHealth(vault: string): Promise<PasswordHealthView[]> {
+  return invoke<PasswordHealthView[]>("password_health", { vault });
 }
 
 /** One item, masked (secret field values omitted). */

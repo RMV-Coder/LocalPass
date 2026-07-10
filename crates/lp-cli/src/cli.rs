@@ -124,6 +124,22 @@ pub enum Command {
     /// Generate a random password or passphrase (never stored; printed once).
     Generate(GenerateArgs),
 
+    /// Audit a vault's passwords for weak, reused, common, or short secrets
+    /// (the offline "Watchtower" check). Never prints secret values.
+    #[command(long_about = "Offline password-health audit — flags WEAK (low \
+entropy), SHORT, COMMON (in a bundled leaked-password list), and REUSED \
+passwords across a vault. Runs entirely locally: no network, no Have I Been \
+Pwned. The report is metadata only — item titles, field names, lengths, an \
+entropy estimate, and issue flags — never a secret value.")]
+    Health {
+        /// Vault to audit (name or id).
+        #[arg(long, default_value = "personal", value_name = "NAME_OR_ID")]
+        vault: String,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Manage the master password.
     Password {
         #[command(subcommand)]
