@@ -62,6 +62,7 @@ pub fn run() {
             commands::lock,
             commands::list_vaults,
             commands::create_vault,
+            commands::delete_vault,
             commands::list_items,
             commands::password_health,
             commands::get_item,

@@ -282,6 +282,20 @@ pub fn create_vault(name: String) -> Result<String, String> {
     }
 }
 
+/// Soft-delete a vault by name or id. The vault becomes unlisted and unopenable
+/// (the file is left in place); the webview confirms intent with a typed prompt
+/// before calling this.
+#[tauri::command]
+pub fn delete_vault(vault: String) -> Result<(), String> {
+    let profile = daemon::profile_string()?;
+    let resp = daemon::call(&Request::DeleteVault { profile, vault }).map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    match resp {
+        Response::Ok { .. } => Ok(()),
+        other => Err(format!("unexpected daemon response: {}", other.kind())),
+    }
+}
+
 /// List the items in `vault` (metadata + non-secret fields only).
 #[tauri::command]
 pub fn list_items(vault: String) -> Result<Vec<ItemSummaryView>, String> {

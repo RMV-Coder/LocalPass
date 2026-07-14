@@ -75,6 +75,11 @@ export function createVault(name: string): Promise<string> {
   return invoke<string>("create_vault", { name });
 }
 
+/** Soft-delete a vault by name or id (unlisted + unopenable afterward). */
+export function deleteVault(vault: string): Promise<void> {
+  return invoke<void>("delete_vault", { vault });
+}
+
 /** Items in a vault (masked; no secret values). */
 export function listItems(vault: string): Promise<ItemSummaryView[]> {
   return invoke<ItemSummaryView[]>("list_items", { vault });

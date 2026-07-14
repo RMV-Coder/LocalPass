@@ -186,12 +186,20 @@ fn parse_id(s: &str) -> Option<lp_vault::Id> {
 /// Resolve a vault reference (name or id) and open it. Mirrors the CLI's
 /// `resolve::open_vault`.
 fn open_vault<'s>(session: &'s Session, reference: &str) -> Result<Vault<'s>, Response> {
+    let id = resolve_vault_id(session, reference)?;
+    session.open_vault(id).map_err(vault_err)
+}
+
+/// Resolve a vault reference (name or id) to its [`VaultId`] without opening it.
+/// Shares [`open_vault`]'s matching rules (id wins; then unique name; ambiguous
+/// names error). Used by operations like delete that act on the id directly.
+fn resolve_vault_id(session: &Session, reference: &str) -> Result<VaultId, Response> {
     let vaults = session.list_vaults().map_err(vault_err)?;
 
     if let Some(id) = parse_id(reference)
         && vaults.iter().any(|(vid, _)| *vid == id)
     {
-        return session.open_vault(id).map_err(vault_err);
+        return Ok(id);
     }
 
     let matches: Vec<VaultId> = vaults
@@ -201,7 +209,7 @@ fn open_vault<'s>(session: &'s Session, reference: &str) -> Result<Vault<'s>, Re
         .collect();
     match matches.as_slice() {
         [] => Err(usage(format!("no vault named or id {reference:?}"))),
-        [only] => session.open_vault(*only).map_err(vault_err),
+        [only] => Ok(*only),
         _ => Err(usage(format!(
             "vault name {reference:?} is ambiguous ({} match); use the vault id",
             matches.len()
@@ -388,6 +396,14 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
             Ok(Response::Ok {
                 message: Some(id.to_hyphenated()),
             })
+        }),
+
+        Request::DeleteVault { vault, .. } => with_session(state, |session| {
+            // Resolve name/id, then soft-delete (metadata flag; the vault file
+            // stays on disk but becomes unlisted and unopenable).
+            let id = resolve_vault_id(session, &vault)?;
+            session.soft_delete_vault(id).map_err(vault_err)?;
+            Ok(Response::Ok { message: None })
         }),
 
         Request::ListItems { vault, .. } => with_session(state, |session| {
@@ -713,6 +729,7 @@ fn request_profile(request: &Request) -> Option<&str> {
         | Request::CreateAccount { profile, .. }
         | Request::ListVaults { profile }
         | Request::CreateVault { profile, .. }
+        | Request::DeleteVault { profile, .. }
         | Request::ListItems { profile, .. }
         | Request::PasswordHealth { profile, .. }
         | Request::GetItem { profile, .. }
