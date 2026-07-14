@@ -35,6 +35,25 @@ pub fn run() {
         // attach and a destination to save a download). The plugin hands the
         // backend only PATHS; the attachment plaintext never enters the webview.
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            // On mobile there is no daemon — the app process *is* the vault (see
+            // `daemon.rs`). Point the in-process backend at the Android
+            // app-private data dir by setting `LOCALPASS_PROFILE`, so
+            // `daemon::resolve_profile` (used by both the in-process state and
+            // `account_exists`) resolves there. Desktop uses `ProjectDirs`.
+            #[cfg(mobile)]
+            {
+                use tauri::Manager;
+                if let Ok(dir) = app.path().app_data_dir() {
+                    std::fs::create_dir_all(&dir).ok();
+                    // SAFETY: single-threaded app setup, before any command runs.
+                    unsafe { std::env::set_var("LOCALPASS_PROFILE", &dir) };
+                }
+            }
+            #[cfg(not(mobile))]
+            let _ = app;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::ensure_service,
             commands::status,
