@@ -164,6 +164,64 @@ customizing.
 4. Keystore-backed Secret Key + biometric unlock.
 5. SAF-based sync; then release signing.
 
+## Live-reload dev server on a physical device
+
+`tauri android dev` serves the Svelte UI from the dev machine and the app loads
+it over the network. Two things must line up on a USB-attached phone:
+
+- **The phone often can't reach the PC over the LAN.** Many phone/router setups
+  (mobile hotspots, "AP/client isolation") drop device→PC traffic — `ping <PC>`
+  from the phone fails. Don't rely on the auto-detected LAN IP. Instead force
+  loopback and tunnel the ports over USB:
+  ```sh
+  adb reverse tcp:1420 tcp:1420   # dev server
+  adb reverse tcp:1421 tcp:1421   # HMR websocket
+  npx tauri android dev --host 127.0.0.1
+  ```
+  `--host` sets `TAURI_DEV_HOST`, which `vite.config.ts` reads to bind the dev
+  server and point HMR at that host (see the `host`/`hmr` block there).
+- **Exclude `src-tauri/**` from Vite's watcher.** The Android build writes churn
+  under `src-tauri/gen/android/build`, which otherwise triggers a full webview
+  reload. `vite.config.ts` sets `server.watch.ignored: ["**/src-tauri/**"]`.
+- If a build dies mid-run, a **stale Gradle daemon** can hold a file lock
+  (`Blocking waiting for file lock on Android`). Clear it with
+  `gen/android/gradlew.bat --stop` (or kill stray `java` processes).
+
+## Storage: the debug APK is too big for a full phone
+
+The debug APK is ~**169 MB** (the debug `.so` carries full debuginfo). On a
+near-full device Android rejects the install with
+`INSTALL_FAILED_INSUFFICIENT_STORAGE` (it needs several × the APK size
+transiently). For on-device testing without freeing space, build a **stripped
+release APK** (`[profile.release]` has `strip="symbols"`, `lto="thin"` → tens of
+MB) and sign it with the **existing debug keystore** so it reinstalls in place
+(same signer ⇒ no uninstall, on-device account preserved):
+
+```sh
+npx tauri android build --apk --target aarch64        # -> app-arm64-release-unsigned.apk
+BT="$LOCALAPPDATA/Android/Sdk/build-tools/36.0.0"
+"$BT/zipalign.exe" -f 4 app-arm64-release-unsigned.apk aligned.apk
+"$BT/apksigner.bat" sign --ks ~/.android/debug.keystore \
+    --ks-pass pass:android --ks-key-alias androiddebugkey --key-pass pass:android aligned.apk
+adb install -r aligned.apk
+```
+
+## App icon (all platforms from one source)
+
+The canonical logo is `apps/desktop/app-icon.png` (1024² padlock). Regenerate
+every platform's icons — desktop `.ico`/`.png`, the `.exe`/`.msi` installer, iOS
+AppIcons, and the Android launcher mipmaps — with one command:
+
+```sh
+cd apps/desktop && npx tauri icon app-icon.png
+```
+
+`icons/` is tracked; the Android mipmaps land in the **gitignored** `gen/android`
+tree, so re-run `tauri icon` after `android init`. The Android adaptive-icon
+background color (`gen/.../res/values/ic_launcher_background.xml`) is set to the
+logo's navy `#0F2A2E` so the padlock sits seamlessly under the launcher mask
+(the default `#fff` shows white slivers at the mask edge).
+
 ## Windows build gotchas
 
 Three things bit us on Windows 11; all are one-time fixes:
@@ -182,10 +240,6 @@ Three things bit us on Windows 11; all are one-time fixes:
    (`Unsupported class file major version 69`). Install a JDK 17 (e.g. Temurin)
    and point `JAVA_HOME` at it for CLI Android builds — Android Studio keeps
    using its own JBR internally, so this doesn't affect the IDE.
-
-> The debug APK is large (~156 MB — the debug `.so` carries full debuginfo); on
-> a near-full device use a **release** build (stripped, ~tens of MB) once release
-> signing is set up, or free space for the debug install.
 
 ## References
 
