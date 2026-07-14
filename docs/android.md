@@ -154,10 +154,38 @@ customizing.
    is Intel-only and conflicts with the Win11 Hyper-V stack; a physical device
    over USB avoids the emulator entirely. `rustup target add` must be **one line**
    (PowerShell has no `\` continuation).
-3. **Unlock + browse** on a device/emulator (`tauri android dev`) — the next
-   milestone. The backend is ready; this exercises it on-device.
+3. **Runs on a real device** — ✅ **done** (2026-07-15). `tauri android build
+   --debug --apk --target aarch64` produces an APK; installed via `adb install`
+   on a physical arm64 device (Redmi Note 10). **Verified end-to-end on-device:**
+   the Svelte UI renders, and the in-process backend created an account — it ran
+   the real Argon2id KDF on the phone, generated the Secret Key, and wrote the
+   account store to the Android app-private dir (`/data/user/0/org.localpass.desktop`),
+   with **no daemon**. See [Windows build gotchas](#windows-build-gotchas).
 4. Keystore-backed Secret Key + biometric unlock.
 5. SAF-based sync; then release signing.
+
+## Windows build gotchas
+
+Three things bit us on Windows 11; all are one-time fixes:
+
+1. **Drop the daemon sidecar on Android.** The desktop bundle ships
+   `localpass-daemon` via `bundle.externalBin`, but mobile has no daemon, so the
+   Android build fails looking for `binaries/localpass-daemon-aarch64-linux-android`.
+   Fixed with `src-tauri/tauri.android.conf.json` (a platform-override merged
+   automatically for `android`) that sets `bundle.externalBin: []`.
+2. **Enable Developer Mode** (Settings → For developers). Tauri **symlinks** the
+   built `.so` into the APK's `jniLibs`, and Windows blocks symlink creation
+   without Developer Mode (`Creation symbolic link is not allowed for this
+   system`). No admin/reboot needed.
+3. **Use JDK 17, not Android Studio's JBR.** Recent Android Studio bundles a
+   **JDK 25** JBR, which the scaffold's Gradle 8.14 can't run on
+   (`Unsupported class file major version 69`). Install a JDK 17 (e.g. Temurin)
+   and point `JAVA_HOME` at it for CLI Android builds — Android Studio keeps
+   using its own JBR internally, so this doesn't affect the IDE.
+
+> The debug APK is large (~156 MB — the debug `.so` carries full debuginfo); on
+> a near-full device use a **release** build (stripped, ~tens of MB) once release
+> signing is set up, or free space for the debug install.
 
 ## References
 
