@@ -273,6 +273,16 @@ fn root_message(e: &anyhow::Error) -> String {
 /// Unix: exec-replace (never returns on success). Windows: spawn + wait +
 /// propagate the exit code.
 fn spawn(program: &str, args: &[String], env: &OrderedEnv) -> Result<()> {
+    // On Windows, resolve the program through PATH + PATHEXT ourselves so that
+    // batch-file launchers like `npm` (which is `npm.cmd`), `npx`, `yarn`, and
+    // `pnpm` are found — `Command::new("npm")` only tries `npm` and `npm.exe`,
+    // never the `.cmd`, so it fails with "program not found" even though the
+    // shell finds it. Once the resolved name carries the `.cmd`/`.bat`
+    // extension, std routes it through `cmd.exe` with CVE-2024-24576-safe
+    // argument escaping. On Unix the loader/`exec` handles PATH lookup itself.
+    #[cfg(windows)]
+    let mut cmd = Command::new(resolve_program(program, env_path(env)));
+    #[cfg(not(windows))]
     let mut cmd = Command::new(program);
     cmd.args(args);
     // Start from an empty environment and set exactly our composed map, so
@@ -309,4 +319,90 @@ fn spawn_and_wait(mut cmd: Command, program: &str) -> Result<()> {
     // beyond what Session drops, and we are terminating anyway.
     let code = status.code().unwrap_or(1);
     std::process::exit(code);
+}
+
+/// The child's effective `PATH` (case-insensitively), for program resolution.
+#[cfg(windows)]
+fn env_path(env: &OrderedEnv) -> Option<String> {
+    env.iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("PATH"))
+        .map(|(_, v)| v.to_string())
+}
+
+/// Resolve a program name to a concrete file on Windows using `PATH` + `PATHEXT`,
+/// exactly like the shell — so `npm` finds `npm.cmd`, `yarn` finds `yarn.cmd`,
+/// etc. `Command::new` alone only tries the bare name and `.exe`, so a batch-file
+/// launcher is otherwise "program not found".
+///
+/// A name that already has an extension or a path separator is returned as-is
+/// (the caller meant that exact thing). A name that cannot be resolved is also
+/// returned as-is, so `Command` still produces the same clear "not found" error.
+#[cfg(windows)]
+fn resolve_program(program: &str, path_var: Option<String>) -> std::ffi::OsString {
+    use std::path::Path;
+
+    if Path::new(program).extension().is_some() || program.contains('\\') || program.contains('/') {
+        return program.into();
+    }
+
+    let path = path_var
+        .or_else(|| std::env::var("PATH").ok())
+        .unwrap_or_default();
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+
+    for dir in std::env::split_paths(&path) {
+        for ext in pathext.split(';').filter(|e| !e.is_empty()) {
+            let candidate = dir.join(format!("{program}{ext}"));
+            if candidate.is_file() {
+                return candidate.into_os_string();
+            }
+        }
+    }
+    program.into()
+}
+
+#[cfg(all(test, windows))]
+mod windows_resolve_tests {
+    use super::resolve_program;
+    use std::fs;
+
+    #[test]
+    fn resolves_a_cmd_launcher_via_pathext() {
+        let dir = tempfile::tempdir().unwrap();
+        // A batch-file launcher like `npm.cmd` — no bare `foo` / `foo.exe`.
+        fs::write(dir.path().join("foo.cmd"), "@echo off\n").unwrap();
+        let path = dir.path().display().to_string();
+
+        let resolved = resolve_program("foo", Some(path));
+        // Compare case-insensitively: PATHEXT's `.CMD` and the on-disk `.cmd`
+        // are the same file on Windows, and std matches the extension for batch
+        // routing case-insensitively too.
+        let got = resolved.to_string_lossy().to_ascii_lowercase();
+        let want = dir
+            .path()
+            .join("foo.cmd")
+            .to_string_lossy()
+            .to_ascii_lowercase();
+        assert_eq!(
+            got, want,
+            "bare `foo` should resolve to foo.cmd via PATHEXT"
+        );
+    }
+
+    #[test]
+    fn passes_through_names_with_extension_or_path() {
+        // Already has an extension → unchanged.
+        assert_eq!(resolve_program("node.exe", None), "node.exe");
+        // Has a path separator → unchanged (an explicit target).
+        assert_eq!(resolve_program(r"C:\tools\thing", None), r"C:\tools\thing");
+    }
+
+    #[test]
+    fn unresolvable_name_is_returned_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().display().to_string();
+        // Nothing named `nope*` exists → the bare name is returned so Command
+        // yields the same clear "not found" error.
+        assert_eq!(resolve_program("nope", Some(path)), "nope");
+    }
 }
