@@ -81,6 +81,14 @@ zeroize = { version = "1.8", features = ["zeroize_derive"] }
 [features]
 # This feature is used by the CI/`tauri build` custom-protocol path.
 custom-protocol = ["tauri/custom-protocol"]
+# In-process vault backend (no daemon IPC). Mobile targets get this behaviour
+# automatically via Tauri's `cfg(mobile)`; enable this feature to compile and
+# test that same path on desktop. See `src/daemon.rs`.
+inprocess = []
+
+[dev-dependencies]
+# Isolated temp profiles for the in-process backend integration test.
+tempfile = "3"
 
 [profile.release]
 lto = "thin"

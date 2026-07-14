@@ -135,10 +135,27 @@ customizing.
 
 ## Suggested sequencing
 
-1. **In-process backend refactor** (desktop-testable, no device needed) — the
-   real engineering, and the highest-risk part. Do this first.
-2. **Toolchain + `tauri android init`** on a machine with Android Studio.
-3. **Unlock + browse** on an emulator (the "working scaffold + unlock" milestone).
+1. **In-process backend refactor** — ✅ **done** (2026-07-14). `src-tauri/src/daemon.rs`
+   now has two compile-time backends behind the unchanged `call(&Request) ->
+   Response` seam: the desktop daemon client (`cfg(not(any(mobile, feature =
+   "inprocess")))`) and an in-process backend (`cfg(any(mobile, feature =
+   "inprocess"))`) that runs `lp_daemon::engine::handle` against a `State` held
+   in the app process — the same audited engine, no IPC, no duplicated logic. The
+   mobile `setup()` hook points `LOCALPASS_PROFILE` at the Android app-private
+   dir. **Verified on desktop** via `--features inprocess`: a create-account →
+   unlock → list-vaults integration test passes, and the desktop IPC build is
+   byte-for-byte unchanged. Test/compile the mobile path on desktop with:
+   ```sh
+   cd apps/desktop/src-tauri && cargo test --features inprocess
+   ```
+2. **Toolchain + `tauri android init`** — ✅ **done**. Scaffold generates under
+   `src-tauri/gen/android/` (gitignored; regenerate per-machine). Windows note:
+   use **WHPX** (Windows Hypervisor Platform), not AEHD, for the emulator — AEHD
+   is Intel-only and conflicts with the Win11 Hyper-V stack; a physical device
+   over USB avoids the emulator entirely. `rustup target add` must be **one line**
+   (PowerShell has no `\` continuation).
+3. **Unlock + browse** on a device/emulator (`tauri android dev`) — the next
+   milestone. The backend is ready; this exercises it on-device.
 4. Keystore-backed Secret Key + biometric unlock.
 5. SAF-based sync; then release signing.
 
