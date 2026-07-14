@@ -294,6 +294,23 @@ pub fn list_items(vault: String) -> Result<Vec<ItemSummaryView>, String> {
     }
 }
 
+/// Offline password-health audit for a vault (the "Security"/Watchtower view).
+/// The daemon computes it and returns **metadata only** — no secret value ever
+/// reaches this backend or the webview.
+#[tauri::command]
+pub fn password_health(vault: String) -> Result<Vec<model::PasswordHealthView>, String> {
+    let profile = daemon::profile_string()?;
+    let resp =
+        daemon::call(&Request::PasswordHealth { profile, vault }).map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    match resp {
+        Response::PasswordHealth { entries } => {
+            Ok(entries.iter().map(model::health_view).collect())
+        }
+        other => Err(format!("unexpected daemon response: {}", other.kind())),
+    }
+}
+
 /// Get one item as a **masked** detail view — secret field values are NOT
 /// included. The daemon is asked with `reveal = false`, and the result is
 /// re-masked through [`model::item_view_masked`] for defense in depth.

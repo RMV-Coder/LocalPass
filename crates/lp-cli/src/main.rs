@@ -101,6 +101,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             *json,
         ),
         Command::Generate(args) => commands::generate::run(args),
+        Command::Health { vault, json } => {
+            commands::health::run(&profile_dir, src, no_daemon, vault, *json)
+        }
         Command::Password { command } => commands::password::run(&profile_dir, src, command),
         Command::Run(args) => commands::run::run(&profile_dir, src, no_daemon, args),
         Command::Env { command } => commands::env::run(&profile_dir, src, no_daemon, command),

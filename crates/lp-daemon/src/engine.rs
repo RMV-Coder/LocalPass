@@ -398,6 +398,16 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
             })
         }),
 
+        Request::PasswordHealth { vault, .. } => with_session(state, |session| {
+            let v = open_vault(session, &vault)?;
+            // The analysis reads secret values internally but returns metadata
+            // only; `render::health_to_wire` carries no value across the wire.
+            let report = v.password_health().map_err(vault_err)?;
+            Ok(Response::PasswordHealth {
+                entries: report.iter().map(render::health_to_wire).collect(),
+            })
+        }),
+
         Request::GetItem {
             vault,
             target,
@@ -704,6 +714,7 @@ fn request_profile(request: &Request) -> Option<&str> {
         | Request::ListVaults { profile }
         | Request::CreateVault { profile, .. }
         | Request::ListItems { profile, .. }
+        | Request::PasswordHealth { profile, .. }
         | Request::GetItem { profile, .. }
         | Request::History { profile, .. }
         | Request::Search { profile, .. }
