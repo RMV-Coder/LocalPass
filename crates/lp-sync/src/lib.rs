@@ -24,6 +24,13 @@
 //!   the advisory (untrusted) `manifest.json`, chain heads, and the `keys/`
 //!   share dir; a writer and a reader that round-trips through [`wire`].
 //!
+//! [`store`] is the seam underneath [`shipping`]: the `Store` trait is the whole
+//! set of channel I/O primitives §7 needs, and `FsStore` (plain [`std::fs`]) is
+//! its only implementation today. §7's semantics live above the seam, so a host
+//! whose user-picked folder is not a filesystem path — Android's Storage Access
+//! Framework hands back a `content://` tree URI, which `std::fs` cannot open —
+//! is a new `impl Store`, not a change to sync.
+//!
 //! [`engine`] ties them together for the CLI: `setup` / `push` / `pull` /
 //! `status`. [`identity`] provides the export/trust pairing strings + fingerprint.
 //!
@@ -61,6 +68,7 @@ pub mod error;
 pub mod identity;
 pub mod merge;
 pub mod shipping;
+pub mod store;
 pub mod verify;
 pub mod wire;
 
