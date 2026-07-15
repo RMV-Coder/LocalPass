@@ -310,6 +310,12 @@ T13 for a zero-trust channel.
 - Team membership, roles, and revocation are **P2** (PRD §4.5); this MVP spec
   covers single-user multi-device only. Extension point: membership-change ops
   will be a new signed `op_kind` gated on admin keys — not defined here.
+- **Transport of the identity string** (QR display/scan), a time-boxed pairing
+  mode, and a typing-free `pairing/` channel announce are specified in
+  [`device-pairing.md`](device-pairing.md). That spec changes no key, wire
+  format, or acceptance rule — only how the identity reaches the other device
+  and the ceremony around pinning it. The author check above stays the sole
+  authority.
 
 ---
 
@@ -406,6 +412,11 @@ is skipped (content-addressed).
   `device_id`+`seq`; pairing-code-gated enrollment (PRD §11 #7). The relay sees
   only ciphertext + `device_id`/`seq` (all §5 protections apply); it is a
   §7-shaped dumb channel with a network API.
+- **`pairing/` announce directory:** a sibling of the per-vault directories at
+  the sync root, letting devices publish their identity string for typing-free
+  pairing — see [`device-pairing.md`](device-pairing.md) §5. It is **advisory
+  and untrusted in exactly the sense §7.2 defines for the manifest**: it can only
+  populate a "pending devices" list, never pin one, so a forged entry is inert.
 
 ---
 
