@@ -22,11 +22,20 @@
 //! refuses on a mismatch or an empty confirmation. This makes the out-of-band
 //! fingerprint comparison a server-side invariant — the UI checkbox is a
 //! usability aid, not the security control.
-
-use std::path::Path;
+//!
+//! # The channel backend is injected, not assumed
+//!
+//! Every sync handler takes the `&dyn StoreFactory` held by
+//! [`crate::engine::State`] and passes it straight to [`lp_sync::engine`]. The
+//! daemon's default is the filesystem channel; a host whose user-picked sync
+//! root is not a filesystem path supplies its own factory
+//! ([`crate::engine::State::set_store_factory`]) without this module changing.
+//! The `dir` strings below are the host's **opaque** roots — passed through
+//! verbatim, never path-normalized.
 
 use lp_sync::engine;
 use lp_sync::identity::DeviceIdentity;
+use lp_sync::store::StoreFactory;
 use lp_vault::ids::{DeviceId, Id};
 use lp_vault::{Session, Vault};
 
@@ -171,16 +180,21 @@ pub(crate) fn sync_setup(
     session: &Session,
     vault: &Vault<'_>,
     dir: &str,
+    factory: &dyn StoreFactory,
 ) -> Result<Response, Response> {
-    engine::setup(session, vault.vault_id(), Path::new(dir)).map_err(map_sync_error)?;
+    engine::setup(session, vault.vault_id(), dir, factory).map_err(map_sync_error)?;
     Ok(Response::Ok {
         message: Some("enrolled for sync".into()),
     })
 }
 
 /// [`crate::protocol::Request::SyncPush`]: publish this device's ops.
-pub(crate) fn sync_push(session: &Session, vault: &Vault<'_>) -> Result<Response, Response> {
-    let report = engine::push(session, vault).map_err(map_sync_error)?;
+pub(crate) fn sync_push(
+    session: &Session,
+    vault: &Vault<'_>,
+    factory: &dyn StoreFactory,
+) -> Result<Response, Response> {
+    let report = engine::push(session, vault, factory).map_err(map_sync_error)?;
     Ok(Response::SyncPushed {
         published: report.published.len(),
         segments_written: report.segments_written,
@@ -188,8 +202,12 @@ pub(crate) fn sync_push(session: &Session, vault: &Vault<'_>) -> Result<Response
 }
 
 /// [`crate::protocol::Request::SyncPull`]: verify + merge peers' ops.
-pub(crate) fn sync_pull(session: &Session, vault: &Vault<'_>) -> Result<Response, Response> {
-    let report = engine::pull(session, vault).map_err(map_sync_error)?;
+pub(crate) fn sync_pull(
+    session: &Session,
+    vault: &Vault<'_>,
+    factory: &dyn StoreFactory,
+) -> Result<Response, Response> {
+    let report = engine::pull(session, vault, factory).map_err(map_sync_error)?;
     Ok(Response::SyncPulled {
         applied: report.applied,
         pending: report.pending,
@@ -199,8 +217,12 @@ pub(crate) fn sync_pull(session: &Session, vault: &Vault<'_>) -> Result<Response
 }
 
 /// [`crate::protocol::Request::SyncStatus`]: per-device seq marks + counts.
-pub(crate) fn sync_status(session: &Session, vault: &Vault<'_>) -> Result<Response, Response> {
-    let st = engine::status(session, vault).map_err(map_sync_error)?;
+pub(crate) fn sync_status(
+    session: &Session,
+    vault: &Vault<'_>,
+    factory: &dyn StoreFactory,
+) -> Result<Response, Response> {
+    let st = engine::status(session, vault, factory).map_err(map_sync_error)?;
     let devices = st
         .devices
         .into_iter()
@@ -228,9 +250,11 @@ pub(crate) fn share_vault_to_device(
     session: &Session,
     vault: &Vault<'_>,
     device_id: &str,
+    factory: &dyn StoreFactory,
 ) -> Result<Response, Response> {
     let peer = parse_device_id(device_id)?;
-    engine::share_vault_to_device(session, vault.vault_id(), &peer).map_err(map_sync_error)?;
+    engine::share_vault_to_device(session, vault.vault_id(), &peer, factory)
+        .map_err(map_sync_error)?;
     Ok(Response::Ok {
         message: Some("vault shared to the device".into()),
     })
@@ -238,8 +262,12 @@ pub(crate) fn share_vault_to_device(
 
 /// [`crate::protocol::Request::SyncAdopt`]: import vaults shared to this device
 /// from `dir`, then pull each so its items materialize.
-pub(crate) fn sync_adopt(session: &Session, dir: &str) -> Result<Response, Response> {
-    let adopted = engine::adopt(session, Path::new(dir)).map_err(map_sync_error)?;
+pub(crate) fn sync_adopt(
+    session: &Session,
+    dir: &str,
+    factory: &dyn StoreFactory,
+) -> Result<Response, Response> {
+    let adopted = engine::adopt(session, dir, factory).map_err(map_sync_error)?;
 
     // Resolve names (best-effort) and pull each adopted vault so its items land.
     let names = session.list_vaults().unwrap_or_default();
@@ -254,7 +282,7 @@ pub(crate) fn sync_adopt(session: &Session, dir: &str) -> Result<Response, Respo
         let vault = session
             .open_vault(vault_id)
             .map_err(|e| usage(format!("could not open an adopted vault: {e}")))?;
-        let report = engine::pull(session, &vault).map_err(map_sync_error)?;
+        let report = engine::pull(session, &vault, factory).map_err(map_sync_error)?;
         applied_total += report.applied;
         alarms.extend(render_alarms(&report.quarantines));
         wire.push(WireAdoptedVault {

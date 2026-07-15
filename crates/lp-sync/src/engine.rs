@@ -14,9 +14,24 @@
 //! [`Session`]/[`Vault`] and calls their additive foreign-op API. Verification
 //! and merge are pure functions the engine feeds; only `pull`'s final apply
 //! mutates the vault (in one transaction per batch, vault-format.md §7).
+//!
+//! # The channel root is an opaque string, and the backend is injected
+//!
+//! Every entry point below takes a [`StoreFactory`]. The engine never
+//! constructs a channel backend itself: it reads the vault's enrolled **root
+//! string** and asks the caller's factory to open it. Desktop passes
+//! [`FsStoreFactory`], which reads the root as a filesystem path — today's
+//! behaviour exactly. A host whose user-picked folder is not a filesystem path
+//! (Android's SAF hands back a `content://` tree URI) injects its own factory
+//! from outside this crate; see the [`crate::store`] module docs.
+//!
+//! The root is therefore a `&str`/`String` end to end, **never** a
+//! [`std::path::Path`]: it is persisted verbatim into the
+//! `sync.root.<vault_id>` setting and handed back to the factory byte-for-byte,
+//! with no normalization. A caller holding a [`std::path::Path`] converts once,
+//! at the boundary.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 use lp_crypto::VerifyingKey;
 use lp_vault::ids::{DeviceId, VaultId};
@@ -25,8 +40,11 @@ use lp_vault::{Session, StoredOp, Vault};
 use crate::error::{Error, Quarantine, Result};
 use crate::merge;
 use crate::shipping::{Manifest, SyncDir};
-use crate::store::{FsStore, Store, StorePath};
+use crate::store::{StoreFactory, StorePath};
 use crate::verify::{self, ChainState, DeviceChainState};
+
+#[cfg(doc)]
+use crate::store::FsStoreFactory;
 
 /// The account-store settings key holding a vault's enrolled sync-root dir.
 fn sync_root_key(vault_id: &VaultId) -> String {
@@ -35,35 +53,49 @@ fn sync_root_key(vault_id: &VaultId) -> String {
 
 /// Enroll a vault for file-based sync under `sync_root` (`localpass sync setup`).
 /// Stores the root in the account-store `settings` table and creates the
-/// per-vault directory scaffold (sync-protocol.md §7.1).
+/// per-vault directory scaffold (sync-protocol.md §7.1) through `factory`'s
+/// backend.
+///
+/// `sync_root` is the host's opaque root string (a filesystem path on desktop);
+/// it is recorded **verbatim**, so whatever the user picked is exactly what
+/// [`enrolled_root`] returns and `factory` is later asked to open.
 ///
 /// # Errors
 ///
-/// [`Error::Vault`] / [`Error::Io`] on failure.
-pub fn setup(session: &Session, vault_id: VaultId, sync_root: &std::path::Path) -> Result<()> {
+/// [`Error::Invalid`] if `factory` cannot open `sync_root`; [`Error::Vault`] /
+/// [`Error::Io`] on failure.
+pub fn setup(
+    session: &Session,
+    vault_id: VaultId,
+    sync_root: &str,
+    factory: &dyn StoreFactory,
+) -> Result<()> {
     // Materialize the directory (validates it is creatable) and record the root.
-    SyncDir::open(sync_root, vault_id)?;
-    session.set_setting(&sync_root_key(&vault_id), &sync_root.to_string_lossy())?;
+    SyncDir::with_store(factory.open(sync_root)?, vault_id)?;
+    session.set_setting(&sync_root_key(&vault_id), sync_root)?;
     Ok(())
 }
 
-/// The enrolled sync-root path for a vault, if `setup` has run.
+/// The enrolled sync-root string for a vault, if `setup` has run.
+///
+/// The value is opaque and returned exactly as [`setup`] stored it — a
+/// filesystem path on desktop, but not necessarily one on every host, which is
+/// why this is a [`String`] and not a [`std::path::PathBuf`].
 ///
 /// # Errors
 ///
 /// [`Error::Vault`] on a read failure.
-pub fn enrolled_root(session: &Session, vault_id: VaultId) -> Result<Option<std::path::PathBuf>> {
-    Ok(session
-        .get_setting(&sync_root_key(&vault_id))?
-        .map(std::path::PathBuf::from))
+pub fn enrolled_root(session: &Session, vault_id: VaultId) -> Result<Option<String>> {
+    Ok(session.get_setting(&sync_root_key(&vault_id))?)
 }
 
-/// Resolve the enrolled sync dir for a vault, erroring if not enrolled.
-fn open_dir(session: &Session, vault_id: VaultId) -> Result<SyncDir> {
+/// Resolve the enrolled sync dir for a vault through `factory`, erroring if not
+/// enrolled.
+fn open_dir(session: &Session, vault_id: VaultId, factory: &dyn StoreFactory) -> Result<SyncDir> {
     let root = enrolled_root(session, vault_id)?.ok_or(Error::Invalid(
         "vault is not enrolled for sync (run `sync setup`)",
     ))?;
-    SyncDir::open(&root, vault_id)
+    SyncDir::with_store(factory.open(&root)?, vault_id)
 }
 
 /// The outcome of a `push`.
@@ -87,12 +119,19 @@ pub struct PushReport {
 /// Each device's ops are written as **one** contiguous segment spanning
 /// `[1, last_seq]`; an unchanged range is skipped (idempotent re-push).
 ///
+/// The channel is opened by `factory` from the vault's enrolled root string.
+///
 /// # Errors
 ///
-/// [`Error::Vault`] / [`Error::Io`] on failure.
-pub fn push(session: &Session, vault: &Vault<'_>) -> Result<PushReport> {
+/// [`Error::Invalid`] if the vault is not enrolled or `factory` cannot open its
+/// root; [`Error::Vault`] / [`Error::Io`] on failure.
+pub fn push(
+    session: &Session,
+    vault: &Vault<'_>,
+    factory: &dyn StoreFactory,
+) -> Result<PushReport> {
     let vault_id = vault.vault_id();
-    let dir = open_dir(session, vault_id)?;
+    let dir = open_dir(session, vault_id, factory)?;
 
     // Group all stored ops by author device, ascending seq.
     let ops = vault.stored_ops()?;
@@ -185,14 +224,21 @@ impl PullReport {
 /// the vault atomically (§7.3 reader algorithm). Idempotent: re-reading an
 /// already-applied segment is a no-op.
 ///
+/// The channel is opened by `factory` from the vault's enrolled root string.
+///
 /// # Errors
 ///
-/// [`Error::Vault`] / [`Error::Io`] / [`Error::Malformed`] on failure. A
+/// [`Error::Invalid`] if the vault is not enrolled or `factory` cannot open its
+/// root; [`Error::Vault`] / [`Error::Io`] / [`Error::Malformed`] on failure. A
 /// verification alarm is **not** an error — it is reported in
 /// [`PullReport::quarantines`] and halts only the offending device.
-pub fn pull(session: &Session, vault: &Vault<'_>) -> Result<PullReport> {
+pub fn pull(
+    session: &Session,
+    vault: &Vault<'_>,
+    factory: &dyn StoreFactory,
+) -> Result<PullReport> {
     let vault_id = vault.vault_id();
-    let dir = open_dir(session, vault_id)?;
+    let dir = open_dir(session, vault_id, factory)?;
 
     // 1) Read every op from the channel (per-device, seq_lo order).
     let channel_ops = dir.read_all_ops()?;
@@ -377,7 +423,7 @@ fn build_chain_state(
 pub struct SyncStatus {
     /// Whether the vault is enrolled for sync.
     pub enrolled: bool,
-    /// The enrolled sync-root (if any).
+    /// The enrolled sync-root string, verbatim (if any).
     pub root: Option<String>,
     /// Per device: `(local_high_water, channel_high_water)` seq marks.
     pub devices: Vec<DeviceStatus>,
@@ -403,23 +449,28 @@ pub struct DeviceStatus {
 }
 
 /// Compute `sync status` without mutating anything: local vs channel seq marks,
-/// plus a dry verify to surface pending/quarantine counts.
+/// plus a dry verify to surface pending/quarantine counts. A vault that is not
+/// enrolled reports `enrolled: false` without touching `factory`.
 ///
 /// # Errors
 ///
+/// [`Error::Invalid`] if `factory` cannot open the enrolled root;
 /// [`Error::Vault`] / [`Error::Io`] on failure.
-pub fn status(session: &Session, vault: &Vault<'_>) -> Result<SyncStatus> {
+pub fn status(
+    session: &Session,
+    vault: &Vault<'_>,
+    factory: &dyn StoreFactory,
+) -> Result<SyncStatus> {
     let vault_id = vault.vault_id();
     let self_id = session.device_id();
 
-    let root = enrolled_root(session, vault_id)?;
-    let Some(root_path) = root.clone() else {
+    let Some(root) = enrolled_root(session, vault_id)? else {
         return Ok(SyncStatus {
             enrolled: false,
             ..Default::default()
         });
     };
-    let dir = SyncDir::open(&root_path, vault_id)?;
+    let dir = SyncDir::with_store(factory.open(&root)?, vault_id)?;
     let manifest = dir.read_manifest();
     let channel_ops = dir.read_all_ops()?;
 
@@ -469,7 +520,7 @@ pub fn status(session: &Session, vault: &Vault<'_>) -> Result<SyncStatus> {
     let _ = manifest; // manifest is advisory; status trusts the ops.
     Ok(SyncStatus {
         enrolled: true,
-        root: Some(root_path.to_string_lossy().into_owned()),
+        root: Some(root),
         devices,
         pending: vreport.pending.len(),
         quarantines: vreport.quarantines,
@@ -488,11 +539,12 @@ pub fn share_vault_to_device(
     session: &Session,
     vault_id: VaultId,
     peer_device_id: &DeviceId,
+    factory: &dyn StoreFactory,
 ) -> Result<()> {
     let peer = session.peer_device(peer_device_id)?.ok_or(Error::Invalid(
         "device is not a trusted peer (run `device trust` first)",
     ))?;
-    let dir = open_dir(session, vault_id)?;
+    let dir = open_dir(session, vault_id, factory)?;
     let blob = session.share_vault_key_to_peer(&vault_id, &peer)?;
     dir.write_key_blob(peer_device_id, &blob)
 }
@@ -505,8 +557,12 @@ pub fn share_vault_to_device(
 ///
 /// [`Error::Invalid`] if the vault is not enrolled; [`Error::Vault`] on a
 /// malformed/tampered blob (fails closed, nothing registered).
-pub fn import_shared_key(session: &Session, vault_id: VaultId) -> Result<bool> {
-    let dir = open_dir(session, vault_id)?;
+pub fn import_shared_key(
+    session: &Session,
+    vault_id: VaultId,
+    factory: &dyn StoreFactory,
+) -> Result<bool> {
+    let dir = open_dir(session, vault_id, factory)?;
     let self_id = session.device_id();
     match dir.read_key_blob(&self_id)? {
         None => Ok(false),
@@ -525,15 +581,24 @@ pub fn import_shared_key(session: &Session, vault_id: VaultId) -> Result<bool> {
 ///
 /// Returns the vault ids adopted (empty when nothing was addressed to us).
 ///
+/// `sync_root` is the host's opaque root string, opened by `factory` and — for
+/// each adopted vault — recorded **verbatim** as that vault's enrolled root,
+/// exactly as [`setup`] would.
+///
 /// # Errors
 ///
-/// [`Error::Io`] on an unreadable root; [`Error::Vault`] on a tampered blob.
-pub fn adopt(session: &Session, sync_root: &std::path::Path) -> Result<Vec<VaultId>> {
+/// [`Error::Invalid`] if `factory` cannot open `sync_root`; [`Error::Io`] on an
+/// unreadable root; [`Error::Vault`] on a tampered blob.
+pub fn adopt(
+    session: &Session,
+    sync_root: &str,
+    factory: &dyn StoreFactory,
+) -> Result<Vec<VaultId>> {
     let mut adopted = Vec::new();
     let self_id = session.device_id();
     // The scan and every per-vault dir below share one channel backend, so the
-    // whole adopt walk goes through a single `Store` seam.
-    let store: Arc<dyn Store> = Arc::new(FsStore::new(sync_root));
+    // whole adopt walk goes through a single `Store` seam (one factory call).
+    let store = factory.open(sync_root)?;
     for entry in store.list_dir(&StorePath::root())? {
         if !entry.is_dir {
             continue;
@@ -545,11 +610,11 @@ pub fn adopt(session: &Session, sync_root: &std::path::Path) -> Result<Vec<Vault
         };
         let vault_id = VaultId::from_bytes(*uuid.as_bytes());
 
-        let dir = SyncDir::with_store(Arc::clone(&store), vault_id)?;
+        let dir = SyncDir::with_store(std::sync::Arc::clone(&store), vault_id)?;
         if let Some(blob) = dir.read_key_blob(&self_id)? {
             session.import_shared_vault_key(&vault_id, &blob)?;
             dir.remove_key_blob(&self_id)?;
-            session.set_setting(&sync_root_key(&vault_id), &sync_root.to_string_lossy())?;
+            session.set_setting(&sync_root_key(&vault_id), sync_root)?;
             adopted.push(vault_id);
         }
     }

@@ -118,8 +118,14 @@ fn share_to_device(session: &lp_vault::Session, vault_ref: &str, device_ref: &st
         .map(|u| lp_vault::Id::from_bytes(*u.as_bytes()))
         .map_err(|_| CliError::usage(format!("device id {device_ref:?} is not a valid UUID")))?;
 
-    lp_sync::engine::share_vault_to_device(session, vault_id, &device_id)
-        .map_err(crate::commands::sync::map_sync_error)?;
+    // The CLI is desktop-only: its channel is always the filesystem one.
+    lp_sync::engine::share_vault_to_device(
+        session,
+        vault_id,
+        &device_id,
+        &lp_sync::store::FsStoreFactory,
+    )
+    .map_err(crate::commands::sync::map_sync_error)?;
     println!(
         "sealed the \"{vault_ref}\" vault key to device {device_ref} and shipped it via the \
          sync channel. On that device, run: localpass sync adopt --dir <sync-root>"
