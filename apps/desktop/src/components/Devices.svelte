@@ -20,6 +20,7 @@
 <script lang="ts">
   import {
     exportIdentity,
+    identityQrSvg,
     listPeers,
     trustDevice,
     syncSetup,
@@ -141,6 +142,31 @@
     if (!identity) return;
     const ok = await copyToClipboard(identity.identity_string);
     toast(ok ? "Identity copied" : "Copy failed", ok ? "ok" : "error");
+  }
+
+  // --- Pairing QR (device-pairing.md §3) ---
+  // The QR carries the same public identity string as the box above; it is a
+  // transport for it, never a shortcut around the fingerprint check.
+  let showQr = $state(false);
+  let qrSvg = $state("");
+  let qrError = $state("");
+
+  // Rendered by the Rust backend, so it goes into an <img> via a data: URI
+  // (the CSP allows `img-src 'self' data:`) rather than {@html} — no markup is
+  // ever injected into the vault UI.
+  const qrDataUri = $derived(
+    qrSvg ? `data:image/svg+xml;utf8,${encodeURIComponent(qrSvg)}` : "",
+  );
+
+  async function toggleQr() {
+    showQr = !showQr;
+    if (!showQr || qrSvg) return; // fetched once, then cached
+    qrError = "";
+    try {
+      qrSvg = await identityQrSvg();
+    } catch (err) {
+      qrError = typeof err === "string" ? err : "Could not render the QR code.";
+    }
   }
 
   async function submitTrust(e: Event) {
@@ -303,6 +329,29 @@
         <br />
         The other device must show this <em>exact</em> fingerprint before you trust each other.
       </p>
+
+      <!-- Pairing QR: scanning it off this screen in person is a far stronger
+           channel than pasting the string through a chat app, which an attacker
+           could tamper with (device-pairing.md §1.2). -->
+      <button class="btn btn-small" onclick={toggleQr} aria-expanded={showQr}>
+        {showQr ? "Hide QR code" : "Show QR code"}
+      </button>
+      {#if showQr}
+        {#if qrError}
+          <div class="error" role="alert">{qrError}</div>
+        {:else if qrDataUri}
+          <div class="qr-plate">
+            <img src={qrDataUri} alt="QR code containing this device's identity string" />
+          </div>
+          <p class="hint">
+            Scan this from your other device <strong>in person</strong>. Then check that it
+            shows the fingerprint <strong class="mono fp">{identity.fingerprint}</strong>
+            before trusting — scanning proves nothing on its own.
+          </p>
+        {:else}
+          <p class="muted">Rendering…</p>
+        {/if}
+      {/if}
     {:else}
       <p class="muted">Loading…</p>
     {/if}
@@ -567,6 +616,22 @@
   }
   .fp.big {
     font-size: 1.1rem;
+  }
+  /* The QR plate stays light in every theme on purpose: a scanner needs the
+     quiet zone light to detect the symbol at all, so we never invert it. */
+  .qr-plate {
+    display: inline-block;
+    margin-top: 0.75rem;
+    padding: 12px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .qr-plate img {
+    display: block;
+    width: 240px;
+    height: auto;
+    max-width: 100%;
   }
   .fp-compare {
     background: var(--bg-hover);

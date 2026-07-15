@@ -576,6 +576,52 @@ pub fn export_identity() -> Result<DeviceIdentityView, String> {
     }
 }
 
+/// Render **this device's** identity string as a QR code, returned as SVG
+/// markup (`docs/specs/device-pairing.md` §3).
+///
+/// The QR encodes the `LPDEV1-…` string **verbatim** — byte-for-byte the value
+/// [`export_identity`] returns and the same one the peer's paste box accepts —
+/// so a scan and a paste converge on the identical
+/// [`trust_device`] path. The QR is a transport for the string; it introduces no
+/// new trust primitive, and scanning one must still require the out-of-band
+/// fingerprint comparison before pinning (§3.3).
+///
+/// Rendering it crosses no secret boundary: the identity is public key material
+/// only (device id + Ed25519/X25519 public keys + CRC).
+///
+/// # Errors
+///
+/// If the identity cannot be fetched, or the string cannot be encoded (it is far
+/// below any QR capacity limit, so this is not reachable in practice).
+#[tauri::command]
+pub fn identity_qr_svg() -> Result<String, String> {
+    let identity = export_identity()?;
+    render_qr_svg(&identity.identity_string)
+}
+
+/// Encode `data` as a QR code and render it to SVG markup.
+///
+/// Fixed **dark-on-light** regardless of the app theme: an inverted QR (light
+/// modules on a dark field) defeats many scanners, and the quiet zone must stay
+/// light to be detected at all. The caller displays it on a white plate.
+///
+/// Error correction is the crate default (**level M**, ~15%), which is ample
+/// here: the identity string carries its own CRC-32 and the user still compares
+/// the fingerprint, so a corrupted scan is rejected rather than silently
+/// yielding a wrong key (`device-pairing.md` §3.2).
+fn render_qr_svg(data: &str) -> Result<String, String> {
+    use qrcode::QrCode;
+    use qrcode::render::svg;
+
+    let code = QrCode::new(data.as_bytes()).map_err(|e| format!("could not encode QR: {e}"))?;
+    Ok(code
+        .render()
+        .min_dimensions(240, 240)
+        .dark_color(svg::Color("#000000"))
+        .light_color(svg::Color("#ffffff"))
+        .build())
+}
+
 /// List the trusted peer devices (label / fingerprint / when). All public.
 #[tauri::command]
 pub fn list_peers() -> Result<Vec<PeerView>, String> {
@@ -953,5 +999,33 @@ mod tests {
         assert_eq!(p.secret.chars().count(), 20);
         let pp = generate_passphrase(4, "-".into()).unwrap();
         assert_eq!(pp.secret.split('-').count(), 4);
+    }
+
+    /// A real identity string must fit in a QR at the default EC level. This is
+    /// the only failure mode `render_qr_svg` actually has (capacity), so pin it
+    /// against a full-length payload rather than a toy one:
+    /// `LPDEV1-` + hex(device_id(16) + ed25519(32) + x25519(32) + crc(4)) = 175 B.
+    #[test]
+    fn renders_a_qr_for_a_full_length_identity_string() {
+        let identity = format!("LPDEV1-{}", "ab".repeat(84));
+        assert_eq!(
+            identity.len(),
+            175,
+            "payload must match the real wire length"
+        );
+
+        let svg = super::render_qr_svg(&identity).expect("175 bytes is well inside QR capacity");
+
+        // The renderer prepends an XML prolog (`<?xml …?><svg …`), which is a
+        // valid SVG document and fine inside the `data:` URI the UI builds.
+        assert!(
+            svg.contains("<svg"),
+            "expected SVG markup, got: {:.60}",
+            svg
+        );
+        assert!(svg.contains("</svg>"), "SVG must be closed");
+        // It lands in an <img> via a data: URI, never {@html} — but assert the
+        // renderer never emits script anyway, so that stays true if it moves.
+        assert!(!svg.contains("<script"), "QR SVG must never carry script");
     }
 }

@@ -77,6 +77,7 @@ pub fn run() {
             commands::delete_item,
             commands::preview_fingerprint,
             commands::export_identity,
+            commands::identity_qr_svg,
             commands::list_peers,
             commands::trust_device,
             commands::sync_setup,

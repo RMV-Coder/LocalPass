@@ -77,6 +77,15 @@ directories = "6"
 getrandom = "0.3"
 # --- Zeroize the master password buffer after it is forwarded to the daemon. ---
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
+# --- Render this device's identity string as a pairing QR (device-pairing.md §3).
+# --- Justification: the QR must be generated in Rust, not by a JS library — the
+# --- webview renders, it does not compute (the same rule that keeps crypto out of
+# --- JS). The encoded value is PUBLIC key material only (device id + Ed25519 /
+# --- X25519 public keys + CRC), so this crosses no secret boundary.
+# --- `default-features = false` + `svg` on purpose: the default set enables
+# --- `image`/`pic`, dragging in the whole `image` crate for raster output we do
+# --- not want — SVG-only keeps the dependency and audit surface minimal. ---
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 [features]
 # This feature is used by the CI/`tauri build` custom-protocol path.
