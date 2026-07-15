@@ -30,6 +30,8 @@
     syncStatus,
     shareVaultToDevice,
     syncAdopt,
+    syncDirPickerAvailable,
+    pickSyncDir,
   } from "../lib/api";
   import type {
     DeviceIdentityView,
@@ -120,6 +122,34 @@
   let adoptBusy = $state(false);
   let adoptError = $state("");
   let adoptResult = $state("");
+
+  // --- Folder picking (Android) ---
+  // On Android, scoped storage means a shared folder can only be reached through
+  // the system picker: it hands back a `content://` tree URI, and there is no
+  // path a user could type that would work. So on that platform we replace the
+  // path text box with a Choose folder button; everywhere else the text box IS
+  // the right gesture (type it, or paste it from a file manager). The backend
+  // decides which, so the rule lives in one place.
+  let canPickDir = $state(false);
+  $effect(() => {
+    syncDirPickerAvailable()
+      .then((v) => (canPickDir = v))
+      .catch(() => (canPickDir = false));
+  });
+
+  /** Run the picker and fill `target`'s field. Cancelling leaves it untouched. */
+  async function chooseFolder(target: "sync" | "adopt") {
+    try {
+      const dir = await pickSyncDir();
+      if (dir === null) return; // cancelled
+      if (target === "sync") syncDir = dir;
+      else adoptDir = dir;
+    } catch (err) {
+      const msg = typeof err === "string" ? err : "Could not open the folder picker.";
+      if (target === "sync") syncError = msg;
+      else adoptError = msg;
+    }
+  }
 
   async function loadIdentity() {
     identityError = "";
@@ -532,16 +562,22 @@
       </select>
     </div>
     <div class="field-group">
-      <label for="sync-dir">Shared folder path</label>
-      <input
-        id="sync-dir"
-        type="text"
-        bind:value={syncDir}
-        placeholder="C:\Users\you\Dropbox\localpass-sync"
-        autocomplete="off"
-        spellcheck="false"
-        class="mono"
-      />
+      <label for="sync-dir">{canPickDir ? "Shared folder" : "Shared folder path"}</label>
+      <div class="dir-row">
+        <input
+          id="sync-dir"
+          type="text"
+          bind:value={syncDir}
+          placeholder={canPickDir ? "No folder chosen yet" : "C:\\Users\\you\\Dropbox\\localpass-sync"}
+          autocomplete="off"
+          spellcheck="false"
+          class="mono"
+          readonly={canPickDir}
+        />
+        {#if canPickDir}
+          <button class="btn" onclick={() => chooseFolder("sync")}>Choose folder…</button>
+        {/if}
+      </div>
     </div>
     <div class="btn-row">
       <button class="btn" onclick={doSetup} disabled={syncBusy || !syncVault || !syncDir.trim()}>
@@ -644,16 +680,22 @@
       import them, and pull their items.
     </p>
     <div class="field-group">
-      <label for="adopt-dir">Shared folder path</label>
-      <input
-        id="adopt-dir"
-        type="text"
-        bind:value={adoptDir}
-        placeholder="C:\Users\you\Dropbox\localpass-sync"
-        autocomplete="off"
-        spellcheck="false"
-        class="mono"
-      />
+      <label for="adopt-dir">{canPickDir ? "Shared folder" : "Shared folder path"}</label>
+      <div class="dir-row">
+        <input
+          id="adopt-dir"
+          type="text"
+          bind:value={adoptDir}
+          placeholder={canPickDir ? "No folder chosen yet" : "C:\\Users\\you\\Dropbox\\localpass-sync"}
+          autocomplete="off"
+          spellcheck="false"
+          class="mono"
+          readonly={canPickDir}
+        />
+        {#if canPickDir}
+          <button class="btn" onclick={() => chooseFolder("adopt")}>Choose folder…</button>
+        {/if}
+      </div>
     </div>
     {#if adoptError}
       <div class="error" role="alert">{adoptError}</div>
@@ -752,6 +794,22 @@
     gap: 0.5rem;
     flex-wrap: wrap;
     margin-top: 0.3rem;
+  }
+  /* Folder field + its (Android-only) picker button. The input keeps the
+     remaining width; without min-width:0 a long content:// URI would push the
+     button off a narrow phone screen. */
+  .dir-row {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+  }
+  .dir-row input {
+    flex: 1;
+    min-width: 0;
+  }
+  .dir-row .btn {
+    flex: none;
+    white-space: nowrap;
   }
   .alarm {
     border: 1px solid var(--danger);

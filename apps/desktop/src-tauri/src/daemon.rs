@@ -25,6 +25,36 @@
 
 use std::path::PathBuf;
 
+// ===========================================================================
+// Android: the `AppHandle` hand-off (SAF sync).
+// ===========================================================================
+//
+// The in-process engine state below is a lazy static built on first request, so
+// it has no `AppHandle` of its own — but the SAF channel backend needs one (the
+// plugin is reached through `AppHandle`). `lib.rs`'s `setup()` hook is the first
+// place a handle exists, and it runs before any command can fire, so it stashes
+// the handle here and the state initializer reads it back. This one-cell
+// hand-off is the whole coupling; nothing else in the app needs it.
+
+/// The `AppHandle` stashed by `lib.rs`'s `setup()` hook, so the lazily-built
+/// engine state can reach the SAF plugin. Android-only.
+#[cfg(target_os = "android")]
+static APP_HANDLE: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+
+/// Record the app handle for the SAF channel backend. Called exactly once, from
+/// `lib.rs`'s `setup()` hook, before any command runs; later calls are ignored.
+#[cfg(target_os = "android")]
+pub fn set_app_handle(app: tauri::AppHandle) {
+    let _ = APP_HANDLE.set(app);
+}
+
+/// The stashed app handle, or `None` if `setup()` has not run yet.
+#[cfg(target_os = "android")]
+#[must_use]
+pub fn app_handle() -> Option<tauri::AppHandle> {
+    APP_HANDLE.get().cloned()
+}
+
 /// A backend-call failure the command layer can map to a UI state.
 #[derive(Debug)]
 pub enum DaemonError {
@@ -195,6 +225,26 @@ mod backend {
             // `setup()` hook has already pointed `LOCALPASS_PROFILE` at the
             // Android app-private dir before the first request.
             let profile = resolve_profile().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+            // On Android the user's sync root is a SAF `content://` tree URI,
+            // which `std::fs` cannot open — so the engine gets the app's own
+            // `StoreFactory` (SAF for `content://`, filesystem otherwise)
+            // through the core's injection seam. `setup()` has already stashed
+            // the handle (see `super::set_app_handle`); if it somehow has not,
+            // fall back to the plain filesystem state rather than panicking —
+            // sync then simply refuses a `content://` root, and the rest of the
+            // vault keeps working.
+            #[cfg(target_os = "android")]
+            if let Some(app) = super::app_handle() {
+                return Mutex::new(State::new_with_store_factory(
+                    profile,
+                    AUTOLOCK,
+                    std::sync::Arc::new(crate::safstore::AppStoreFactory::new(app)),
+                ));
+            }
+
+            // Desktop (and the `inprocess` test feature): the core's default
+            // filesystem channel, exactly as before.
             Mutex::new(State::new(profile, AUTOLOCK))
         })
     }

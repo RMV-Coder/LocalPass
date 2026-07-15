@@ -21,6 +21,8 @@ pub mod dotenv;
 pub mod generate;
 pub mod item_input;
 pub mod model;
+#[cfg(target_os = "android")]
+pub mod safstore;
 mod wordlist;
 
 /// Build and run the Tauri application.
@@ -30,7 +32,7 @@ mod wordlist;
 /// target; on desktop it is a no-op wrapper.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    #[allow(unused_mut)] // `mut` is only needed on mobile, where a plugin is added.
+    #[allow(unused_mut)] // `mut` is only needed on mobile, where plugins are added.
     let mut builder = tauri::Builder::default()
         // Native file/save pickers for attachments (choosing a source file to
         // attach and a destination to save a download). The plugin hands the
@@ -44,6 +46,15 @@ pub fn run() {
     #[cfg(mobile)]
     {
         builder = builder.plugin(tauri_plugin_barcode_scanner::init());
+    }
+
+    // ANDROID ONLY: the SAF bridge behind `safstore::SafStore` and the
+    // `pick_sync_dir` command. Registered here — and *only* for
+    // `target_os = "android"` — so desktop never links the plugin at all (the
+    // dependency itself is target-gated in Cargo.toml; this mirrors it).
+    #[cfg(target_os = "android")]
+    {
+        builder = builder.plugin(tauri_plugin_android_fs::init());
     }
 
     builder
@@ -62,6 +73,14 @@ pub fn run() {
                     unsafe { std::env::set_var("LOCALPASS_PROFILE", &dir) };
                 }
             }
+            // ANDROID ONLY: hand the `AppHandle` to `daemon.rs`, which needs it
+            // to build the SAF-aware `StoreFactory` for the in-process engine.
+            // The engine state is a lazy static with no way to reach the app, so
+            // `setup()` — the first place a handle exists, and before any command
+            // can run — stashes it. See `daemon::set_app_handle`.
+            #[cfg(target_os = "android")]
+            daemon::set_app_handle(app.handle().clone());
+
             #[cfg(not(mobile))]
             let _ = app;
             Ok(())
@@ -93,6 +112,8 @@ pub fn run() {
             commands::is_mobile,
             commands::list_peers,
             commands::trust_device,
+            commands::sync_dir_picker_available,
+            commands::pick_sync_dir,
             commands::sync_setup,
             commands::sync_push,
             commands::sync_pull,
