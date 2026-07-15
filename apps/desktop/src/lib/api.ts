@@ -167,6 +167,15 @@ export function exportIdentity(): Promise<DeviceIdentityView> {
   return invoke<DeviceIdentityView>("export_identity");
 }
 
+/** This device's identity string rendered as a QR code, as SVG markup.
+ *  Encodes the same public `LPDEV1-…` value `exportIdentity` returns — a
+ *  transport for it, not a new trust path: a peer that scans it must still
+ *  compare the fingerprint before trusting. Generated in Rust (the webview
+ *  renders, it does not compute). */
+export function identityQrSvg(): Promise<string> {
+  return invoke<string>("identity_qr_svg");
+}
+
 /** The trusted peer devices (label / fingerprint / when). All public. */
 export function listPeers(): Promise<PeerView[]> {
   return invoke<PeerView[]>("list_peers");
