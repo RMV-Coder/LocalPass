@@ -1,6 +1,16 @@
 //! `localpass sync setup|push|pull|status` — file-based op-log sync
 //! (sync-protocol.md §7; PRD §11 #6). Always uses the direct-unlock path (the
 //! daemon has no sync proxying in the MVP).
+//!
+//! # The channel is always the filesystem here
+//!
+//! [`lp_sync::engine`] resolves a vault's enrolled sync root through a
+//! caller-supplied [`lp_sync::store::StoreFactory`]. The CLI is a desktop
+//! program whose sync
+//! root is always an ordinary directory, so it passes [`FsStoreFactory`] — the
+//! backend the engine used to hard-code. A [`Path`] from the command line is
+//! converted to the engine's opaque root **string** exactly once, at the call
+//! (see [`root_str`]).
 
 use std::path::Path;
 
@@ -12,6 +22,17 @@ use crate::error::{CliError, map_vault_error};
 use crate::unlock::{self, PasswordSource};
 
 use lp_sync::engine;
+use lp_sync::store::FsStoreFactory;
+
+/// The engine's opaque root string for a filesystem sync dir named on the
+/// command line.
+///
+/// [`std::path::Path::to_string_lossy`] is the exact conversion the engine
+/// itself used to perform before persisting `sync.root.<vault_id>`, so an
+/// already-enrolled profile keeps matching byte-for-byte.
+fn root_str(dir: &Path) -> String {
+    dir.to_string_lossy().into_owned()
+}
 
 /// Run a `localpass sync ...` subcommand.
 ///
@@ -32,7 +53,8 @@ pub fn run(profile_dir: &Path, src: PasswordSource, command: &SyncCommand) -> Re
 /// `sync setup` — enroll a vault under a shared sync-root directory.
 fn setup(session: &lp_vault::Session, vault_ref: &str, dir: &Path) -> Result<()> {
     let vault = crate::resolve::open_vault(session, vault_ref)?;
-    engine::setup(session, vault.vault_id(), dir).map_err(map_sync_error)?;
+    engine::setup(session, vault.vault_id(), &root_str(dir), &FsStoreFactory)
+        .map_err(map_sync_error)?;
     println!(
         "enrolled vault {vault_ref:?} for sync under {}",
         dir.display()
@@ -43,7 +65,7 @@ fn setup(session: &lp_vault::Session, vault_ref: &str, dir: &Path) -> Result<()>
 /// `sync push` — publish this device's ops to the channel.
 fn push(session: &lp_vault::Session, vault_ref: &str, json_out: bool) -> Result<()> {
     let vault = crate::resolve::open_vault(session, vault_ref)?;
-    let report = engine::push(session, &vault).map_err(map_sync_error)?;
+    let report = engine::push(session, &vault, &FsStoreFactory).map_err(map_sync_error)?;
     if json_out {
         let published: Vec<_> = report
             .published
@@ -71,7 +93,7 @@ fn push(session: &lp_vault::Session, vault_ref: &str, json_out: bool) -> Result<
 /// `sync pull` — verify + merge peers' ops into this vault.
 fn pull(session: &lp_vault::Session, vault_ref: &str, json_out: bool) -> Result<()> {
     let vault = crate::resolve::open_vault(session, vault_ref)?;
-    let report = engine::pull(session, &vault).map_err(map_sync_error)?;
+    let report = engine::pull(session, &vault, &FsStoreFactory).map_err(map_sync_error)?;
 
     if json_out {
         let alarms: Vec<_> = report
@@ -127,7 +149,7 @@ fn pull(session: &lp_vault::Session, vault_ref: &str, json_out: bool) -> Result<
 /// `sync status` — per-device seq marks + pending/quarantine counts.
 fn status(session: &lp_vault::Session, vault_ref: &str, json_out: bool) -> Result<()> {
     let vault = crate::resolve::open_vault(session, vault_ref)?;
-    let st = engine::status(session, &vault).map_err(map_sync_error)?;
+    let st = engine::status(session, &vault, &FsStoreFactory).map_err(map_sync_error)?;
 
     if json_out {
         let devices: Vec<_> = st
@@ -209,7 +231,8 @@ fn status(session: &lp_vault::Session, vault_ref: &str, json_out: bool) -> Resul
 /// `localpass sync adopt` — join vaults shared to this device: scan the root
 /// for key blobs addressed to us, import + enroll each, then pull its items.
 fn adopt(session: &lp_vault::Session, dir: &Path) -> Result<()> {
-    let adopted = engine::adopt(session, dir).map_err(map_sync_error)?;
+    let adopted =
+        engine::adopt(session, &root_str(dir), &FsStoreFactory).map_err(map_sync_error)?;
     if adopted.is_empty() {
         println!(
             "no shared vaults addressed to this device under {}",
@@ -220,7 +243,7 @@ fn adopt(session: &lp_vault::Session, dir: &Path) -> Result<()> {
     let names = session.list_vaults().map_err(map_vault_error)?;
     for vault_id in adopted {
         let vault = session.open_vault(vault_id).map_err(map_vault_error)?;
-        let report = engine::pull(session, &vault).map_err(map_sync_error)?;
+        let report = engine::pull(session, &vault, &FsStoreFactory).map_err(map_sync_error)?;
         let name = names
             .iter()
             .find(|(id, _)| *id == vault_id)

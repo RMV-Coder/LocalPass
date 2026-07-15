@@ -21,9 +21,11 @@
 //! hung client").
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lp_crypto::SecretKey;
+use lp_sync::store::{FsStoreFactory, StoreFactory};
 use lp_vault::{AccountStore, Item, Session, Vault, VaultId};
 
 use crate::protocol::{LockState, Request, Response, WireItem};
@@ -42,22 +44,61 @@ pub struct State {
     /// The SSH agent endpoint label when the agent is enabled, else `None`
     /// (started with `--no-ssh-agent`). Reported in [`Response::Status`].
     ssh_agent_endpoint: Option<String>,
+    /// The sync channel backend every `Sync*` request resolves its enrolled root
+    /// through ([`lp_sync::engine`]). Defaults to [`FsStoreFactory`] — the
+    /// filesystem channel the daemon has always used — and is replaced by a host
+    /// whose user-picked sync root is not a filesystem path (Android's SAF tree
+    /// URI), via [`set_store_factory`](Self::set_store_factory).
+    store_factory: Arc<dyn StoreFactory>,
 }
 
 impl State {
-    /// A fresh, locked state for `profile` with `autolock` idle timeout and no
-    /// SSH agent endpoint recorded (set later via
+    /// A fresh, locked state for `profile` with `autolock` idle timeout, the
+    /// filesystem sync backend ([`FsStoreFactory`]), and no SSH agent endpoint
+    /// recorded (set later via
     /// [`set_ssh_agent_endpoint`](Self::set_ssh_agent_endpoint) once the agent
     /// listener has bound).
     #[must_use]
     pub fn new(profile: PathBuf, autolock: Duration) -> Self {
+        Self::new_with_store_factory(profile, autolock, Arc::new(FsStoreFactory))
+    }
+
+    /// [`new`](Self::new), but with the sync channel backend injected.
+    ///
+    /// This is the seam for a host that cannot be a dependency of the core: an
+    /// Android SAF-backed [`lp_sync::store::Store`] lives in the app, and its
+    /// factory is handed to the daemon state here. Everything else — the §7
+    /// layout, the §5 verifier, the §4 merge — is unchanged.
+    #[must_use]
+    pub fn new_with_store_factory(
+        profile: PathBuf,
+        autolock: Duration,
+        store_factory: Arc<dyn StoreFactory>,
+    ) -> Self {
         Self {
             profile,
             session: None,
             autolock,
             last_activity: Instant::now(),
             ssh_agent_endpoint: None,
+            store_factory,
         }
+    }
+
+    /// Replace the sync channel backend on an existing state (the mutable
+    /// counterpart of [`new_with_store_factory`](Self::new_with_store_factory),
+    /// for a host that builds its state first and learns its backend later).
+    pub fn set_store_factory(&mut self, store_factory: Arc<dyn StoreFactory>) {
+        self.store_factory = store_factory;
+    }
+
+    /// The sync channel backend this state resolves enrolled roots through.
+    ///
+    /// Returns a cloned handle so a request handler can hold it across the
+    /// `&Session` borrow `with_session` takes on the state.
+    #[must_use]
+    pub fn store_factory(&self) -> Arc<dyn StoreFactory> {
+        Arc::clone(&self.store_factory)
     }
 
     /// Record the SSH agent endpoint label so `status` can report it. Called by
@@ -630,35 +671,56 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
         }),
 
         // --- Vault sync (sync-protocol.md §5/§7) ---------------------------
-        Request::SyncSetup { vault, dir, .. } => with_session(state, |session| {
-            let v = open_vault(session, &vault)?;
-            crate::sync::sync_setup(session, &v, &dir)
-        }),
+        // Each arm takes its own handle on the injected channel backend before
+        // `with_session` borrows the state, then resolves the enrolled root
+        // through it (`lp_sync::engine` never constructs a backend itself).
+        Request::SyncSetup { vault, dir, .. } => {
+            let factory = state.store_factory();
+            with_session(state, |session| {
+                let v = open_vault(session, &vault)?;
+                crate::sync::sync_setup(session, &v, &dir, factory.as_ref())
+            })
+        }
 
-        Request::SyncPush { vault, .. } => with_session(state, |session| {
-            let v = open_vault(session, &vault)?;
-            crate::sync::sync_push(session, &v)
-        }),
+        Request::SyncPush { vault, .. } => {
+            let factory = state.store_factory();
+            with_session(state, |session| {
+                let v = open_vault(session, &vault)?;
+                crate::sync::sync_push(session, &v, factory.as_ref())
+            })
+        }
 
-        Request::SyncPull { vault, .. } => with_session(state, |session| {
-            let v = open_vault(session, &vault)?;
-            crate::sync::sync_pull(session, &v)
-        }),
+        Request::SyncPull { vault, .. } => {
+            let factory = state.store_factory();
+            with_session(state, |session| {
+                let v = open_vault(session, &vault)?;
+                crate::sync::sync_pull(session, &v, factory.as_ref())
+            })
+        }
 
-        Request::SyncStatus { vault, .. } => with_session(state, |session| {
-            let v = open_vault(session, &vault)?;
-            crate::sync::sync_status(session, &v)
-        }),
+        Request::SyncStatus { vault, .. } => {
+            let factory = state.store_factory();
+            with_session(state, |session| {
+                let v = open_vault(session, &vault)?;
+                crate::sync::sync_status(session, &v, factory.as_ref())
+            })
+        }
 
         Request::ShareVaultToDevice {
             vault, device_id, ..
-        } => with_session(state, |session| {
-            let v = open_vault(session, &vault)?;
-            crate::sync::share_vault_to_device(session, &v, &device_id)
-        }),
+        } => {
+            let factory = state.store_factory();
+            with_session(state, |session| {
+                let v = open_vault(session, &vault)?;
+                crate::sync::share_vault_to_device(session, &v, &device_id, factory.as_ref())
+            })
+        }
 
         Request::SyncAdopt { dir, .. } => {
-            with_session(state, |session| crate::sync::sync_adopt(session, &dir))
+            let factory = state.store_factory();
+            with_session(state, |session| {
+                crate::sync::sync_adopt(session, &dir, factory.as_ref())
+            })
         }
 
         // --- Attachments (path-based; no blob bytes cross the pipe) ---------

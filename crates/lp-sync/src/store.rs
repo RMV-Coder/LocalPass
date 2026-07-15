@@ -28,11 +28,26 @@
 //! `<vault_id>/ops/<device_id>/<name>.oplog` is. Resolving a [`StorePath`] onto
 //! whatever the backend actually addresses is [`FsStore`]'s (or a future
 //! backend's) private business.
+//!
+//! # Selecting a backend ([`StoreFactory`])
+//!
+//! The channel **root** is likewise opaque: it is the host-defined string the
+//! user picked and [`crate::engine`] persists verbatim in the
+//! `sync.root.<vault_id>` setting — a filesystem path on desktop, a
+//! `content://…` tree URI on Android. [`StoreFactory`] is the seam that turns
+//! that string into a [`Store`]: [`crate::engine`]'s entry points never
+//! construct a backend themselves, they ask the factory their caller supplied.
+//! [`FsStoreFactory`] is the default (and desktop's only) implementation; a host
+//! that can address a non-filesystem root supplies its own factory, which may
+//! inspect the root (e.g. its URI scheme) and return its own [`Store`]. A
+//! factory living outside this crate is exactly why both traits are object-safe
+//! and `Send + Sync`.
 
 use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::error::{Error, Result};
 
@@ -201,6 +216,55 @@ pub trait Store: Send + Sync {
     ///
     /// [`Error::Io`] on a removal failure other than not-found.
     fn remove_file(&self, path: &StorePath) -> Result<()>;
+}
+
+/// Opens the [`Store`] for a channel **root string** — the runtime selection of
+/// a backend (sync-protocol.md §7).
+///
+/// A vault's enrolled sync root is persisted verbatim as an opaque string (see
+/// [`crate::engine::enrolled_root`]); only the host knows what that string
+/// denotes. [`crate::engine`]'s entry points take a `&dyn StoreFactory` and
+/// resolve the root through it, so a host outside this crate — the Tauri app on
+/// Android, whose SAF backend cannot be a dependency of the core — can inject a
+/// factory that recognizes its own roots (e.g. a `content://` tree URI) and
+/// returns its own [`Store`]. Desktop passes [`FsStoreFactory`] and behaves
+/// exactly as it did when the backend was hard-coded.
+///
+/// Object-safe and `Send + Sync` so a factory can be held as an
+/// `Arc<dyn StoreFactory>` in shared, long-lived state (e.g. a daemon's).
+pub trait StoreFactory: Send + Sync {
+    /// Bind the channel backend rooted at `root`.
+    ///
+    /// `root` is opaque and **must not** be normalized: it is the exact string
+    /// the user's enrollment stored. Implementations decide whether they can
+    /// address it (typically by inspecting a scheme prefix) and either return a
+    /// [`Store`] rooted there or refuse.
+    ///
+    /// The root is not required to exist yet — the caller creates the §7.1
+    /// scaffold through [`Store::create_dir_all`], exactly as
+    /// [`crate::shipping::SyncDir::with_store`] does.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] if `root` is not a root this factory can open;
+    /// [`Error::Io`] if the backend cannot be bound.
+    fn open(&self, root: &str) -> Result<Arc<dyn Store>>;
+}
+
+/// The default [`StoreFactory`]: reads the root string as a local filesystem
+/// path and returns an [`FsStore`] rooted at it. This is desktop's only factory,
+/// and the default everywhere a caller does not inject one.
+///
+/// It accepts **any** root string, since every string is a candidate filesystem
+/// path; a host that also has a non-filesystem backend supplies a factory of its
+/// own rather than extending this one.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FsStoreFactory;
+
+impl StoreFactory for FsStoreFactory {
+    fn open(&self, root: &str) -> Result<Arc<dyn Store>> {
+        Ok(Arc::new(FsStore::new(root)))
+    }
 }
 
 /// Whether an error is a not-found — the "this entry is simply absent" case
@@ -393,5 +457,41 @@ mod tests {
         let store: Box<dyn Store> = Box::new(FsStore::new(tmp.path()));
         store.create_dir_all(&StorePath::root().join("d")).unwrap();
         assert!(store.exists(&StorePath::root().join("d")).unwrap());
+    }
+
+    #[test]
+    fn fs_factory_opens_the_root_string_as_a_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_string_lossy().into_owned();
+        let factory: &dyn StoreFactory = &FsStoreFactory;
+        let store = factory.open(&root).unwrap();
+        store.create_dir_all(&StorePath::root().join("d")).unwrap();
+        assert!(tmp.path().join("d").is_dir());
+    }
+
+    /// The whole point of the seam: a factory defined *outside* `lp-sync` can
+    /// recognize its own (non-filesystem) root strings and return its own
+    /// backend, with no change to §7 above it.
+    #[test]
+    fn a_foreign_factory_can_claim_its_own_root_scheme() {
+        struct FakeSafFactory;
+        impl StoreFactory for FakeSafFactory {
+            fn open(&self, root: &str) -> Result<Arc<dyn Store>> {
+                if !root.starts_with("content://") {
+                    return Err(Error::Invalid("not a content:// tree URI"));
+                }
+                // A real backend would walk the tree URI; the seam is what is
+                // under test, so reuse `FsStore` for the body.
+                Ok(Arc::new(FsStore::new(
+                    std::env::temp_dir().join("lp-fake-saf"),
+                )))
+            }
+        }
+        let factory: &dyn StoreFactory = &FakeSafFactory;
+        assert!(factory.open("content://tree/primary%3ASync").is_ok());
+        assert!(matches!(
+            factory.open("/home/alice/Sync"),
+            Err(Error::Invalid(_))
+        ));
     }
 }
