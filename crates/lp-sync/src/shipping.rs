@@ -27,16 +27,27 @@
 //! hint and trust only §5 verification of the actual segments, so a forged
 //! manifest can at worst point at segments that then fail chain checks — it can
 //! never inject state.
+//!
+//! # The channel is a [`Store`], not a directory
+//!
+//! Every byte below moves through the [`crate::store::Store`] seam, addressed by
+//! [`StorePath`] relative to the channel root. On desktop the backend is always
+//! [`FsStore`] (plain [`std::fs`]) and [`SyncDir::open`] wires it up for you;
+//! [`SyncDir::with_store`] takes any other backend for a host whose user-picked
+//! folder is not a filesystem path (see the [`crate::store`] module docs). The
+//! §7 semantics — segment immutability, the advisory manifest, chain heads,
+//! content-addressed blobs — live here, above the seam.
 
 use std::collections::BTreeMap;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::sync::Arc;
 
 use lp_vault::StoredOp;
 use lp_vault::ids::{DeviceId, Id, VaultId};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::store::{FsStore, Store, StorePath, is_not_found};
 use crate::wire;
 
 /// The per-vault subdirectory names.
@@ -66,34 +77,66 @@ pub struct SegmentFile {
     pub seq_lo: u64,
     /// Inclusive high seq of the range in this file.
     pub seq_hi: u64,
-    /// The file path.
-    pub path: PathBuf,
+    /// The file's path **relative to the channel root** (i.e.
+    /// `<vault_id>/ops/<device_id>/<device_id>-<lo>-<hi>.oplog`), for use with
+    /// the [`SyncDir`]'s own [`Store`].
+    pub path: StorePath,
 }
 
-/// The on-disk sync directory for one vault (`<sync-root>/<vault_id>/`).
+/// The sync directory for one vault (`<sync-root>/<vault_id>/`), realized over
+/// a [`Store`] rooted at the channel's sync root.
 pub struct SyncDir {
-    root: PathBuf,
+    /// The channel backend, rooted at the **sync root** (not the per-vault dir),
+    /// so [`crate::engine::adopt`] can enumerate sibling vaults through the same
+    /// seam.
+    store: Arc<dyn Store>,
+    /// `<vault_id>` — the per-vault root, relative to `store`'s root.
+    root: StorePath,
     vault_id: VaultId,
 }
 
 impl SyncDir {
-    /// Bind (and create) the per-vault sync directory under `sync_root`.
+    /// Bind (and create) the per-vault sync directory under the local directory
+    /// `sync_root`, using the [`std::fs`] backend ([`FsStore`]).
     ///
     /// # Errors
     ///
     /// [`Error::Io`] if the directories cannot be created.
     pub fn open(sync_root: &Path, vault_id: VaultId) -> Result<Self> {
-        let root = sync_root.join(vault_id.to_hyphenated());
-        fs::create_dir_all(root.join(OPS_DIR))?;
-        fs::create_dir_all(root.join(CHAIN_DIR))?;
-        fs::create_dir_all(root.join(KEYS_DIR))?;
-        Ok(Self { root, vault_id })
+        Self::with_store(Arc::new(FsStore::new(sync_root)), vault_id)
     }
 
-    /// The per-vault root path.
+    /// Bind (and create) the per-vault sync directory `<vault_id>/` inside
+    /// `store`, whose root is the channel's sync root.
+    ///
+    /// This is [`SyncDir::open`] for any non-[`FsStore`] backend; the §7.1
+    /// scaffold it creates is identical.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] if the directories cannot be created.
+    pub fn with_store(store: Arc<dyn Store>, vault_id: VaultId) -> Result<Self> {
+        let root = StorePath::root().join(vault_id.to_hyphenated());
+        store.create_dir_all(&root.join(OPS_DIR))?;
+        store.create_dir_all(&root.join(CHAIN_DIR))?;
+        store.create_dir_all(&root.join(KEYS_DIR))?;
+        Ok(Self {
+            store,
+            root,
+            vault_id,
+        })
+    }
+
+    /// The per-vault root, relative to the channel root.
     #[must_use]
-    pub fn root(&self) -> &Path {
+    pub fn root(&self) -> &StorePath {
         &self.root
+    }
+
+    /// The channel backend this dir reads and writes through.
+    #[must_use]
+    pub fn store(&self) -> &Arc<dyn Store> {
+        &self.store
     }
 
     // --- Writer (§7.1) ----------------------------------------------------
@@ -126,13 +169,13 @@ impl SyncDir {
         let seq_hi = ops.last().unwrap().seq;
 
         let dev_dir = self.root.join(OPS_DIR).join(device_id.to_hyphenated());
-        fs::create_dir_all(&dev_dir)?;
+        self.store.create_dir_all(&dev_dir)?;
         let name = format!(
             "{}-{seq_lo}-{seq_hi}.{OPLOG_EXT}",
             device_id.to_hyphenated()
         );
         let path = dev_dir.join(name);
-        if path.exists() {
+        if self.store.exists(&path)? {
             return Ok(Some(SegmentFile {
                 device_id,
                 seq_lo,
@@ -141,7 +184,7 @@ impl SyncDir {
             }));
         }
         let body = wire::encode_segment(ops);
-        write_atomic(&path, &body)?;
+        self.store.write_atomic(&path, &body)?;
         Ok(Some(SegmentFile {
             device_id,
             seq_lo,
@@ -165,7 +208,8 @@ impl SyncDir {
             .root
             .join(CHAIN_DIR)
             .join(format!("{}.head", device_id.to_hyphenated()));
-        write_atomic(&path, serde_json::to_vec_pretty(&head)?.as_slice())?;
+        self.store
+            .write_atomic(&path, serde_json::to_vec_pretty(&head)?.as_slice())?;
         Ok(())
     }
 
@@ -176,7 +220,8 @@ impl SyncDir {
     /// [`Error::Io`] on a write failure.
     pub fn write_manifest(&self, manifest: &Manifest) -> Result<()> {
         let path = self.root.join(MANIFEST_FILE);
-        write_atomic(&path, serde_json::to_vec_pretty(manifest)?.as_slice())?;
+        self.store
+            .write_atomic(&path, serde_json::to_vec_pretty(manifest)?.as_slice())?;
         Ok(())
     }
 
@@ -193,7 +238,7 @@ impl SyncDir {
             self.vault_id.to_hyphenated()
         );
         let path = self.root.join(KEYS_DIR).join(name);
-        write_atomic(&path, sealed)?;
+        self.store.write_atomic(&path, sealed)?;
         Ok(())
     }
 
@@ -209,11 +254,7 @@ impl SyncDir {
             self.vault_id.to_hyphenated()
         );
         let path = self.root.join(KEYS_DIR).join(name);
-        match fs::read(&path) {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(Error::Io(e)),
-        }
+        self.store.read(&path)
     }
 
     // --- Attachment blobs (§7 file channel, content-addressed) ------------
@@ -229,9 +270,9 @@ impl SyncDir {
     /// [`Error::Io`] on a write failure.
     pub fn write_attachment_blob(&self, content_hash_hex: &str, bytes: &[u8]) -> Result<()> {
         let dir = self.root.join(ATTACH_DIR);
-        fs::create_dir_all(&dir)?;
+        self.store.create_dir_all(&dir)?;
         let path = dir.join(format!("{content_hash_hex}.{BLOB_EXT}"));
-        write_atomic(&path, bytes)?;
+        self.store.write_atomic(&path, bytes)?;
         Ok(())
     }
 
@@ -246,11 +287,7 @@ impl SyncDir {
             .root
             .join(ATTACH_DIR)
             .join(format!("{content_hash_hex}.{BLOB_EXT}"));
-        match fs::read(&path) {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(Error::Io(e)),
-        }
+        self.store.read(&path)
     }
 
     /// List the `content_hash` (hex) of every attachment blob present in the
@@ -262,17 +299,18 @@ impl SyncDir {
     pub fn list_attachment_blob_hashes(&self) -> Result<Vec<String>> {
         let dir = self.root.join(ATTACH_DIR);
         let mut out = Vec::new();
-        let entries = match fs::read_dir(&dir) {
+        let entries = match self.store.list_dir(&dir) {
             Ok(e) => e,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
-            Err(e) => return Err(Error::Io(e)),
+            // Nothing shipped yet — the dir is created on first write.
+            Err(e) if is_not_found(&e) => return Ok(out),
+            Err(e) => return Err(e),
         };
         for entry in entries {
-            let path = entry?.path();
-            if path.extension().and_then(|e| e.to_str()) != Some(BLOB_EXT) {
+            let path = dir.join(entry.name);
+            if path.extension() != Some(BLOB_EXT) {
                 continue;
             }
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            if let Some(stem) = path.file_stem() {
                 out.push(stem.to_string());
             }
         }
@@ -293,11 +331,7 @@ impl SyncDir {
             self.vault_id.to_hyphenated()
         );
         let path = self.root.join(KEYS_DIR).join(name);
-        match fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(Error::Io(e)),
-        }
+        self.store.remove_file(&path)
     }
 
     // --- Reader (§7.3) ----------------------------------------------------
@@ -312,18 +346,18 @@ impl SyncDir {
     pub fn list_segments(&self) -> Result<BTreeMap<[u8; 16], Vec<SegmentFile>>> {
         let mut by_device: BTreeMap<[u8; 16], Vec<SegmentFile>> = BTreeMap::new();
         let ops_root = self.root.join(OPS_DIR);
-        let Ok(dev_dirs) = fs::read_dir(&ops_root) else {
+        // An unreadable/absent `ops/` is simply "no segments" — a fresh channel.
+        let Ok(dev_dirs) = self.store.list_dir(&ops_root) else {
             return Ok(by_device);
         };
         for dev_entry in dev_dirs {
-            let dev_entry = dev_entry?;
-            if !dev_entry.file_type()?.is_dir() {
+            if !dev_entry.is_dir {
                 continue;
             }
-            for seg in fs::read_dir(dev_entry.path())? {
-                let seg = seg?;
-                let path = seg.path();
-                if path.extension().and_then(|e| e.to_str()) != Some(OPLOG_EXT) {
+            let dev_dir = ops_root.join(dev_entry.name);
+            for seg in self.store.list_dir(&dev_dir)? {
+                let path = dev_dir.join(seg.name);
+                if path.extension() != Some(OPLOG_EXT) {
                     continue;
                 }
                 if let Some(sf) = parse_segment_name(&path) {
@@ -353,7 +387,15 @@ impl SyncDir {
         let mut ops = Vec::new();
         for segs in segments.values() {
             for sf in segs {
-                let body = fs::read(&sf.path)?;
+                // The segment was just discovered by `list_segments`, so absence
+                // here means the channel raced us (a peer's replicator pruned
+                // it mid-read). Surface it as the not-found it is.
+                let body = self.store.read(&sf.path)?.ok_or_else(|| {
+                    Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "segment file vanished while reading the channel",
+                    ))
+                })?;
                 ops.extend(wire::decode_segment(&body)?);
             }
         }
@@ -365,8 +407,10 @@ impl SyncDir {
     #[must_use]
     pub fn read_manifest(&self) -> Manifest {
         let path = self.root.join(MANIFEST_FILE);
-        fs::read(path)
+        self.store
+            .read(&path)
             .ok()
+            .flatten()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default()
     }
@@ -381,8 +425,8 @@ struct HeadFile {
 
 /// Parse `<device_id>-<lo>-<hi>.oplog` into a [`SegmentFile`]; `None` if the
 /// name does not match (a foreign file the dumb channel dropped in).
-fn parse_segment_name(path: &Path) -> Option<SegmentFile> {
-    let stem = path.file_stem()?.to_str()?;
+fn parse_segment_name(path: &StorePath) -> Option<SegmentFile> {
+    let stem = path.file_stem()?;
     // device_id is a 36-char hyphenated UUID; the range is `-<lo>-<hi>`.
     // Split off the last two `-`-separated numeric fields.
     let (rest, hi) = stem.rsplit_once('-')?;
@@ -394,7 +438,7 @@ fn parse_segment_name(path: &Path) -> Option<SegmentFile> {
         device_id,
         seq_lo,
         seq_hi,
-        path: path.to_path_buf(),
+        path: path.clone(),
     })
 }
 
@@ -414,15 +458,6 @@ fn hex(bytes: &[u8]) -> String {
         s.push(char::from_digit(u32::from(b & 0x0f), 16).unwrap());
     }
     s
-}
-
-/// Write bytes durably-ish: to a temp sibling then rename into place, so a
-/// reader never sees a half-written segment (segments are immutable once named).
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, bytes)?;
-    fs::rename(&tmp, path)?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -462,6 +497,39 @@ mod tests {
         assert_eq!(back.len(), 2);
         assert_eq!(back[0].seq, 1);
         assert_eq!(back[1].seq, 2);
+    }
+
+    /// The §7.1 layout is a wire contract with every other device on the
+    /// channel: pin the exact on-disk names the `Store` seam must produce.
+    #[test]
+    fn layout_matches_sync_protocol_7_1() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = Id::from_bytes([2u8; 16]);
+        let dev: DeviceId = Id::from_bytes([3u8; 16]);
+        let dir = SyncDir::open(tmp.path(), vault).unwrap();
+
+        let seg = dir.write_segment(&[op([3u8; 16], 1, 1)]).unwrap().unwrap();
+        dir.write_head(&dev, 1, &[7u8; 32]).unwrap();
+        dir.write_manifest(&Manifest::default()).unwrap();
+        dir.write_key_blob(&dev, b"sealed").unwrap();
+        dir.write_attachment_blob("abc123", b"blob").unwrap();
+
+        let (v, d) = (vault.to_hyphenated(), dev.to_hyphenated());
+        // The segment addresses itself channel-relatively, under the vault root.
+        assert_eq!(seg.path.to_string(), format!("{v}/ops/{d}/{d}-1-1.oplog"));
+
+        let root = tmp.path().join(&v);
+        for rel in [
+            "manifest.json".to_string(),
+            format!("ops/{d}/{d}-1-1.oplog"),
+            format!("chain/{d}.head"),
+            format!("keys/{d}-{v}.wrapped"),
+            "attachments/abc123.blob".to_string(),
+        ] {
+            assert!(root.join(&rel).exists(), "missing §7.1 path: {rel}");
+        }
+        // `write_atomic`'s temp sibling never survives.
+        assert!(!root.join("manifest.tmp").exists());
     }
 
     #[test]

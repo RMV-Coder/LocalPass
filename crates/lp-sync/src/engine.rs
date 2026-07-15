@@ -16,6 +16,7 @@
 //! mutates the vault (in one transaction per batch, vault-format.md §7).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use lp_crypto::VerifyingKey;
 use lp_vault::ids::{DeviceId, VaultId};
@@ -24,6 +25,7 @@ use lp_vault::{Session, StoredOp, Vault};
 use crate::error::{Error, Quarantine, Result};
 use crate::merge;
 use crate::shipping::{Manifest, SyncDir};
+use crate::store::{FsStore, Store, StorePath};
 use crate::verify::{self, ChainState, DeviceChainState};
 
 /// The account-store settings key holding a vault's enrolled sync-root dir.
@@ -529,23 +531,21 @@ pub fn import_shared_key(session: &Session, vault_id: VaultId) -> Result<bool> {
 pub fn adopt(session: &Session, sync_root: &std::path::Path) -> Result<Vec<VaultId>> {
     let mut adopted = Vec::new();
     let self_id = session.device_id();
-    let entries = std::fs::read_dir(sync_root).map_err(Error::Io)?;
-    for entry in entries {
-        let entry = entry.map_err(Error::Io)?;
-        if !entry.path().is_dir() {
+    // The scan and every per-vault dir below share one channel backend, so the
+    // whole adopt walk goes through a single `Store` seam.
+    let store: Arc<dyn Store> = Arc::new(FsStore::new(sync_root));
+    for entry in store.list_dir(&StorePath::root())? {
+        if !entry.is_dir {
             continue;
         }
         // Per-vault dirs are hyphenated UUIDs (sync-protocol.md §7.1); skip
         // anything else a dumb channel may have dropped in.
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        let Ok(uuid) = uuid::Uuid::parse_str(&name) else {
+        let Ok(uuid) = uuid::Uuid::parse_str(&entry.name) else {
             continue;
         };
         let vault_id = VaultId::from_bytes(*uuid.as_bytes());
 
-        let dir = SyncDir::open(sync_root, vault_id)?;
+        let dir = SyncDir::with_store(Arc::clone(&store), vault_id)?;
         if let Some(blob) = dir.read_key_blob(&self_id)? {
             session.import_shared_vault_key(&vault_id, &blob)?;
             dir.remove_key_blob(&self_id)?;
