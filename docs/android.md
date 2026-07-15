@@ -154,10 +154,92 @@ customizing.
    is Intel-only and conflicts with the Win11 Hyper-V stack; a physical device
    over USB avoids the emulator entirely. `rustup target add` must be **one line**
    (PowerShell has no `\` continuation).
-3. **Unlock + browse** on a device/emulator (`tauri android dev`) — the next
-   milestone. The backend is ready; this exercises it on-device.
+3. **Runs on a real device** — ✅ **done** (2026-07-15). `tauri android build
+   --debug --apk --target aarch64` produces an APK; installed via `adb install`
+   on a physical arm64 device (Redmi Note 10). **Verified end-to-end on-device:**
+   the Svelte UI renders, and the in-process backend created an account — it ran
+   the real Argon2id KDF on the phone, generated the Secret Key, and wrote the
+   account store to the Android app-private dir (`/data/user/0/org.localpass.desktop`),
+   with **no daemon**. See [Windows build gotchas](#windows-build-gotchas).
 4. Keystore-backed Secret Key + biometric unlock.
 5. SAF-based sync; then release signing.
+
+## Live-reload dev server on a physical device
+
+`tauri android dev` serves the Svelte UI from the dev machine and the app loads
+it over the network. Two things must line up on a USB-attached phone:
+
+- **The phone often can't reach the PC over the LAN.** Many phone/router setups
+  (mobile hotspots, "AP/client isolation") drop device→PC traffic — `ping <PC>`
+  from the phone fails. Don't rely on the auto-detected LAN IP. Instead force
+  loopback and tunnel the ports over USB:
+  ```sh
+  adb reverse tcp:1420 tcp:1420   # dev server
+  adb reverse tcp:1421 tcp:1421   # HMR websocket
+  npx tauri android dev --host 127.0.0.1
+  ```
+  `--host` sets `TAURI_DEV_HOST`, which `vite.config.ts` reads to bind the dev
+  server and point HMR at that host (see the `host`/`hmr` block there).
+- **Exclude `src-tauri/**` from Vite's watcher.** The Android build writes churn
+  under `src-tauri/gen/android/build`, which otherwise triggers a full webview
+  reload. `vite.config.ts` sets `server.watch.ignored: ["**/src-tauri/**"]`.
+- If a build dies mid-run, a **stale Gradle daemon** can hold a file lock
+  (`Blocking waiting for file lock on Android`). Clear it with
+  `gen/android/gradlew.bat --stop` (or kill stray `java` processes).
+
+## Storage: the debug APK is too big for a full phone
+
+The debug APK is ~**169 MB** (the debug `.so` carries full debuginfo). On a
+near-full device Android rejects the install with
+`INSTALL_FAILED_INSUFFICIENT_STORAGE` (it needs several × the APK size
+transiently). For on-device testing without freeing space, build a **stripped
+release APK** (`[profile.release]` has `strip="symbols"`, `lto="thin"` → tens of
+MB) and sign it with the **existing debug keystore** so it reinstalls in place
+(same signer ⇒ no uninstall, on-device account preserved):
+
+```sh
+npx tauri android build --apk --target aarch64        # -> app-arm64-release-unsigned.apk
+BT="$LOCALAPPDATA/Android/Sdk/build-tools/36.0.0"
+"$BT/zipalign.exe" -f 4 app-arm64-release-unsigned.apk aligned.apk
+"$BT/apksigner.bat" sign --ks ~/.android/debug.keystore \
+    --ks-pass pass:android --ks-key-alias androiddebugkey --key-pass pass:android aligned.apk
+adb install -r aligned.apk
+```
+
+## App icon (all platforms from one source)
+
+The canonical logo is `apps/desktop/app-icon.png` (1024² padlock). Regenerate
+every platform's icons — desktop `.ico`/`.png`, the `.exe`/`.msi` installer, iOS
+AppIcons, and the Android launcher mipmaps — with one command:
+
+```sh
+cd apps/desktop && npx tauri icon app-icon.png
+```
+
+`icons/` is tracked; the Android mipmaps land in the **gitignored** `gen/android`
+tree, so re-run `tauri icon` after `android init`. The Android adaptive-icon
+background color (`gen/.../res/values/ic_launcher_background.xml`) is set to the
+logo's navy `#0F2A2E` so the padlock sits seamlessly under the launcher mask
+(the default `#fff` shows white slivers at the mask edge).
+
+## Windows build gotchas
+
+Three things bit us on Windows 11; all are one-time fixes:
+
+1. **Drop the daemon sidecar on Android.** The desktop bundle ships
+   `localpass-daemon` via `bundle.externalBin`, but mobile has no daemon, so the
+   Android build fails looking for `binaries/localpass-daemon-aarch64-linux-android`.
+   Fixed with `src-tauri/tauri.android.conf.json` (a platform-override merged
+   automatically for `android`) that sets `bundle.externalBin: []`.
+2. **Enable Developer Mode** (Settings → For developers). Tauri **symlinks** the
+   built `.so` into the APK's `jniLibs`, and Windows blocks symlink creation
+   without Developer Mode (`Creation symbolic link is not allowed for this
+   system`). No admin/reboot needed.
+3. **Use JDK 17, not Android Studio's JBR.** Recent Android Studio bundles a
+   **JDK 25** JBR, which the scaffold's Gradle 8.14 can't run on
+   (`Unsupported class file major version 69`). Install a JDK 17 (e.g. Temurin)
+   and point `JAVA_HOME` at it for CLI Android builds — Android Studio keeps
+   using its own JBR internally, so this doesn't affect the IDE.
 
 ## References
 
