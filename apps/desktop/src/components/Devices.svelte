@@ -21,6 +21,7 @@
   import {
     exportIdentity,
     identityQrSvg,
+    isMobile,
     listPeers,
     trustDevice,
     syncSetup,
@@ -142,6 +143,61 @@
     if (!identity) return;
     const ok = await copyToClipboard(identity.identity_string);
     toast(ok ? "Identity copied" : "Copy failed", ok ? "ok" : "error");
+  }
+
+  // --- Scan a peer's pairing QR (device-pairing.md §3.3/§3.4) ---
+  // Mobile only — desktop links no camera plugin, so the button must not exist
+  // there. Answered by the backend from cfg(mobile), never a user-agent sniff.
+  let mobile = $state(false);
+  let scanBusy = $state(false);
+  let scanError = $state("");
+
+  async function loadIsMobile() {
+    try {
+      mobile = await isMobile();
+    } catch {
+      mobile = false; // no scanner is the safe assumption
+    }
+  }
+
+  // A scan is ONLY a transport for the identity string: it fills the same box a
+  // paste would, and nothing more. The `pasted` effect above then re-derives the
+  // fingerprint and forces `confirmed` back off, so the user must still compare
+  // it against the other device's screen before Trust enables. There is
+  // deliberately no path from "decoded successfully" to "trusted" (§3.3) — a QR
+  // image forwarded through a chat app is exactly as substitutable as the string.
+  async function doScan() {
+    if (scanBusy) return;
+    scanBusy = true;
+    scanError = "";
+    try {
+      const { scan, Format, checkPermissions, requestPermissions } = await import(
+        "@tauri-apps/plugin-barcode-scanner"
+      );
+      let perm = await checkPermissions();
+      if (perm !== "granted") {
+        perm = await requestPermissions();
+      }
+      if (perm !== "granted") {
+        scanError = "Camera access is needed to scan a QR code.";
+        return;
+      }
+      const result = await scan({ windowed: false, formats: [Format.QRCode] });
+      const content = result?.content?.trim();
+      if (!content) {
+        scanError = "Nothing was scanned.";
+        return;
+      }
+      pasted = content; // → fingerprint preview re-runs, confirmation resets
+    } catch (err) {
+      // A user-cancelled scan is not an error worth shouting about.
+      const msg = typeof err === "string" ? err : ((err as Error)?.message ?? "");
+      if (!/cancel/i.test(msg)) {
+        scanError = msg || "Could not scan a QR code.";
+      }
+    } finally {
+      scanBusy = false;
+    }
   }
 
   // --- Pairing QR (device-pairing.md §3) ---
@@ -295,6 +351,7 @@
     syncVault = fallback;
     shareVault = fallback;
     loadIdentity();
+    loadIsMobile();
     loadPeers();
     refreshStatus(fallback);
   });
@@ -361,11 +418,26 @@
   <section class="panel" aria-labelledby="trust-h">
     <h3 id="trust-h">Trust a device</h3>
     <p class="muted">
-      Paste the other device's identity string. Then compare the fingerprint
+      {#if mobile}Scan the other device's QR code, or paste its identity string.
+      {:else}Paste the other device's identity string.{/if}
+      Then compare the fingerprint
       below against what that device shows — they must match <strong>exactly</strong>.
       Confirm the match to enable Trust. Never trust a device whose fingerprint
       you have not compared out-of-band.
     </p>
+
+    <!-- Mobile only: scanning is a transport for the identity string — it fills
+         the box below exactly as a paste would, and re-arms the fingerprint
+         confirmation. It never trusts on its own (device-pairing.md §3.3). -->
+    {#if mobile}
+      <button type="button" class="btn" onclick={doScan} disabled={scanBusy}>
+        {scanBusy ? "Scanning…" : "Scan QR code"}
+      </button>
+      {#if scanError}
+        <div class="error" role="alert">{scanError}</div>
+      {/if}
+    {/if}
+
     <form onsubmit={submitTrust}>
       <div class="field-group">
         <label for="paste-id">Other device's identity string</label>

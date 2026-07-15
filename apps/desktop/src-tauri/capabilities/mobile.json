@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "mobile-pairing-scanner",
+  "description": "Mobile-only: the camera barcode scanner used to pair a device by scanning its QR (docs/specs/device-pairing.md §3.4). Deliberately a SEPARATE capability scoped to android/iOS so the desktop grant set in default.json stays untouched — desktop has no scan surface and never links the plugin. The grant is the minimum for a user-initiated scan: check/request the camera permission, open the scanner, and cancel it. A scan only fills the identity box; it can never trust a device on its own — the out-of-band fingerprint comparison still gates trusting, and `trust_device` re-checks the fingerprint in the backend regardless. The scanned value (an LPDEV1 string) is PUBLIC key material.",
+  "platforms": ["android", "iOS"],
+  "windows": ["main"],
+  "permissions": [
+    "barcode-scanner:allow-check-permissions",
+    "barcode-scanner:allow-request-permissions",
+    "barcode-scanner:allow-scan",
+    "barcode-scanner:allow-cancel"
+  ]
+}

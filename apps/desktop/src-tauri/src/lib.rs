@@ -30,11 +30,23 @@ mod wordlist;
 /// target; on desktop it is a no-op wrapper.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    #[allow(unused_mut)] // `mut` is only needed on mobile, where a plugin is added.
+    let mut builder = tauri::Builder::default()
         // Native file/save pickers for attachments (choosing a source file to
         // attach and a destination to save a download). The plugin hands the
         // backend only PATHS; the attachment plaintext never enters the webview.
-        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_dialog::init());
+
+    // The camera QR scanner used to pair a device (device-pairing.md §3.4).
+    // Mobile-only, so desktop never links a camera plugin at all. A scan only
+    // fills the identity box — the out-of-band fingerprint comparison still
+    // gates trusting (§3.3), exactly as for a pasted string.
+    #[cfg(mobile)]
+    {
+        builder = builder.plugin(tauri_plugin_barcode_scanner::init());
+    }
+
+    builder
         .setup(|app| {
             // On mobile there is no daemon — the app process *is* the vault (see
             // `daemon.rs`). Point the in-process backend at the Android
@@ -78,6 +90,7 @@ pub fn run() {
             commands::preview_fingerprint,
             commands::export_identity,
             commands::identity_qr_svg,
+            commands::is_mobile,
             commands::list_peers,
             commands::trust_device,
             commands::sync_setup,

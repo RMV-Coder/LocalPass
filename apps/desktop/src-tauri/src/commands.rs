@@ -622,6 +622,19 @@ fn render_qr_svg(data: &str) -> Result<String, String> {
         .build())
 }
 
+/// Whether this build runs on a mobile target, i.e. whether the camera QR
+/// scanner exists.
+///
+/// The scanner plugin is registered for mobile only (`lib.rs`), so the UI must
+/// not offer a Scan button on desktop — the call would have no handler. Answered
+/// from `cfg(mobile)` rather than sniffing the user agent, so the UI and the
+/// registered plugin set can never disagree.
+#[tauri::command]
+#[must_use]
+pub fn is_mobile() -> bool {
+    cfg!(mobile)
+}
+
 /// List the trusted peer devices (label / fingerprint / when). All public.
 #[tauri::command]
 pub fn list_peers() -> Result<Vec<PeerView>, String> {
