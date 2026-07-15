@@ -176,6 +176,13 @@ export function identityQrSvg(): Promise<string> {
   return invoke<string>("identity_qr_svg");
 }
 
+/** Whether this build has the camera QR scanner (mobile only). Answered from
+ *  `cfg(mobile)` in Rust, so the UI and the registered plugin set can never
+ *  disagree — never sniff the user agent for this. */
+export function isMobile(): Promise<boolean> {
+  return invoke<boolean>("is_mobile");
+}
+
 /** The trusted peer devices (label / fingerprint / when). All public. */
 export function listPeers(): Promise<PeerView[]> {
   return invoke<PeerView[]>("list_peers");
