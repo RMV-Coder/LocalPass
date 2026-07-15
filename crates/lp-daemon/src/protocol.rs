@@ -121,6 +121,16 @@ pub enum Request {
         /// The human-readable vault name.
         name: String,
     },
+    /// Soft-delete a vault by name or id (requires an unlocked session). The
+    /// vault file is left in place but becomes unlisted and unopenable
+    /// (vault-format.md §5.1); the operation is a metadata flag, no secret
+    /// crosses the wire. Answered by [`Response::Ok`].
+    DeleteVault {
+        /// The profile directory being operated on.
+        profile: String,
+        /// Vault name or id to delete.
+        vault: String,
+    },
     /// List all live items in a vault (metadata + non-secret fields only).
     ListItems {
         /// The profile directory being operated on.
@@ -465,6 +475,7 @@ impl Request {
             Request::Lock => "Lock",
             Request::ListVaults { .. } => "ListVaults",
             Request::CreateVault { .. } => "CreateVault",
+            Request::DeleteVault { .. } => "DeleteVault",
             Request::ListItems { .. } => "ListItems",
             Request::PasswordHealth { .. } => "PasswordHealth",
             Request::GetItem { .. } => "GetItem",
