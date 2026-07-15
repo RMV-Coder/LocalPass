@@ -204,6 +204,21 @@ export function trustDevice(
   });
 }
 
+/** Whether this platform offers a native folder picker for the sync root
+ *  (Android only — scoped storage makes a picker the ONLY way to reach a shared
+ *  folder there). Desktop returns false; the user types a path instead. */
+export function syncDirPickerAvailable(): Promise<boolean> {
+  return invoke<boolean>("sync_dir_picker_available");
+}
+
+/** ANDROID ONLY: pick a shared folder and keep durable access to it. Returns the
+ *  folder's `content://` URI — the same `dir` string `syncSetup`/`syncAdopt`
+ *  take on desktop as a path — or null if the user cancelled. Gate calls on
+ *  `syncDirPickerAvailable()`; it rejects elsewhere. */
+export function pickSyncDir(): Promise<string | null> {
+  return invoke<string | null>("pick_sync_dir");
+}
+
 /** Enroll a vault for file-based sync under the shared folder `dir`. */
 export function syncSetup(vault: string, dir: string): Promise<void> {
   return invoke<void>("sync_setup", { vault, dir });

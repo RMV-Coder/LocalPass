@@ -694,6 +694,47 @@ pub fn trust_device(
     }
 }
 
+/// Whether this platform can show a native folder picker for the sync root
+/// (Android only — see [`pick_sync_dir`]). The UI uses this to decide between a
+/// "Choose folder" button and a plain path text box; desktop users type or paste
+/// a path, which is the natural gesture there.
+#[tauri::command]
+#[must_use]
+pub fn sync_dir_picker_available() -> bool {
+    cfg!(target_os = "android")
+}
+
+/// **Android only.** Show the folder picker, keep durable access to the folder
+/// the user chose, and return its `content://` URI for [`sync_setup`] /
+/// [`sync_adopt`] — the same `dir` argument a desktop user types as a path.
+/// `None` if the user cancelled.
+///
+/// Android scoped storage gives no other way to reach a shared folder: a picked
+/// tree is a `content://` URI, not a path, and the sync engine addresses it
+/// through the app's SAF backend (`safstore.rs`). Nothing secret is involved —
+/// this only names a folder.
+#[cfg(target_os = "android")]
+#[tauri::command]
+pub async fn pick_sync_dir(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    crate::safstore::pick_sync_dir(&app).await
+}
+
+/// Folder picking is Android-only (it exists because of Android scoped storage).
+/// Desktop has no SAF, and no need for one — the folder is an ordinary path the
+/// user types, or pastes from their file manager. The command stays registered
+/// on every platform so the bridge's shape does not vary; the UI gates it on
+/// [`sync_dir_picker_available`] and never calls this.
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+#[allow(clippy::unnecessary_wraps)]
+pub fn pick_sync_dir() -> Result<Option<String>, String> {
+    Err(
+        "choosing a folder through a picker is only available on Android; \
+         type or paste the shared folder's path instead"
+            .to_string(),
+    )
+}
+
 /// Enroll `vault` for file-based sync under the shared folder `dir`. Both
 /// machines watch the same folder; LocalPass encrypts everything, the folder is
 /// untrusted.

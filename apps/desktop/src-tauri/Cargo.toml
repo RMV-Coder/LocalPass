@@ -96,6 +96,40 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 [target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
 tauri-plugin-barcode-scanner = "2"
 
+# --- ANDROID ONLY: the SAF (Storage Access Framework) channel backend. ---
+# Justification: Android scoped storage means a user-picked shared folder is a
+# `content://` tree URI, NOT a filesystem path — `std::fs` can never open it, so
+# `lp_sync::store::FsStore` cannot work there and the sync feature would simply
+# not exist on Android without this. SAF is the ONLY sanctioned way to reach a
+# folder the user chose outside our app-private dir, and it requires JNI calls
+# into `DocumentsContract`/`DocumentFile`; this plugin is that JNI bridge.
+#
+# Placement: this lives in the GUI crate, NOT in `lp-sync`, on purpose. The AGPL
+# core must never depend on Tauri (PRD §5.6), so the SAF `Store` is implemented
+# here (`src/safstore.rs`) and injected into the engine through the core's
+# `lp_sync::store::StoreFactory` seam. The core stays Tauri-free and unchanged.
+#
+# Target-gated to `target_os = "android"` (not `cfg(mobile)`): SAF is an Android
+# API with no iOS counterpart, and desktop must not even LINK the plugin. Verify
+# with `cargo tree --target x86_64-pc-windows-msvc` (absent) vs
+# `--target aarch64-linux-android` (present).
+#
+# No secret boundary is crossed: the plugin only ever sees the ALREADY-ENCRYPTED
+# channel bytes (§7 segments/blobs are ciphertext, the manifest is advisory
+# plaintext) and the tree URI the user picked. Vault keys never reach it.
+#
+# `default-features = false` is SECURITY-LOAD-BEARING, not tidiness. The default
+# `commands` feature registers ~57 `#[tauri::command]`s (read_dir, write_file,
+# remove_dir_all, the pickers, …) as a JS-callable surface gated only by an ACL
+# capability. Our Rust calls do NOT use that surface — they go through
+# `run_mobile_plugin`, which bypasses the ACL entirely — so the feature buys us
+# nothing and would hand the WEBVIEW arbitrary SAF filesystem reach, which this
+# app's whole architecture denies it (strict CSP, no fs plugin, the webview
+# renders and Rust does the I/O). Compiling it out means there is no capability
+# to grant and no surface to get wrong. See `src/safstore.rs`.
+[target.'cfg(target_os = "android")'.dependencies]
+tauri-plugin-android-fs = { version = "28", default-features = false }
+
 [features]
 # This feature is used by the CI/`tauri build` custom-protocol path.
 custom-protocol = ["tauri/custom-protocol"]
