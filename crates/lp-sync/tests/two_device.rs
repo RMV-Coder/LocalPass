@@ -8,6 +8,7 @@
 //! everything lives in one test function.
 
 use lp_sync::engine;
+use lp_sync::store::FsStoreFactory;
 use lp_vault::AccountStore;
 use lp_vault::payload::{ItemPayload, TypeData};
 
@@ -59,23 +60,31 @@ fn share_adopt_and_bidirectional_sync_between_real_devices() {
 
     // A enrolls + pushes, then seals the VaultKey to B via the channel.
     let root = tempfile::tempdir().unwrap();
-    engine::setup(&session_a, vault_id, root.path()).unwrap();
+    engine::setup(
+        &session_a,
+        vault_id,
+        &root.path().to_string_lossy(),
+        &FsStoreFactory,
+    )
+    .unwrap();
     {
         let vault_a = session_a.open_vault(vault_id).unwrap();
-        engine::push(&session_a, &vault_a).unwrap();
+        engine::push(&session_a, &vault_a, &FsStoreFactory).unwrap();
     }
-    engine::share_vault_to_device(&session_a, vault_id, &ident_b.device_id).unwrap();
+    engine::share_vault_to_device(&session_a, vault_id, &ident_b.device_id, &FsStoreFactory)
+        .unwrap();
 
     // B adopts: the vault registers locally + enrolls, then a pull
     // materializes A's ops.
-    let adopted = engine::adopt(&session_b, root.path()).unwrap();
+    let adopted =
+        engine::adopt(&session_b, &root.path().to_string_lossy(), &FsStoreFactory).unwrap();
     assert_eq!(
         adopted,
         vec![vault_id],
         "B adopted exactly the shared vault"
     );
     let vault_b = session_b.open_vault(vault_id).unwrap();
-    let report = engine::pull(&session_b, &vault_b).unwrap();
+    let report = engine::pull(&session_b, &vault_b, &FsStoreFactory).unwrap();
     assert!(!report.has_alarms());
 
     // B reads A's item, including the secret field.
@@ -92,16 +101,20 @@ fn share_adopt_and_bidirectional_sync_between_real_devices() {
     );
 
     // The per-recipient blob was consumed; adopting again is a clean no-op.
-    assert!(engine::adopt(&session_b, root.path()).unwrap().is_empty());
+    assert!(
+        engine::adopt(&session_b, &root.path().to_string_lossy(), &FsStoreFactory)
+            .unwrap()
+            .is_empty()
+    );
 
     // B edits and pushes; A pulls the edit back.
     vault_b
         .update_item(item_id, &login("GitHub", "rotated-9911"))
         .unwrap();
-    engine::push(&session_b, &vault_b).unwrap();
+    engine::push(&session_b, &vault_b, &FsStoreFactory).unwrap();
     {
         let vault_a = session_a.open_vault(vault_id).unwrap();
-        let back = engine::pull(&session_a, &vault_a).unwrap();
+        let back = engine::pull(&session_a, &vault_a, &FsStoreFactory).unwrap();
         assert_eq!(back.applied, 1, "A applied B's edit");
         assert!(!back.has_alarms());
         let seen = vault_a.get_item(item_id).unwrap();
@@ -155,9 +168,17 @@ fn adopting_a_same_named_vault_is_disambiguated() {
 
     // A shares its "personal" vault to B, who already has a "personal".
     let root = tempfile::tempdir().unwrap();
-    engine::setup(&session_a, personal_a, root.path()).unwrap();
-    engine::share_vault_to_device(&session_a, personal_a, &ident_b.device_id).unwrap();
-    let adopted = engine::adopt(&session_b, root.path()).unwrap();
+    engine::setup(
+        &session_a,
+        personal_a,
+        &root.path().to_string_lossy(),
+        &FsStoreFactory,
+    )
+    .unwrap();
+    engine::share_vault_to_device(&session_a, personal_a, &ident_b.device_id, &FsStoreFactory)
+        .unwrap();
+    let adopted =
+        engine::adopt(&session_b, &root.path().to_string_lossy(), &FsStoreFactory).unwrap();
     assert_eq!(adopted, vec![personal_a]);
 
     // B now has two distinct vault names: its own "personal" and the adopted

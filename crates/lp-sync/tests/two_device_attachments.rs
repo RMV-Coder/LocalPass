@@ -10,6 +10,7 @@
 //! lives in one test function to amortize the cost.
 
 use lp_sync::engine;
+use lp_sync::store::FsStoreFactory;
 use lp_vault::AccountStore;
 use lp_vault::payload::{ItemPayload, TypeData};
 
@@ -54,17 +55,24 @@ fn attachment_syncs_add_delete_tamper_and_pending() {
 
     // A enrolls, pushes the item, and shares the VaultKey to B.
     let root = tempfile::tempdir().unwrap();
-    engine::setup(&session_a, vault_id, root.path()).unwrap();
+    engine::setup(
+        &session_a,
+        vault_id,
+        &root.path().to_string_lossy(),
+        &FsStoreFactory,
+    )
+    .unwrap();
     {
         let vault_a = session_a.open_vault(vault_id).unwrap();
-        engine::push(&session_a, &vault_a).unwrap();
+        engine::push(&session_a, &vault_a, &FsStoreFactory).unwrap();
     }
-    engine::share_vault_to_device(&session_a, vault_id, &ident_b.device_id).unwrap();
+    engine::share_vault_to_device(&session_a, vault_id, &ident_b.device_id, &FsStoreFactory)
+        .unwrap();
 
     // B adopts + pulls: it materializes the item (no attachment yet).
-    engine::adopt(&session_b, root.path()).unwrap();
+    engine::adopt(&session_b, &root.path().to_string_lossy(), &FsStoreFactory).unwrap();
     let vault_b = session_b.open_vault(vault_id).unwrap();
-    engine::pull(&session_b, &vault_b).unwrap();
+    engine::pull(&session_b, &vault_b, &FsStoreFactory).unwrap();
 
     // --- A attaches a file and pushes (metadata op + blob) ------------------
     let att_id = {
@@ -72,13 +80,13 @@ fn attachment_syncs_add_delete_tamper_and_pending() {
         let att = vault_a
             .add_attachment(item_id, "server.pem", ATTACH_BYTES)
             .unwrap();
-        let push = engine::push(&session_a, &vault_a).unwrap();
+        let push = engine::push(&session_a, &vault_a, &FsStoreFactory).unwrap();
         assert_eq!(push.attachments_shipped, 1, "A ships one blob");
         att
     };
 
     // B pulls: gets the AttachAdd op (metadata) AND fetches+verifies the blob.
-    let report = engine::pull(&session_b, &vault_b).unwrap();
+    let report = engine::pull(&session_b, &vault_b, &FsStoreFactory).unwrap();
     assert!(!report.has_alarms(), "clean pull, no alarms");
     assert_eq!(report.attachments_fetched, 1, "B fetched + verified 1 blob");
     assert_eq!(report.attachments_pending, 0);
@@ -90,7 +98,7 @@ fn attachment_syncs_add_delete_tamper_and_pending() {
     assert_eq!(vault_b.list_attachments(item_id).unwrap().len(), 1);
 
     // A pull that re-fetches nothing (already local) is a clean no-op.
-    let again = engine::pull(&session_b, &vault_b).unwrap();
+    let again = engine::pull(&session_b, &vault_b, &FsStoreFactory).unwrap();
     assert_eq!(again.attachments_fetched, 0);
     assert_eq!(again.attachments_pending, 0);
     assert!(!again.has_alarms());
@@ -100,9 +108,9 @@ fn attachment_syncs_add_delete_tamper_and_pending() {
     {
         let vault_a = session_a.open_vault(vault_id).unwrap();
         vault_a.delete_attachment(att_id).unwrap();
-        engine::push(&session_a, &vault_a).unwrap();
+        engine::push(&session_a, &vault_a, &FsStoreFactory).unwrap();
     }
-    let del = engine::pull(&session_b, &vault_b).unwrap();
+    let del = engine::pull(&session_b, &vault_b, &FsStoreFactory).unwrap();
     assert!(!del.has_alarms());
     assert!(
         vault_b.get_attachment(att_id).is_err(),
@@ -132,10 +140,11 @@ fn attachment_syncs_add_delete_tamper_and_pending() {
             Some("device-a"),
         )
         .unwrap();
-    engine::share_vault_to_device(&session_a, vault_id, &ident_c.device_id).unwrap();
-    engine::adopt(&session_c, root.path()).unwrap();
+    engine::share_vault_to_device(&session_a, vault_id, &ident_c.device_id, &FsStoreFactory)
+        .unwrap();
+    engine::adopt(&session_c, &root.path().to_string_lossy(), &FsStoreFactory).unwrap();
     let vault_c = session_c.open_vault(vault_id).unwrap();
-    engine::pull(&session_c, &vault_c).unwrap();
+    engine::pull(&session_c, &vault_c, &FsStoreFactory).unwrap();
 
     // A attaches a fresh file and pushes.
     let att2 = {
@@ -143,7 +152,7 @@ fn attachment_syncs_add_delete_tamper_and_pending() {
         let att = vault_a
             .add_attachment(item_id, "second.bin", b"another-secret-body")
             .unwrap();
-        engine::push(&session_a, &vault_a).unwrap();
+        engine::push(&session_a, &vault_a, &FsStoreFactory).unwrap();
         att
     };
 
@@ -172,7 +181,7 @@ fn attachment_syncs_add_delete_tamper_and_pending() {
     // C pulls: the op (metadata) applies, but the tampered blob fails the hash
     // check → ALARM (surfaced), not silently accepted, and the attachment stays
     // pending (bad bytes never stored).
-    let tampered = engine::pull(&session_c, &vault_c).unwrap();
+    let tampered = engine::pull(&session_c, &vault_c, &FsStoreFactory).unwrap();
     assert!(tampered.has_alarms(), "tampered blob must raise an alarm");
     assert_eq!(tampered.attachments_tampered.len(), 1);
     assert_eq!(tampered.attachments_fetched, 0, "bad bytes never stored");
@@ -187,7 +196,7 @@ fn attachment_syncs_add_delete_tamper_and_pending() {
     // (tampered) blob entirely to simulate "peer hasn't shipped it yet".
     // ========================================================================
     std::fs::remove_file(&blob_path).unwrap();
-    let pending = engine::pull(&session_c, &vault_c).unwrap();
+    let pending = engine::pull(&session_c, &vault_c, &FsStoreFactory).unwrap();
     assert!(!pending.has_alarms(), "a missing blob is NOT an alarm");
     assert_eq!(pending.attachments_pending, 1, "referenced blob is pending");
     assert_eq!(pending.attachments_fetched, 0);
@@ -195,9 +204,9 @@ fn attachment_syncs_add_delete_tamper_and_pending() {
     // A re-pushes the correct blob; a later pull completes the attachment.
     {
         let vault_a = session_a.open_vault(vault_id).unwrap();
-        engine::push(&session_a, &vault_a).unwrap();
+        engine::push(&session_a, &vault_a, &FsStoreFactory).unwrap();
     }
-    let completed = engine::pull(&session_c, &vault_c).unwrap();
+    let completed = engine::pull(&session_c, &vault_c, &FsStoreFactory).unwrap();
     assert!(!completed.has_alarms());
     assert_eq!(
         completed.attachments_fetched, 1,

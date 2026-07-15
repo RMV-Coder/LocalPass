@@ -16,6 +16,7 @@ use std::sync::{Mutex, OnceLock};
 
 use lp_sync::engine;
 use lp_sync::shipping::SyncDir;
+use lp_sync::store::FsStoreFactory;
 use lp_vault::op::{ObservedHeads, OpKind};
 use lp_vault::{Id, ItemId, StoredOp};
 
@@ -59,7 +60,13 @@ fn head_note(vault: &lp_vault::Vault<'_>, item: ItemId) -> Option<String> {
 fn concurrent_edit_vs_higher_lamport_delete_edit_wins() {
     let tv = new_vault();
     let sync_root = tempfile::tempdir().unwrap();
-    engine::setup(&tv.session, tv.vault_id, sync_root.path()).unwrap();
+    engine::setup(
+        &tv.session,
+        tv.vault_id,
+        &sync_root.path().to_string_lossy(),
+        &FsStoreFactory,
+    )
+    .unwrap();
 
     let mut a = PeerDevice::new();
     let mut b = PeerDevice::new();
@@ -92,7 +99,7 @@ fn concurrent_edit_vs_higher_lamport_delete_edit_wins() {
     publish(sync_root.path(), tv.vault_id, &[delete]);
 
     let vault = tv.session.open_vault(tv.vault_id).unwrap();
-    let report = engine::pull(&tv.session, &vault).unwrap();
+    let report = engine::pull(&tv.session, &vault, &FsStoreFactory).unwrap();
     assert!(!report.has_alarms());
 
     // Edit wins despite the delete's higher Lamport: the item is live.
@@ -113,7 +120,13 @@ fn concurrent_edit_vs_higher_lamport_delete_edit_wins() {
 fn causal_delete_after_edit_deletes() {
     let tv = new_vault();
     let sync_root = tempfile::tempdir().unwrap();
-    engine::setup(&tv.session, tv.vault_id, sync_root.path()).unwrap();
+    engine::setup(
+        &tv.session,
+        tv.vault_id,
+        &sync_root.path().to_string_lossy(),
+        &FsStoreFactory,
+    )
+    .unwrap();
 
     let mut a = PeerDevice::new();
     let mut b = PeerDevice::new();
@@ -136,7 +149,7 @@ fn causal_delete_after_edit_deletes() {
     publish(sync_root.path(), tv.vault_id, &[delete]);
 
     let vault = tv.session.open_vault(tv.vault_id).unwrap();
-    engine::pull(&tv.session, &vault).unwrap();
+    engine::pull(&tv.session, &vault, &FsStoreFactory).unwrap();
 
     assert!(
         vault.get_item(item).is_err(),
@@ -158,7 +171,13 @@ fn causal_delete_after_edit_deletes() {
 fn causal_edit_after_delete_revives() {
     let tv = new_vault();
     let sync_root = tempfile::tempdir().unwrap();
-    engine::setup(&tv.session, tv.vault_id, sync_root.path()).unwrap();
+    engine::setup(
+        &tv.session,
+        tv.vault_id,
+        &sync_root.path().to_string_lossy(),
+        &FsStoreFactory,
+    )
+    .unwrap();
 
     let mut a = PeerDevice::new();
     let mut b = PeerDevice::new();
@@ -182,7 +201,7 @@ fn causal_edit_after_delete_revives() {
     publish(sync_root.path(), tv.vault_id, &[revive]);
 
     let vault = tv.session.open_vault(tv.vault_id).unwrap();
-    engine::pull(&tv.session, &vault).unwrap();
+    engine::pull(&tv.session, &vault, &FsStoreFactory).unwrap();
 
     assert_eq!(
         head_note(&vault, item).as_deref(),
@@ -207,7 +226,13 @@ fn causal_edit_after_delete_revives() {
 fn three_device_lamport_vs_happens_before_disagree() {
     let tv = new_vault();
     let sync_root = tempfile::tempdir().unwrap();
-    engine::setup(&tv.session, tv.vault_id, sync_root.path()).unwrap();
+    engine::setup(
+        &tv.session,
+        tv.vault_id,
+        &sync_root.path().to_string_lossy(),
+        &FsStoreFactory,
+    )
+    .unwrap();
 
     let mut a = PeerDevice::new();
     let mut b = PeerDevice::new();
@@ -240,7 +265,7 @@ fn three_device_lamport_vs_happens_before_disagree() {
     publish(sync_root.path(), tv.vault_id, &[delete]);
 
     let vault = tv.session.open_vault(tv.vault_id).unwrap();
-    let report = engine::pull(&tv.session, &vault).unwrap();
+    let report = engine::pull(&tv.session, &vault, &FsStoreFactory).unwrap();
     assert!(!report.has_alarms());
 
     // Happens-before wins: edit and delete are concurrent → item live with B's

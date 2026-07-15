@@ -29,10 +29,15 @@
 //! its only implementation today. §7's semantics live above the seam, so a host
 //! whose user-picked folder is not a filesystem path — Android's Storage Access
 //! Framework hands back a `content://` tree URI, which `std::fs` cannot open —
-//! is a new `impl Store`, not a change to sync.
+//! is a new `impl Store`, not a change to sync. `StoreFactory` is how such a
+//! backend is **selected at runtime**: [`engine`]'s entry points take one and
+//! resolve the vault's enrolled root string through it, so a host outside this
+//! crate injects its backend rather than this crate depending on the host.
 //!
 //! [`engine`] ties them together for the CLI: `setup` / `push` / `pull` /
-//! `status`. [`identity`] provides the export/trust pairing strings + fingerprint.
+//! `status`, each over a caller-supplied `StoreFactory` (desktop passes
+//! `FsStoreFactory`). [`identity`] provides the export/trust pairing strings +
+//! fingerprint.
 //!
 //! ## Convergence guarantee (§4.4)
 //!
