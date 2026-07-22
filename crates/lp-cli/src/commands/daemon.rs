@@ -110,6 +110,7 @@ fn status(profile_dir: &Path, json_out: bool) -> Result<()> {
                     idle_remaining_secs,
                     ssh_agent_endpoint,
                     ssh_identity_count,
+                    ..
                 } => print_status(
                     json_out,
                     true,

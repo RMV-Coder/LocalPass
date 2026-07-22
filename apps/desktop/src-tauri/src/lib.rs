@@ -112,6 +112,8 @@ pub fn run() {
             commands::is_mobile,
             commands::list_peers,
             commands::trust_device,
+            commands::set_pairing_mode,
+            commands::pairing_mode_secs,
             commands::sync_dir_picker_available,
             commands::pick_sync_dir,
             commands::sync_setup,

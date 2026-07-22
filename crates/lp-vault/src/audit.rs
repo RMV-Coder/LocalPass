@@ -134,6 +134,15 @@ pub enum AuditKind {
         /// The now-trusted peer device.
         peer_device_id: DeviceId,
     },
+    /// **Pairing mode was turned on** — the time-boxed window that permits
+    /// pinning a **new** device was opened (`device-pairing.md` §4). Like
+    /// [`UnlockSuccess`](AuditKind::UnlockSuccess)/[`UnlockFailure`](AuditKind::UnlockFailure)
+    /// this is a device-local on/off event that references no id.
+    PairingModeEnabled,
+    /// **Pairing mode was turned off** — the pairing window was closed by the
+    /// user (`device-pairing.md` §4). The unit counterpart of
+    /// [`PairingModeEnabled`](AuditKind::PairingModeEnabled); it carries no id.
+    PairingModeDisabled,
 }
 
 impl AuditKind {
@@ -152,6 +161,8 @@ impl AuditKind {
             AuditKind::Export { .. } => 8,
             AuditKind::VaultShare { .. } => 9,
             AuditKind::DeviceTrust { .. } => 10,
+            AuditKind::PairingModeEnabled => 11,
+            AuditKind::PairingModeDisabled => 12,
         }
     }
 
@@ -170,6 +181,8 @@ impl AuditKind {
             AuditKind::Export { .. } => "export",
             AuditKind::VaultShare { .. } => "vault_share",
             AuditKind::DeviceTrust { .. } => "device_trust",
+            AuditKind::PairingModeEnabled => "pairing_mode_enabled",
+            AuditKind::PairingModeDisabled => "pairing_mode_disabled",
         }
     }
 
@@ -251,7 +264,10 @@ impl AuditRecord {
         // Kind-specific ids/counters, each fixed-width where an id (16 bytes) or
         // an integer (u64 LE), and length-prefixed for the strings.
         match &self.kind {
-            AuditKind::UnlockSuccess | AuditKind::UnlockFailure => {}
+            AuditKind::UnlockSuccess
+            | AuditKind::UnlockFailure
+            | AuditKind::PairingModeEnabled
+            | AuditKind::PairingModeDisabled => {}
             AuditKind::ItemSecretRead {
                 item_id,
                 vault_id,
@@ -388,6 +404,8 @@ pub(crate) fn kind_from_row(
         Some(10) => AuditKind::DeviceTrust {
             peer_device_id: req_id(peer_device_id, "audit row missing peer_device_id")?,
         },
+        Some(11) => AuditKind::PairingModeEnabled,
+        Some(12) => AuditKind::PairingModeDisabled,
         _ => return Err(crate::Error::Invalid("unknown audit kind")),
     };
     Ok(kind)
@@ -495,6 +513,8 @@ mod tests {
             AuditKind::DeviceTrust {
                 peer_device_id: dev(),
             },
+            AuditKind::PairingModeEnabled,
+            AuditKind::PairingModeDisabled,
         ];
         let mut codes: Vec<u8> = kinds.iter().map(AuditKind::code).collect();
         codes.sort_unstable();

@@ -31,6 +31,13 @@ use lp_vault::{AccountStore, Item, Session, Vault, VaultId};
 use crate::protocol::{LockState, Request, Response, WireItem};
 use crate::render;
 
+/// How long **pairing mode** stays open once enabled (`device-pairing.md` §4):
+/// a deliberate, time-boxed **3 minutes**. Trusting a new device is only
+/// accepted inside this window; it lapses on its own so an accidentally-left-on
+/// toggle cannot linger. Off by default, and turning it off never affects an
+/// already-pinned peer (§4 "Does not gate").
+const PAIRING_WINDOW: Duration = Duration::from_secs(180);
+
 /// The daemon's unlocked-or-locked state, guarded by a mutex in the server.
 pub struct State {
     /// The single profile directory this daemon serves.
@@ -50,6 +57,14 @@ pub struct State {
     /// whose user-picked sync root is not a filesystem path (Android's SAF tree
     /// URI), via [`set_store_factory`](Self::set_store_factory).
     store_factory: Arc<dyn StoreFactory>,
+    /// When the current **pairing-mode** window expires, or `None` when pairing
+    /// mode is off (the default). While `Some(t)` and `Instant::now() < t`,
+    /// [`Request::TrustDevice`] may pin a **new** device; otherwise trust is
+    /// refused (`device-pairing.md` §4). Held in memory only — a transient
+    /// session control, never persisted — and it gates *only* new trust, never
+    /// anything an already-pinned peer needs (push/pull, op acceptance, key
+    /// shares, `Status`, `ExportIdentity`, `ListPeers`).
+    pairing_mode_until: Option<Instant>,
 }
 
 impl State {
@@ -82,6 +97,7 @@ impl State {
             last_activity: Instant::now(),
             ssh_agent_endpoint: None,
             store_factory,
+            pairing_mode_until: None,
         }
     }
 
@@ -182,6 +198,47 @@ impl State {
         }
         let elapsed = self.last_activity.elapsed();
         Some(self.autolock.saturating_sub(elapsed).as_secs())
+    }
+
+    /// Open or close the **pairing-mode** window (`device-pairing.md` §4).
+    ///
+    /// `on = true` opens a fresh `PAIRING_WINDOW` window
+    /// (`Instant::now() + PAIRING_WINDOW`); `on = false` closes it immediately.
+    /// While the window is open, [`Request::TrustDevice`] may pin a **new**
+    /// device; closed, trust is refused. This only affects *new* trust — it
+    /// never touches an already-pinned peer or any sync operation.
+    pub fn set_pairing_mode(&mut self, on: bool) {
+        self.pairing_mode_until = if on {
+            Some(Instant::now() + PAIRING_WINDOW)
+        } else {
+            None
+        };
+    }
+
+    /// Whether pairing mode is currently open: `true` iff a window is set and
+    /// has not yet elapsed. Expiry is lazy — a window that has passed reads as
+    /// closed without any explicit clear.
+    #[must_use]
+    pub fn pairing_mode_active(&self) -> bool {
+        matches!(self.pairing_mode_until, Some(t) if Instant::now() < t)
+    }
+
+    /// Whole seconds remaining in the open pairing-mode window, or `None` when
+    /// pairing mode is off or has expired. Reported by [`Response::Status`] so
+    /// the UI can render a live countdown.
+    #[must_use]
+    pub fn pairing_mode_remaining_secs(&self) -> Option<u64> {
+        match self.pairing_mode_until {
+            Some(t) => {
+                let now = Instant::now();
+                if now < t {
+                    Some(t.saturating_duration_since(now).as_secs())
+                } else {
+                    None
+                }
+            }
+            None => None,
+        }
     }
 
     /// Reset the idle timer (called after every successful request).
@@ -403,6 +460,7 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
                 idle_remaining_secs: state.idle_remaining_secs(),
                 ssh_agent_endpoint: state.ssh_agent_endpoint.clone(),
                 ssh_identity_count,
+                pairing_mode_secs: state.pairing_mode_remaining_secs(),
             })
         }
 
@@ -656,19 +714,39 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
 
         Request::ListPeers { .. } => with_session(state, crate::sync::list_peers),
 
+        // Pairing mode (`device-pairing.md` §4): open/close the time-boxed
+        // window that gates NEW trust. Requires an unlocked session (the toggle
+        // is audited). Grab the enabled flag, then in one `with_session` closure
+        // flip the pairing window and record the audit through the session — but
+        // `set_pairing_mode` needs `&mut state`, which `with_session` borrows, so
+        // it is applied *after* the closure returns, driven by a small marker the
+        // closure produces (see the match below).
+        Request::SetPairingMode { enabled, .. } => handle_set_pairing_mode(state, enabled),
+
         Request::TrustDevice {
             identity_string,
             expected_fingerprint,
             label,
             ..
-        } => with_session(state, |session| {
-            crate::sync::trust_device(
-                session,
-                &identity_string,
-                &expected_fingerprint,
-                label.as_deref(),
-            )
-        }),
+        } => {
+            // Gate NEW trust on an open pairing-mode window (§4, the load-bearing
+            // part). Off/expired → refuse before touching the trust logic; the
+            // ceremony itself (fingerprint re-check + pin) is unchanged.
+            if !state.pairing_mode_active() {
+                Handled::reply(usage(
+                    "Pairing mode is off. Turn it on in Devices & Sync to trust a new device.",
+                ))
+            } else {
+                with_session(state, |session| {
+                    crate::sync::trust_device(
+                        session,
+                        &identity_string,
+                        &expected_fingerprint,
+                        label.as_deref(),
+                    )
+                })
+            }
+        }
 
         // --- Vault sync (sync-protocol.md §5/§7) ---------------------------
         // Each arm takes its own handle on the injected channel backend before
@@ -809,6 +887,7 @@ fn request_profile(request: &Request) -> Option<&str> {
         | Request::ExportIdentity { profile }
         | Request::ListPeers { profile }
         | Request::TrustDevice { profile, .. }
+        | Request::SetPairingMode { profile, .. }
         | Request::SyncSetup { profile, .. }
         | Request::SyncPush { profile, .. }
         | Request::SyncPull { profile, .. }
@@ -835,6 +914,43 @@ where
         Ok(r) | Err(r) => r,
     };
     Handled::reply(resp)
+}
+
+/// Handle [`Request::SetPairingMode`]: flip the in-memory pairing-mode window
+/// (`device-pairing.md` §4) and record the toggle in the audit log.
+///
+/// Requires an unlocked session: the audit log lives in the account store, and
+/// recording the toggle (PRD §4.9) is precisely what makes opening the window a
+/// deliberate, auditable act. A locked daemon answers [`Response::Locked`].
+///
+/// The audit write is **best-effort** — a logging failure must not stop the
+/// toggle from taking effect, since the security gate is the in-memory window
+/// itself, not the log line.
+///
+/// # Borrow discipline
+///
+/// [`State::set_pairing_mode`] needs `&mut state`, but the session is borrowed
+/// *from* `state`. So the audit is recorded through the `&Session` first, inside
+/// a block that ends that borrow; only then is `state` mutated. No overlap, no
+/// `unsafe` — the same shape the `Sync*` handlers use to take what they need
+/// before `with_session`.
+fn handle_set_pairing_mode(state: &mut State, enabled: bool) -> Handled {
+    // Record the toggle through the unlocked session, then let the borrow end.
+    {
+        let Some(session) = state.session_ref() else {
+            return Handled::reply(Response::Locked);
+        };
+        let kind = if enabled {
+            lp_vault::AuditKind::PairingModeEnabled
+        } else {
+            lp_vault::AuditKind::PairingModeDisabled
+        };
+        // Best-effort: a failed audit write never blocks the toggle.
+        session.record_audit(kind, None).ok();
+    }
+    // The `&Session` borrow has ended — now flip the pairing-mode window.
+    state.set_pairing_mode(enabled);
+    Handled::reply(Response::Ok { message: None })
 }
 
 /// Perform an unlock: derive keys and stash the session, or report the failure.

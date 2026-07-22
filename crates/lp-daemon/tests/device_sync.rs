@@ -57,6 +57,23 @@ fn export_identity(state: &mut State, profile: &std::path::Path) -> (String, Str
     }
 }
 
+/// Open the pairing-mode window so a following `TrustDevice` is accepted
+/// (device-pairing.md §4 — trust of a new device is refused unless pairing mode
+/// is on). Idempotent; each call resets the 3-minute window.
+fn enable_pairing_mode(state: &mut State, profile: &std::path::Path) {
+    let handled = engine::handle(
+        state,
+        Request::SetPairingMode {
+            profile: profile_str(profile),
+            enabled: true,
+        },
+    );
+    assert!(
+        matches!(handled.response, Response::Ok { .. }),
+        "enabling pairing mode should succeed on an unlocked session"
+    );
+}
+
 #[test]
 fn export_identity_returns_a_parseable_lpdev1_string() {
     let tmp = tempfile::tempdir().unwrap();
@@ -89,6 +106,7 @@ fn trust_with_matching_fingerprint_succeeds_and_lists() {
     let (b_id, b_identity, b_fp) = export_identity(&mut b, &profile_b);
 
     // A trusts B with the correct fingerprint → PeerTrusted.
+    enable_pairing_mode(&mut a, &profile_a);
     let handled = engine::handle(
         &mut a,
         Request::TrustDevice {
@@ -141,6 +159,10 @@ fn trust_with_wrong_fingerprint_is_refused() {
 
     let (_b_id, b_identity, _b_fp) = export_identity(&mut b, &profile_b);
 
+    // Pairing mode on, so these refusals exercise the fingerprint check itself
+    // (not the pairing gate).
+    enable_pairing_mode(&mut a, &profile_a);
+
     // A wrong (but well-formed) fingerprint → refused, and nothing is trusted.
     let handled = engine::handle(
         &mut a,
@@ -191,6 +213,7 @@ fn trust_with_garbage_identity_string_errors() {
     let mut state = State::new(profile.clone(), Duration::from_secs(600));
     create_account(&mut state, &profile);
 
+    enable_pairing_mode(&mut state, &profile);
     let handled = engine::handle(
         &mut state,
         Request::TrustDevice {
@@ -251,6 +274,7 @@ fn two_device_share_adopt_and_bidirectional_sync_through_daemons() {
         (&mut a, &profile_a, &b_identity, &b_fp, &b_id),
         (&mut b, &profile_b, &a_identity, &a_fp, &a_id),
     ] {
+        enable_pairing_mode(state, profile);
         let handled = engine::handle(
             state,
             Request::TrustDevice {
@@ -407,4 +431,54 @@ fn two_device_share_adopt_and_bidirectional_sync_through_daemons() {
         }
         other => panic!("expected Item, got {}", other.kind()),
     }
+}
+
+#[test]
+fn trust_is_refused_when_pairing_mode_is_off() {
+    // The pairing-mode gate itself (device-pairing.md §4): with pairing mode off
+    // (the default), a `TrustDevice` carrying the CORRECT fingerprint is still
+    // refused; enabling pairing mode makes the same trust succeed. This is the
+    // load-bearing behaviour — the QR/scan flows only fill the identity box, the
+    // gate is what decides whether a new device may be pinned.
+    let tmp_a = tempfile::tempdir().unwrap();
+    let tmp_b = tempfile::tempdir().unwrap();
+    let (profile_a, profile_b) = (tmp_a.path().to_path_buf(), tmp_b.path().to_path_buf());
+    let mut a = State::new(profile_a.clone(), Duration::from_secs(600));
+    let mut b = State::new(profile_b.clone(), Duration::from_secs(600));
+    create_account(&mut a, &profile_a);
+    create_account(&mut b, &profile_b);
+    let (_b_id, b_identity, b_fp) = export_identity(&mut b, &profile_b);
+
+    // Pairing mode OFF (default): refused even with the right fingerprint.
+    let refused = engine::handle(
+        &mut a,
+        Request::TrustDevice {
+            profile: profile_str(&profile_a),
+            identity_string: b_identity.clone(),
+            expected_fingerprint: b_fp.clone(),
+            label: None,
+        },
+    );
+    assert!(
+        matches!(refused.response, Response::Error { .. }),
+        "trust must be refused while pairing mode is off, got {}",
+        refused.response.kind()
+    );
+
+    // Enable pairing mode → the identical trust now succeeds.
+    enable_pairing_mode(&mut a, &profile_a);
+    let ok = engine::handle(
+        &mut a,
+        Request::TrustDevice {
+            profile: profile_str(&profile_a),
+            identity_string: b_identity,
+            expected_fingerprint: b_fp,
+            label: None,
+        },
+    );
+    assert!(
+        matches!(ok.response, Response::PeerTrusted { .. }),
+        "trust should succeed once pairing mode is on, got {}",
+        ok.response.kind()
+    );
 }

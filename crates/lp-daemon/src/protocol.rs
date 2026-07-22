@@ -328,6 +328,19 @@ pub enum Request {
         /// An optional human label for the peer ("laptop").
         label: Option<String>,
     },
+    /// **Device pairing:** open or close this device's **pairing-mode** window
+    /// (`device-pairing.md` §4). While open (a time-boxed 3-minute window),
+    /// [`TrustDevice`](Request::TrustDevice) may pin a **new** device; while off
+    /// (the default) or expired, trusting a new device is refused. It gates
+    /// **only** new trust — never anything an already-pinned peer needs (push,
+    /// pull, op acceptance, key shares). Requires an unlocked session (the toggle
+    /// is recorded in the audit log). Answered by [`Response::Ok`].
+    SetPairingMode {
+        /// The profile directory being operated on.
+        profile: String,
+        /// `true` opens the window; `false` closes it immediately.
+        enabled: bool,
+    },
     /// **Sync:** enroll a vault for file-based sync under a shared directory
     /// (`localpass sync setup`). Answered by [`Response::Ok`].
     SyncSetup {
@@ -493,6 +506,7 @@ impl Request {
             Request::ExportIdentity { .. } => "ExportIdentity",
             Request::ListPeers { .. } => "ListPeers",
             Request::TrustDevice { .. } => "TrustDevice",
+            Request::SetPairingMode { .. } => "SetPairingMode",
             Request::SyncSetup { .. } => "SyncSetup",
             Request::SyncPush { .. } => "SyncPush",
             Request::SyncPull { .. } => "SyncPull",
@@ -736,6 +750,10 @@ pub enum Response {
         /// How many SSH identities the agent is currently serving (0 when locked
         /// or when the agent is disabled).
         ssh_identity_count: usize,
+        /// Whole seconds remaining in the open **pairing-mode** window
+        /// (`device-pairing.md` §4), or `None` when pairing mode is off/expired.
+        /// The GUI/CLI render this as a live countdown; `None` means "off".
+        pairing_mode_secs: Option<u64>,
     },
     /// A generic "did it" acknowledgement (Unlock, Lock, mutations).
     Ok {

@@ -116,6 +116,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Kit(args) => commands::kit::run(&profile_dir, src, args),
         Command::Sync { command } => commands::sync::run(&profile_dir, src, command),
         Command::Device { command } => commands::device::run(&profile_dir, src, command),
+        Command::Pairing { command } => commands::pairing::run(&profile_dir, no_daemon, command),
         Command::Ssh { command } => commands::ssh::run(&profile_dir, src, no_daemon, command),
         Command::Totp(args) => commands::totp::run(&profile_dir, src, no_daemon, args),
         Command::Audit(args) => commands::audit::run(&profile_dir, src, args),
