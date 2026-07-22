@@ -142,6 +142,18 @@ export interface PeerView {
   verified_at: number;
 }
 
+/** One announced-but-untrusted device from a shared folder's `pairing/` list
+ *  (device-pairing.md §5). All fields are PUBLIC. The announce channel is
+ *  untrusted (§5.2): this is a discovery hint the user still confirms
+ *  out-of-band before trusting — "Use for trust" only fills the trust box. */
+export interface PendingDeviceView {
+  device_id: string;
+  identity_string: string;
+  fingerprint: string;
+  label: string | null;
+  announced_at: number;
+}
+
 export interface SyncPushView {
   published: number;
   segments_written: number;

@@ -122,6 +122,7 @@ pub fn run() {
             commands::sync_status,
             commands::share_vault_to_device,
             commands::sync_adopt,
+            commands::list_pending_devices,
             commands::add_attachment,
             commands::list_attachments,
             commands::get_attachment,

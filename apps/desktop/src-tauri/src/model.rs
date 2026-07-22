@@ -276,6 +276,27 @@ pub struct SyncAdoptView {
     pub alarms: Vec<String>,
 }
 
+/// One announced-but-untrusted device for the Devices screen's "Pending
+/// devices" panel (`device-pairing.md` §5). All fields are **public** (public
+/// key material + a hash). The announce channel is untrusted (§5.2): a row here
+/// is a discovery hint the user still confirms out-of-band before trusting —
+/// "Use for trust" only fills the trust box, it never pins.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PendingDeviceView {
+    /// The announcing device's id (hyphenated UUID), derived from its identity
+    /// string (never trusted from the announce file name).
+    pub device_id: String,
+    /// The announcing device's public `LPDEV1-…` identity string — what the
+    /// "Use for trust" button drops into the trust box.
+    pub identity_string: String,
+    /// The out-of-band comparison fingerprint (`xxxx-xxxx-xxxx-xxxx`).
+    pub fingerprint: String,
+    /// An optional label the device announced (advisory, untrusted).
+    pub label: Option<String>,
+    /// When the device announced itself (unix millis).
+    pub announced_at: u64,
+}
+
 /// One attachment row for the ItemDetail Attachments section.
 ///
 /// Carries **no blob bytes** — just the id, filename, and plaintext size. The

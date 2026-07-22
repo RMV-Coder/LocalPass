@@ -24,6 +24,7 @@ import type {
   NewItemInput,
   PasswordHealthView,
   PeerView,
+  PendingDeviceView,
   SessionState,
   SyncAdoptView,
   SyncPullView,
@@ -262,6 +263,16 @@ export function shareVaultToDevice(vault: string, deviceId: string): Promise<voi
 /** Adopt vaults shared to this device from a folder, then pull each. */
 export function syncAdopt(dir: string): Promise<SyncAdoptView> {
   return invoke<SyncAdoptView>("sync_adopt", { dir });
+}
+
+/** List the announced-but-untrusted devices under a shared folder's `pairing/`
+ *  folder (device-pairing.md §5 — the typing-free pairing path). The daemon
+ *  filters out this device and every already-trusted peer. UNTRUSTED (§5.2):
+ *  each row is a discovery hint — trusting still goes through `trustDevice`
+ *  (fingerprint compare + pairing-mode gate). An empty/not-enrolled `dir`
+ *  resolves to an empty list, so it is safe to call whenever a folder is set. */
+export function listPendingDevices(dir: string): Promise<PendingDeviceView[]> {
+  return invoke<PendingDeviceView[]>("list_pending_devices", { dir });
 }
 
 // --- Attachments ---------------------------------------------------------

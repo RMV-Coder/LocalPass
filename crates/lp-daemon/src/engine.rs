@@ -801,6 +801,16 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
             })
         }
 
+        // Channel announce (`device-pairing.md` §5): list the announced-but-
+        // untrusted devices under the folder's `pairing/` dir. Untrusted (§5.2):
+        // it only populates a list — trusting still goes through TrustDevice.
+        Request::ListPendingDevices { dir, .. } => {
+            let factory = state.store_factory();
+            with_session(state, |session| {
+                crate::sync::list_pending_devices(session, &dir, factory.as_ref())
+            })
+        }
+
         // --- Attachments (path-based; no blob bytes cross the pipe) ---------
         Request::AddAttachment {
             vault,
@@ -894,6 +904,7 @@ fn request_profile(request: &Request) -> Option<&str> {
         | Request::SyncStatus { profile, .. }
         | Request::ShareVaultToDevice { profile, .. }
         | Request::SyncAdopt { profile, .. }
+        | Request::ListPendingDevices { profile, .. }
         | Request::AddAttachment { profile, .. }
         | Request::ListAttachments { profile, .. }
         | Request::GetAttachment { profile, .. }
