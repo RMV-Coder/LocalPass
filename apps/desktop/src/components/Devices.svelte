@@ -40,6 +40,7 @@
     VaultView,
   } from "../lib/types";
   import { previewFingerprint } from "../lib/api";
+  import CameraScan from "./CameraScan.svelte";
   import { copyToClipboard } from "../lib/clipboard";
   import { formatTimestamp } from "../lib/format";
   import { toast } from "../lib/toast";
@@ -176,11 +177,30 @@
   }
 
   // --- Scan a peer's pairing QR (device-pairing.md §3.3/§3.4) ---
-  // Mobile only — desktop links no camera plugin, so the button must not exist
-  // there. Answered by the backend from cfg(mobile), never a user-agent sniff.
+  // `mobile` (answered by the backend from cfg(mobile), never a user-agent
+  // sniff) selects the scan backend: the native camera plugin on Android/iOS,
+  // the webcam via getUserMedia (the CameraScan modal) on desktop. Either way a
+  // scan only FILLS the identity box — trust still needs the fingerprint compare.
   let mobile = $state(false);
   let scanBusy = $state(false);
   let scanError = $state("");
+  let showCamera = $state(false); // desktop webcam modal open
+
+  // Dispatch the Scan button to the right backend for this platform.
+  function startScan() {
+    scanError = "";
+    if (mobile) {
+      doScan();
+    } else {
+      showCamera = true;
+    }
+  }
+
+  // Desktop: the CameraScan modal decoded a QR. Same effect as a paste.
+  function onCameraDetected(data: string) {
+    showCamera = false;
+    pasted = data; // → fingerprint preview re-runs, confirmation resets
+  }
 
   async function loadIsMobile() {
     try {
@@ -448,24 +468,22 @@
   <section class="panel" aria-labelledby="trust-h">
     <h3 id="trust-h">Trust a device</h3>
     <p class="muted">
-      {#if mobile}Scan the other device's QR code, or paste its identity string.
-      {:else}Paste the other device's identity string.{/if}
+      Scan the other device's QR code, or paste its identity string.
       Then compare the fingerprint
       below against what that device shows — they must match <strong>exactly</strong>.
       Confirm the match to enable Trust. Never trust a device whose fingerprint
       you have not compared out-of-band.
     </p>
 
-    <!-- Mobile only: scanning is a transport for the identity string — it fills
-         the box below exactly as a paste would, and re-arms the fingerprint
-         confirmation. It never trusts on its own (device-pairing.md §3.3). -->
-    {#if mobile}
-      <button type="button" class="btn" onclick={doScan} disabled={scanBusy}>
-        {scanBusy ? "Scanning…" : "Scan QR code"}
-      </button>
-      {#if scanError}
-        <div class="error" role="alert">{scanError}</div>
-      {/if}
+    <!-- Scanning is a transport for the identity string — it fills the box below
+         exactly as a paste would, and re-arms the fingerprint confirmation. It
+         never trusts on its own (device-pairing.md §3.3). Mobile uses the native
+         camera plugin; desktop uses the webcam via getUserMedia. -->
+    <button type="button" class="btn" onclick={startScan} disabled={scanBusy}>
+      {scanBusy ? "Scanning…" : "Scan QR code"}
+    </button>
+    {#if scanError}
+      <div class="error" role="alert">{scanError}</div>
     {/if}
 
     <form onsubmit={submitTrust}>
@@ -708,6 +726,11 @@
     </button>
   </section>
 </div>
+
+<!-- Desktop webcam scanner. Decoding fills the identity box; it never trusts. -->
+{#if showCamera}
+  <CameraScan onDetected={onCameraDetected} onClose={() => (showCamera = false)} />
+{/if}
 
 <style>
   .panel {
