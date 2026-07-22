@@ -202,7 +202,7 @@ impl State {
 
     /// Open or close the **pairing-mode** window (`device-pairing.md` §4).
     ///
-    /// `on = true` opens a fresh [`PAIRING_WINDOW`] window
+    /// `on = true` opens a fresh `PAIRING_WINDOW` window
     /// (`Instant::now() + PAIRING_WINDOW`); `on = false` closes it immediately.
     /// While the window is open, [`Request::TrustDevice`] may pin a **new**
     /// device; closed, trust is refused. This only affects *new* trust — it
