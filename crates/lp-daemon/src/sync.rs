@@ -33,13 +33,15 @@
 //! The `dir` strings below are the host's **opaque** roots — passed through
 //! verbatim, never path-normalized.
 
+use std::collections::BTreeSet;
+
 use lp_sync::engine;
 use lp_sync::identity::DeviceIdentity;
 use lp_sync::store::StoreFactory;
 use lp_vault::ids::{DeviceId, Id};
 use lp_vault::{Session, Vault};
 
-use crate::protocol::{Response, WireAdoptedVault, WirePeer, WireSyncDevice};
+use crate::protocol::{Response, WireAdoptedVault, WirePeer, WirePendingDevice, WireSyncDevice};
 
 /// Build a usage-style (non-auth, secret-free) error response.
 fn usage(message: impl Into<String>) -> Response {
@@ -175,6 +177,30 @@ pub(crate) fn trust_device(
     })
 }
 
+/// Write (or refresh) this device's channel announce at the sync `root`
+/// (`device-pairing.md` §5.1), **best-effort**.
+///
+/// The announce is advisory (§5.2): it only lets a peer pointed at the same
+/// folder surface this device as a *pending* entry — it never pins anything. So
+/// a failure here must **not** fail the setup/push that triggered it; pairing
+/// still works via QR/paste, and a missing announce just means this device does
+/// not auto-appear as pending. Every error is therefore captured and ignored.
+///
+/// Label is `None` for now: a device self-name is a future nicety; the
+/// fingerprint (derived from the identity string) is the real identifier.
+///
+/// `announced_at` uses the daemon-appropriate wall clock
+/// ([`lp_vault::db::now_millis`], the same source the audit log stamps with),
+/// coerced to the announce's `u64` millis.
+fn write_self_announce(session: &Session, root: &str, factory: &dyn StoreFactory) {
+    let identity = DeviceIdentity::from(session.device_public_identity());
+    let announced_at = u64::try_from(lp_vault::db::now_millis()).unwrap_or(0);
+    // Best-effort: open the channel and write; swallow any error (§5.2 advisory).
+    if let Ok(store) = factory.open(root) {
+        lp_sync::announce::write_announce(store.as_ref(), &identity, None, announced_at).ok();
+    }
+}
+
 /// [`crate::protocol::Request::SyncSetup`]: enroll a vault under a shared dir.
 pub(crate) fn sync_setup(
     session: &Session,
@@ -183,6 +209,10 @@ pub(crate) fn sync_setup(
     factory: &dyn StoreFactory,
 ) -> Result<Response, Response> {
     engine::setup(session, vault.vault_id(), dir, factory).map_err(map_sync_error)?;
+    // Announce this device on the shared channel (§5.1) so a peer pointed at the
+    // same folder can pick it up as a pending device with no typing. Best-effort
+    // (§5.2 — advisory), so it never fails the enrollment.
+    write_self_announce(session, dir, factory);
     Ok(Response::Ok {
         message: Some("enrolled for sync".into()),
     })
@@ -195,6 +225,11 @@ pub(crate) fn sync_push(
     factory: &dyn StoreFactory,
 ) -> Result<Response, Response> {
     let report = engine::push(session, vault, factory).map_err(map_sync_error)?;
+    // Refresh this device's announce (bumps `announced_at`) on the enrolled root
+    // (§5.1). Best-effort (§5.2 — advisory): a failure never fails the push.
+    if let Ok(Some(root)) = engine::enrolled_root(session, vault.vault_id()) {
+        write_self_announce(session, &root, factory);
+    }
     Ok(Response::SyncPushed {
         published: report.published.len(),
         segments_written: report.segments_written,
@@ -296,6 +331,71 @@ pub(crate) fn sync_adopt(
         applied_total,
         alarms,
     })
+}
+
+/// [`crate::protocol::Request::ListPendingDevices`]: the announced-but-untrusted
+/// devices under `dir`'s `pairing/` folder (`device-pairing.md` §5).
+///
+/// Lists the announces (§5.1), then **filters out** (a) this device's own id and
+/// (b) every already-trusted peer id, so only genuinely-pending devices remain.
+/// Each survivor is rendered with its fingerprint (derived from the parsed
+/// identity string) for the out-of-band compare.
+///
+/// The channel is untrusted (§5.2): this only populates a list — the user still
+/// confirms the fingerprint and trusts via [`trust_device`], which is unchanged.
+/// An empty/unopenable/not-enrolled `dir` yields an empty list, never an error
+/// (the GUI calls this whenever a folder is set).
+pub(crate) fn list_pending_devices(
+    session: &Session,
+    dir: &str,
+    factory: &dyn StoreFactory,
+) -> Result<Response, Response> {
+    // An empty or unopenable root is simply "nothing pending" — not an error.
+    if dir.trim().is_empty() {
+        return Ok(Response::PendingDevices {
+            devices: Vec::new(),
+        });
+    }
+    let Ok(store) = factory.open(dir) else {
+        return Ok(Response::PendingDevices {
+            devices: Vec::new(),
+        });
+    };
+    // A read failure on the untrusted channel is likewise "nothing pending".
+    let Ok(announces) = lp_sync::announce::list_announces(store.as_ref()) else {
+        return Ok(Response::PendingDevices {
+            devices: Vec::new(),
+        });
+    };
+
+    // Filter set: this device's own id + every already-trusted peer id.
+    let self_id = *session.device_public_identity().device_id.as_bytes();
+    let trusted: BTreeSet<[u8; 16]> = session
+        .peer_devices()
+        .map_err(|e| usage(format!("could not read trusted devices: {e}")))?
+        .into_iter()
+        .map(|p| *p.device_id.as_bytes())
+        .collect();
+
+    let mut devices = Vec::new();
+    for a in announces {
+        let id_bytes = *a.device_id.as_bytes();
+        if id_bytes == self_id || trusted.contains(&id_bytes) {
+            continue;
+        }
+        // Derive the fingerprint from the (already-validated) identity string.
+        let Ok(identity) = DeviceIdentity::from_export_string(&a.identity) else {
+            continue;
+        };
+        devices.push(WirePendingDevice {
+            device_id: a.device_id.to_hyphenated(),
+            identity_string: a.identity,
+            fingerprint: identity.fingerprint(),
+            label: a.label,
+            announced_at: a.announced_at,
+        });
+    }
+    Ok(Response::PendingDevices { devices })
 }
 
 #[cfg(test)]

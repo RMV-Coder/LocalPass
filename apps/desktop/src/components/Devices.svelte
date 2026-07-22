@@ -34,10 +34,12 @@
     syncAdopt,
     syncDirPickerAvailable,
     pickSyncDir,
+    listPendingDevices,
   } from "../lib/api";
   import type {
     DeviceIdentityView,
     PeerView,
+    PendingDeviceView,
     SyncStatusView,
     VaultView,
   } from "../lib/types";
@@ -113,6 +115,15 @@
   let syncResult = $state(""); // human summary of the last push/pull
   let alarms = $state<string[]>([]); // surfaced prominently
   let status = $state<SyncStatusView | null>(null);
+
+  // --- Pending devices (device-pairing.md §5, the typing-free pairing path) ---
+  // Devices that announced themselves in the shared folder but are not yet
+  // trusted. The announce channel is UNTRUSTED (§5.2): this list is only a
+  // discovery hint. "Use for trust" fills the identity box exactly as a paste
+  // would — the fingerprint compare + pairing-mode gate still apply, unchanged.
+  let pending = $state<PendingDeviceView[]>([]);
+  let pendingError = $state("");
+  let pendingBusy = $state(false);
 
   // Share-a-vault panel.
   let shareVault = $state("");
@@ -384,6 +395,9 @@
       await syncSetup(syncVault, syncDir.trim());
       syncResult = "Enrolled for sync.";
       await refreshStatus();
+      // Setup writes this device's announce and surfaces any peers already in
+      // the folder as pending devices (device-pairing.md §5).
+      await refreshPending();
     } catch (err) {
       syncError = typeof err === "string" ? err : "Setup failed.";
     } finally {
@@ -400,6 +414,8 @@
       const r = await syncPush(syncVault);
       syncResult = `Pushed ${r.segments_written} segment(s); ${r.published} device chain(s).`;
       await refreshStatus();
+      // A push refreshes this device's announce; re-scan for any new peers.
+      await refreshPending();
     } catch (err) {
       syncError = typeof err === "string" ? err : "Push failed.";
     } finally {
@@ -425,6 +441,36 @@
     } finally {
       syncBusy = false;
     }
+  }
+
+  /** Re-scan the shared folder's `pairing/` list (device-pairing.md §5). Gated
+   *  on a configured folder; an empty folder just clears the list. Untrusted
+   *  (§5.2) — it only populates the list, never pins. */
+  async function refreshPending(dir: string = syncDir) {
+    const d = dir.trim();
+    if (!d) {
+      pending = [];
+      pendingError = "";
+      return;
+    }
+    pendingBusy = true;
+    pendingError = "";
+    try {
+      pending = await listPendingDevices(d);
+    } catch (err) {
+      pendingError = typeof err === "string" ? err : "Could not list pending devices.";
+      pending = [];
+    } finally {
+      pendingBusy = false;
+    }
+  }
+
+  /** "Use for trust": drop a pending device's identity string into the trust box.
+   *  This reuses the existing `pasted` effect — it re-derives the fingerprint and
+   *  resets the confirm checkbox — so the user still compares the fingerprint and
+   *  confirms exactly as today. It never auto-trusts (device-pairing.md §5.2). */
+  function usePendingForTrust(identityString: string) {
+    pasted = identityString;
   }
 
   async function refreshStatus(vaultId: string = syncVault) {
@@ -485,6 +531,7 @@
     loadPeers();
     refreshPairing();
     refreshStatus(fallback);
+    refreshPending();
   });
 </script>
 
@@ -666,6 +713,55 @@
         {trustBusy ? "Trusting…" : "Trust this device"}
       </button>
     </form>
+  </section>
+
+  <!-- Pending devices (device-pairing.md §5): the typing-free pairing path.
+       Devices that dropped an announce in the shared folder but are not trusted
+       yet. The announce channel is UNTRUSTED (§5.2) — a row proves nothing;
+       "Use for trust" only fills the identity box, and the fingerprint compare +
+       pairing-mode gate still apply before anything is pinned. -->
+  <section class="panel" aria-labelledby="pending-h">
+    <div class="pending-head">
+      <h3 id="pending-h">Pending devices</h3>
+      <button
+        class="btn btn-small"
+        onclick={() => refreshPending()}
+        disabled={pendingBusy || !syncDir.trim()}
+      >
+        {pendingBusy ? "…" : "Refresh"}
+      </button>
+    </div>
+    <p class="muted">
+      Devices that announced themselves in the shared sync folder but you have not
+      trusted yet. These are <strong>unconfirmed</strong>: the folder is untrusted, so a
+      listing here proves nothing on its own. Pick one to fill the trust box above,
+      then compare its fingerprint against that device's screen before trusting —
+      exactly as for a pasted string.
+    </p>
+    {#if !syncDir.trim()}
+      <p class="empty">Set a shared folder in “Sync a vault” below to see announced devices.</p>
+    {:else if pendingError}
+      <div class="error" role="alert">{pendingError}</div>
+    {:else if pending.length === 0}
+      <p class="empty">No untrusted devices have announced in that folder.</p>
+    {:else}
+      <ul class="peer-list">
+        {#each pending as d (d.device_id)}
+          <li>
+            <div class="peer-main">
+              <span class="mono fp">{d.fingerprint}</span>
+              <span class="muted peer-when">
+                <span class="mono">{d.device_id.slice(0, 8)}…</span>{#if d.label}
+                  · {d.label}{/if} · announced {formatTimestamp(d.announced_at)}
+              </span>
+            </div>
+            <button class="btn btn-small" onclick={() => usePendingForTrust(d.identity_string)}>
+              Use for trust
+            </button>
+          </li>
+        {/each}
+      </ul>
+    {/if}
   </section>
 
   <!-- Trusted devices -->
@@ -942,6 +1038,17 @@
     gap: 0.5em;
     font-weight: 400;
     margin: 0.5rem 0 0.8rem;
+  }
+  /* "Pending devices" header row: the title with its Refresh button pushed to
+     the right. */
+  .pending-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+  }
+  .pending-head h3 {
+    margin: 0;
   }
   .peer-list {
     list-style: none;

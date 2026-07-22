@@ -34,8 +34,8 @@ use crate::daemon::{self, DaemonError};
 use crate::item_input::{self, NewItemInput};
 use crate::model::{
     self, AdoptedVaultView, CreatedAccount, DeviceIdentityView, GeneratedView, ItemSummaryView,
-    ItemView, PeerView, SessionState, SyncAdoptView, SyncDeviceView, SyncPullView, SyncPushView,
-    SyncStatusView, TotpView, VaultView,
+    ItemView, PeerView, PendingDeviceView, SessionState, SyncAdoptView, SyncDeviceView,
+    SyncPullView, SyncPushView, SyncStatusView, TotpView, VaultView,
 };
 
 /// Map a [`DaemonError`] into the `SessionState`-flavoured error the UI shows.
@@ -905,6 +905,37 @@ pub fn sync_adopt(dir: String) -> Result<SyncAdoptView, String> {
             applied_total,
             alarms,
         }),
+        other => Err(format!("unexpected daemon response: {}", other.kind())),
+    }
+}
+
+/// List the announced-but-untrusted devices under `dir`'s `pairing/` folder
+/// (`device-pairing.md` §5 — the typing-free pairing path). The daemon reads the
+/// untrusted announce channel, filters out this device and every already-trusted
+/// peer, and returns each remaining device with its fingerprint.
+///
+/// Nothing here is a secret, and nothing here pins: the announce channel is
+/// untrusted (§5.2), so a row is only a discovery hint. Trusting still goes
+/// through [`trust_device`] (with the fingerprint compare + pairing-mode gate),
+/// exactly as for a pasted string. An empty/not-enrolled `dir` returns an empty
+/// list rather than erroring, so the UI can call it whenever a folder is set.
+#[tauri::command]
+pub fn list_pending_devices(dir: String) -> Result<Vec<PendingDeviceView>, String> {
+    let profile = daemon::profile_string()?;
+    let resp =
+        daemon::call(&Request::ListPendingDevices { profile, dir }).map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    match resp {
+        Response::PendingDevices { devices } => Ok(devices
+            .into_iter()
+            .map(|d| PendingDeviceView {
+                device_id: d.device_id,
+                identity_string: d.identity_string,
+                fingerprint: d.fingerprint,
+                label: d.label,
+                announced_at: d.announced_at,
+            })
+            .collect()),
         other => Err(format!("unexpected daemon response: {}", other.kind())),
     }
 }

@@ -37,7 +37,10 @@
 //! [`engine`] ties them together for the CLI: `setup` / `push` / `pull` /
 //! `status`, each over a caller-supplied `StoreFactory` (desktop passes
 //! `FsStoreFactory`). [`identity`] provides the export/trust pairing strings +
-//! fingerprint.
+//! fingerprint, and [`announce`] the typing-free **channel announce** pairing
+//! path (`docs/specs/device-pairing.md` §5): each device drops its public
+//! identity under `pairing/` at the sync root and reads the others' as
+//! **untrusted** discovery hints (§5.2), never as a pin.
 //!
 //! ## Convergence guarantee (§4.4)
 //!
@@ -68,6 +71,7 @@
 //! peer's own AccountKey. AADs bind vault id + recipient device id, so a blob
 //! cannot be replayed for a different vault or presented to a different device.
 
+pub mod announce;
 pub mod engine;
 pub mod error;
 pub mod identity;

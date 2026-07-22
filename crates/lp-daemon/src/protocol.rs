@@ -399,6 +399,23 @@ pub enum Request {
         /// The shared sync-root directory to scan.
         dir: String,
     },
+    /// **Device pairing (channel announce, `device-pairing.md` §5):** list the
+    /// devices that have announced themselves under `dir`'s `pairing/` folder
+    /// but are **not yet trusted** (nor this device itself). Answered by
+    /// [`Response::PendingDevices`].
+    ///
+    /// The announce channel is **untrusted** (§5.2): each returned entry is only
+    /// a discovery hint, never a pin. The user still confirms the fingerprint
+    /// out-of-band and trusts via [`TrustDevice`](Request::TrustDevice) exactly
+    /// as for a pasted string — this request populates a list, nothing more. An
+    /// empty/not-enrolled `dir` yields an empty list rather than an error (the
+    /// GUI calls it whenever a folder is set). Requires an unlocked session.
+    ListPendingDevices {
+        /// The profile directory being operated on.
+        profile: String,
+        /// The shared sync-root directory whose `pairing/` folder to scan.
+        dir: String,
+    },
     /// **Attachments (path-based; no blob bytes cross this channel):** attach a
     /// file to an item. The caller passes a SOURCE file **path**; the daemon
     /// reads that file itself (it is the same user) and stores it encrypted via
@@ -513,6 +530,7 @@ impl Request {
             Request::SyncStatus { .. } => "SyncStatus",
             Request::ShareVaultToDevice { .. } => "ShareVaultToDevice",
             Request::SyncAdopt { .. } => "SyncAdopt",
+            Request::ListPendingDevices { .. } => "ListPendingDevices",
             Request::AddAttachment { .. } => "AddAttachment",
             Request::ListAttachments { .. } => "ListAttachments",
             Request::GetAttachment { .. } => "GetAttachment",
@@ -691,6 +709,29 @@ pub struct WireSyncDevice {
     pub local_seq: u64,
     /// Highest `seq` this device has published to the channel.
     pub channel_seq: u64,
+}
+
+/// One announced-but-untrusted device rendered for the wire
+/// ([`Response::PendingDevices`], `device-pairing.md` §5). All fields are
+/// **public** (public key material + a hash of it); the announce channel is
+/// untrusted, so this is a discovery hint the user still confirms out-of-band
+/// before trusting (§5.2) — it can populate a list, never pin.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct WirePendingDevice {
+    /// The announcing device's id (hyphenated UUID), derived from its parsed
+    /// identity string — **never** trusted from the announce file name (§5.2).
+    pub device_id: String,
+    /// The announcing device's public `LPDEV1-…` identity string, ready to feed
+    /// to [`Request::TrustDevice`] once the user confirms the fingerprint.
+    pub identity_string: String,
+    /// The out-of-band comparison fingerprint (`xxxx-xxxx-xxxx-xxxx`), derived
+    /// from the identity string — the value the user compares to the other
+    /// device's screen before trusting.
+    pub fingerprint: String,
+    /// An optional label the announcing device chose (advisory, untrusted).
+    pub label: Option<String>,
+    /// When the device announced itself (unix millis).
+    pub announced_at: u64,
 }
 
 /// One adopted vault rendered for the wire ([`Response::SyncAdopted`]).
@@ -919,6 +960,14 @@ pub enum Response {
         /// Secret-free alarm descriptions raised during the adopt pulls.
         alarms: Vec<String>,
     },
+    /// The announced-but-untrusted devices found under a sync root's `pairing/`
+    /// folder (answer to [`Request::ListPendingDevices`], `device-pairing.md`
+    /// §5). Everything here is **public**; the list is a discovery hint the user
+    /// still confirms out-of-band before trusting (§5.2).
+    PendingDevices {
+        /// The pending devices (may be empty), each with its fingerprint.
+        devices: Vec<WirePendingDevice>,
+    },
     /// A file was attached (answer to [`Request::AddAttachment`]). Carries the
     /// new attachment's id + stored filename — **no blob bytes**.
     Attachment {
@@ -985,6 +1034,7 @@ impl Response {
             Response::SyncPulled { .. } => "SyncPulled",
             Response::SyncStatus { .. } => "SyncStatus",
             Response::SyncAdopted { .. } => "SyncAdopted",
+            Response::PendingDevices { .. } => "PendingDevices",
             Response::Attachment { .. } => "Attachment",
             Response::Attachments { .. } => "Attachments",
             Response::AttachmentSaved { .. } => "AttachmentSaved",
