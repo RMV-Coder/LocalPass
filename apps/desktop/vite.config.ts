@@ -4,6 +4,12 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 
+// `process` is a Node global, available because Vite runs this config under
+// Node — but the app itself targets the browser. Declaring only the `env` field
+// we read (module-scoped, so it never leaks into the app's type scope) avoids
+// pulling all of `@types/node`'s globals into `src/`.
+declare const process: { env: Record<string, string | undefined> };
+
 // Vite config tuned for Tauri: a fixed dev port (referenced by
 // tauri.conf.json's devUrl), no clearing of the terminal so Rust errors stay
 // visible, and a strict, self-contained build (no remote origins) that emits to
