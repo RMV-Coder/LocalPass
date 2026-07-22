@@ -147,6 +147,13 @@
     await refreshItems();
   }
 
+  // The selected vault's display name. Declared before the derived values that
+  // reference it (deletePhrase below) so nothing reads it before its
+  // declaration.
+  const currentVaultName = $derived(
+    vaults.find((v) => v.id === selectedVault)?.name ?? "",
+  );
+
   // --- Vault deletion (typed-confirmation destructive action) ---
   let deletingVault = $state(false);
   let deleteConfirmText = $state("");
@@ -201,10 +208,6 @@
   $effect(() => {
     loadVaults();
   });
-
-  const currentVaultName = $derived(
-    vaults.find((v) => v.id === selectedVault)?.name ?? "",
-  );
 
   // Which single screen the mobile layout shows (desktop shows all panes at
   // once and ignores this). Drives the `data-mobile` attribute the CSS keys on
@@ -500,6 +503,7 @@
     <div
       class="modal-card"
       role="dialog"
+      tabindex="-1"
       aria-modal="true"
       aria-labelledby="del-vault-title"
       onclick={(e) => e.stopPropagation()}

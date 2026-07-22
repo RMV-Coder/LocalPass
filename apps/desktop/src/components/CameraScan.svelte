@@ -135,6 +135,7 @@
   <div
     class="modal-card"
     role="dialog"
+    tabindex="-1"
     aria-modal="true"
     aria-labelledby="cam-scan-title"
     onclick={(e) => e.stopPropagation()}
