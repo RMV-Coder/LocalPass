@@ -482,3 +482,83 @@ fn trust_is_refused_when_pairing_mode_is_off() {
         ok.response.kind()
     );
 }
+
+/// Export this device's pending-devices view of a shared sync folder.
+fn list_pending(
+    state: &mut State,
+    profile: &std::path::Path,
+    dir: &str,
+) -> Vec<lp_daemon::protocol::WirePendingDevice> {
+    let handled = engine::handle(
+        state,
+        Request::ListPendingDevices {
+            profile: profile_str(profile),
+            dir: dir.to_string(),
+        },
+    );
+    match handled.response {
+        Response::PendingDevices { devices } => devices,
+        other => panic!("expected PendingDevices, got {}", other.kind()),
+    }
+}
+
+#[test]
+fn two_devices_announce_on_setup_and_discover_each_other() {
+    // device-pairing.md §5 — channel announce. Two devices whose vaults sync to
+    // ONE shared folder each publish `pairing/<device_id>.identity` on setup;
+    // each then discovers the OTHER as a pending device (never itself), with the
+    // fingerprint the user compares out-of-band before trusting.
+    let tmp_a = tempfile::tempdir().unwrap();
+    let tmp_b = tempfile::tempdir().unwrap();
+    let shared = tempfile::tempdir().unwrap();
+    let (profile_a, profile_b) = (tmp_a.path().to_path_buf(), tmp_b.path().to_path_buf());
+    let dir = shared.path().display().to_string();
+    let mut a = State::new(profile_a.clone(), Duration::from_secs(600));
+    let mut b = State::new(profile_b.clone(), Duration::from_secs(600));
+    create_account(&mut a, &profile_a);
+    create_account(&mut b, &profile_b);
+
+    let (a_id, _a_identity, a_fp) = export_identity(&mut a, &profile_a);
+    let (b_id, b_identity, b_fp) = export_identity(&mut b, &profile_b);
+
+    // Each device sets up sync to the shared folder → self-announce is written.
+    for (state, profile) in [(&mut a, &profile_a), (&mut b, &profile_b)] {
+        let setup = engine::handle(
+            state,
+            Request::SyncSetup {
+                profile: profile_str(profile),
+                vault: "personal".into(),
+                dir: dir.clone(),
+            },
+        );
+        assert!(
+            matches!(setup.response, Response::Ok { .. }),
+            "sync setup should succeed, got {}",
+            setup.response.kind()
+        );
+    }
+
+    // A's pending list shows exactly B — with B's real fingerprint — not itself.
+    let a_pending = list_pending(&mut a, &profile_a, &dir);
+    assert_eq!(a_pending.len(), 1, "A discovers exactly one peer (B)");
+    assert_eq!(a_pending[0].device_id, b_id, "A discovers B");
+    assert_eq!(a_pending[0].fingerprint, b_fp, "with B's real fingerprint");
+    assert_eq!(
+        a_pending[0].identity_string, b_identity,
+        "the pending entry carries B's exact identity string, ready to trust"
+    );
+    assert!(
+        !a_pending.iter().any(|d| d.device_id == a_id),
+        "a device never lists ITSELF as pending (§5.2)"
+    );
+
+    // Symmetric: B discovers exactly A, with A's fingerprint, not itself.
+    let b_pending = list_pending(&mut b, &profile_b, &dir);
+    assert_eq!(b_pending.len(), 1, "B discovers exactly one peer (A)");
+    assert_eq!(b_pending[0].device_id, a_id, "B discovers A");
+    assert_eq!(b_pending[0].fingerprint, a_fp, "with A's real fingerprint");
+    assert!(
+        !b_pending.iter().any(|d| d.device_id == b_id),
+        "a device never lists ITSELF as pending (§5.2)"
+    );
+}
