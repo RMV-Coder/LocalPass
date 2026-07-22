@@ -694,6 +694,40 @@ pub fn trust_device(
     }
 }
 
+/// Open or close **pairing mode** — the time-boxed (3-minute) window that must
+/// be on for the daemon to accept trusting a **new** device (`device-pairing.md`
+/// §4). Turning it off never affects an already-trusted device.
+///
+/// Nothing here is a secret. The daemon records the toggle in the local audit
+/// log and enforces the window server-side; this command only flips it. An
+/// unlocked session is required (a locked daemon answers with an error the UI
+/// surfaces).
+#[tauri::command]
+pub fn set_pairing_mode(enabled: bool) -> Result<(), String> {
+    let profile = daemon::profile_string()?;
+    let resp =
+        daemon::call(&Request::SetPairingMode { profile, enabled }).map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    Ok(())
+}
+
+/// The whole seconds remaining in the open pairing-mode window, or `None` when
+/// pairing mode is off/expired (`device-pairing.md` §4). The UI fetches this on
+/// mount and after toggling, then ticks it down locally, so the control flips to
+/// OFF at zero. Reads the daemon `Status`; nothing secret crosses.
+#[tauri::command]
+pub fn pairing_mode_secs() -> Result<Option<u64>, String> {
+    let profile = daemon::profile_string()?;
+    let resp = daemon::call(&Request::Status { profile }).map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    match resp {
+        Response::Status {
+            pairing_mode_secs, ..
+        } => Ok(pairing_mode_secs),
+        other => Err(format!("unexpected daemon response: {}", other.kind())),
+    }
+}
+
 /// Whether this platform can show a native folder picker for the sync root
 /// (Android only — see [`pick_sync_dir`]). The UI uses this to decide between a
 /// "Choose folder" button and a plain path text box; desktop users type or paste

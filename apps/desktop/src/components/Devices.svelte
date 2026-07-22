@@ -24,6 +24,8 @@
     isMobile,
     listPeers,
     trustDevice,
+    setPairingMode,
+    pairingModeSecs,
     syncSetup,
     syncPush,
     syncPull,
@@ -265,6 +267,10 @@
   );
 
   async function toggleQr() {
+    // The QR is gated on pairing mode (§4): showing this device's QR is only
+    // allowed inside the deliberate pairing window. The identity STRING stays
+    // always visible (it is public) — only the QR is gated.
+    if (!pairingActive) return;
     showQr = !showQr;
     if (!showQr || qrSvg) return; // fetched once, then cached
     qrError = "";
@@ -274,6 +280,80 @@
       qrError = typeof err === "string" ? err : "Could not render the QR code.";
     }
   }
+
+  // --- Pairing mode (device-pairing.md §4) ---
+  // A time-boxed (3-minute) window that must be ON for the daemon to accept
+  // trusting a NEW device (and to show this device's QR). Off by default; the
+  // backend enforces the window server-side and audits the toggle. The daemon is
+  // the single source of truth for the remaining time — we fetch it on mount and
+  // after each toggle, then tick it down locally so the countdown reads smoothly
+  // and flips to OFF at zero.
+  let pairingSecs = $state<number | null>(null);
+  let pairingBusy = $state(false);
+  let pairingError = $state("");
+  const pairingActive = $derived(pairingSecs !== null && pairingSecs > 0);
+
+  /** Format the remaining seconds as `m:ss` for the countdown. */
+  function formatCountdown(secs: number | null): string {
+    const s = Math.max(0, secs ?? 0);
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${m}:${r.toString().padStart(2, "0")}`;
+  }
+
+  async function refreshPairing() {
+    try {
+      pairingSecs = await pairingModeSecs();
+    } catch (err) {
+      pairingError = typeof err === "string" ? err : "Could not read pairing mode.";
+    }
+  }
+
+  async function enablePairing() {
+    if (pairingBusy) return;
+    pairingBusy = true;
+    pairingError = "";
+    try {
+      await setPairingMode(true);
+      await refreshPairing();
+    } catch (err) {
+      pairingError = typeof err === "string" ? err : "Could not enable pairing mode.";
+    } finally {
+      pairingBusy = false;
+    }
+  }
+
+  async function disablePairing() {
+    if (pairingBusy) return;
+    pairingBusy = true;
+    pairingError = "";
+    try {
+      await setPairingMode(false);
+      await refreshPairing();
+      showQr = false; // the QR is gated on the window (§4)
+    } catch (err) {
+      pairingError = typeof err === "string" ? err : "Could not turn off pairing mode.";
+    } finally {
+      pairingBusy = false;
+    }
+  }
+
+  // Local 1-second countdown. While active it ticks the displayed seconds down;
+  // at zero it re-syncs with the daemon (the authority on expiry) and hides the
+  // QR, so the control flips to OFF exactly when the window closes.
+  $effect(() => {
+    const id = setInterval(() => {
+      if (pairingSecs === null) return;
+      if (pairingSecs <= 1) {
+        pairingSecs = null;
+        showQr = false;
+        void refreshPairing();
+      } else {
+        pairingSecs -= 1;
+      }
+    }, 1000);
+    return () => clearInterval(id);
+  });
 
   async function submitTrust(e: Event) {
     e.preventDefault();
@@ -403,6 +483,7 @@
     loadIdentity();
     loadIsMobile();
     loadPeers();
+    refreshPairing();
     refreshStatus(fallback);
   });
 </script>
@@ -437,13 +518,51 @@
         The other device must show this <em>exact</em> fingerprint before you trust each other.
       </p>
 
+      <!-- Pairing mode (device-pairing.md §4): a deliberate, time-boxed (3-min)
+           window that must be ON to trust a NEW device or to show this device's
+           QR. Off by default; turning it off never affects an already-trusted
+           device or any sync. The backend enforces it regardless of this UI. -->
+      <div class="pairing-row">
+        <span class="label" id="pairing-label" style="margin-bottom:0">Pairing mode</span>
+        {#if pairingActive}
+          <span class="pairing-badge on" aria-live="polite">
+            ON · <span class="mono">{formatCountdown(pairingSecs)}</span> left
+          </span>
+          <button class="btn btn-small" onclick={disablePairing} disabled={pairingBusy}>
+            {pairingBusy ? "…" : "Turn off"}
+          </button>
+        {:else}
+          <span class="pairing-badge off">OFF</span>
+          <button class="btn btn-small" onclick={enablePairing} disabled={pairingBusy}>
+            {pairingBusy ? "…" : "Enable pairing (3 min)"}
+          </button>
+        {/if}
+      </div>
+      {#if pairingError}
+        <div class="error" role="alert">{pairingError}</div>
+      {/if}
+      <p class="hint">
+        Must be on to trust a new device or show this device's QR. It turns itself
+        off after 3 minutes; an already-trusted device keeps syncing either way.
+      </p>
+
       <!-- Pairing QR: scanning it off this screen in person is a far stronger
            channel than pasting the string through a chat app, which an attacker
-           could tamper with (device-pairing.md §1.2). -->
-      <button class="btn btn-small" onclick={toggleQr} aria-expanded={showQr}>
+           could tamper with (device-pairing.md §1.2). Gated on pairing mode (§4):
+           the QR is only offered while the window is open — the identity STRING
+           above stays visible always (it is public). -->
+      <button
+        class="btn btn-small"
+        onclick={toggleQr}
+        aria-expanded={showQr}
+        disabled={!pairingActive}
+      >
         {showQr ? "Hide QR code" : "Show QR code"}
       </button>
-      {#if showQr}
+      {#if !pairingActive}
+        <p class="hint">Enable pairing mode above to show this device's QR code.</p>
+      {/if}
+      {#if showQr && pairingActive}
         {#if qrError}
           <div class="error" role="alert">{qrError}</div>
         {:else if qrDataUri}
@@ -474,6 +593,13 @@
       Confirm the match to enable Trust. Never trust a device whose fingerprint
       you have not compared out-of-band.
     </p>
+
+    {#if !pairingActive}
+      <div class="pairing-note" role="note">
+        Pairing mode is <strong>off</strong>. Enable it in “This device” above before
+        trusting a new device — the daemon refuses new trust while it is off.
+      </div>
+    {/if}
 
     <!-- Scanning is a transport for the identity string — it fills the box below
          exactly as a paste would, and re-arms the fingerprint confirmation. It
@@ -753,6 +879,39 @@
   }
   .fp.big {
     font-size: 1.1rem;
+  }
+  /* Pairing-mode control row: the ON/OFF badge + its toggle button, sitting
+     inline under the fingerprint. */
+  .pairing-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+    margin: 0.9rem 0 0.3rem;
+  }
+  .pairing-badge {
+    font-weight: 700;
+    font-size: 0.85rem;
+    padding: 0.1rem 0.5rem;
+    border-radius: 6px;
+  }
+  .pairing-badge.on {
+    color: var(--ok, #1a7f37);
+    background: color-mix(in srgb, var(--ok, #1a7f37) 12%, transparent);
+  }
+  .pairing-badge.off {
+    color: var(--muted, #6b7280);
+    background: var(--bg-hover);
+  }
+  /* The "enable pairing mode first" note in the Trust panel — advisory, not an
+     error (the backend enforces the gate regardless). */
+  .pairing-note {
+    border: 1px solid var(--border);
+    background: var(--bg-hover);
+    border-radius: 8px;
+    padding: 0.6rem 0.8rem;
+    margin: 0.5rem 0 0.8rem;
+    font-size: 0.9rem;
   }
   /* The QR plate stays light in every theme on purpose: a scanner needs the
      quiet zone light to detect the symbol at all, so we never invert it. */

@@ -200,6 +200,13 @@ entropy estimate, and issue flags — never a secret value.")]
         command: DeviceCommand,
     },
 
+    /// Open or close **pairing mode** — the time-boxed window that must be on to
+    /// trust a new device (`device-pairing.md` §4).
+    Pairing {
+        #[command(subcommand)]
+        command: PairingCommand,
+    },
+
     /// Manage vault-backed SSH keys and the SSH agent (PRD §4.8).
     Ssh {
         #[command(subcommand)]
@@ -529,6 +536,28 @@ out-of-band (defeats a man-in-the-middle). Type 'yes' to confirm, or pass \
         /// Confirm the fingerprint non-interactively (must match the peer's).
         #[arg(long, value_name = "FP")]
         fingerprint: Option<String>,
+    },
+}
+
+/// `localpass pairing ...`
+#[derive(Debug, Subcommand)]
+#[command(long_about = "Open or close pairing mode (device-pairing.md §4).\n\n\
+Pairing mode is a per-device, time-boxed (3-minute) window that must be ON for \
+the daemon to accept trusting a NEW device — an already-trusted device keeps \
+syncing regardless, so leaving it off is safe. It lives in the running daemon's \
+unlocked session, so these commands talk to the daemon. The direct \
+`device trust` path (used with --no-daemon or no daemon running) is not gated by \
+pairing mode.")]
+pub enum PairingCommand {
+    /// Open the pairing-mode window (3 minutes) so a new device can be trusted.
+    Enable,
+    /// Close the pairing-mode window now.
+    Disable,
+    /// Show whether pairing mode is on, and the seconds remaining if so.
+    Status {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 

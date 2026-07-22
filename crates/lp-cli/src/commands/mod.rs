@@ -20,6 +20,7 @@ pub mod import;
 pub mod init;
 pub mod item;
 pub mod kit;
+pub mod pairing;
 pub mod password;
 pub mod run;
 pub mod search;

@@ -204,6 +204,21 @@ export function trustDevice(
   });
 }
 
+/** Open or close pairing mode — the time-boxed (3-minute) window that must be on
+ *  for the daemon to accept trusting a NEW device (device-pairing.md §4).
+ *  Turning it off never affects an already-trusted device. Secret-free; the
+ *  daemon audits the toggle and enforces the window server-side. */
+export function setPairingMode(enabled: boolean): Promise<void> {
+  return invoke<void>("set_pairing_mode", { enabled });
+}
+
+/** Seconds remaining in the open pairing-mode window, or null when off/expired.
+ *  The UI fetches this on mount and after toggling, then ticks it down locally so
+ *  the control flips to OFF at zero. Secret-free (reads the daemon status). */
+export function pairingModeSecs(): Promise<number | null> {
+  return invoke<number | null>("pairing_mode_secs");
+}
+
 /** Whether this platform offers a native folder picker for the sync root
  *  (Android only — scoped storage makes a picker the ONLY way to reach a shared
  *  folder there). Desktop returns false; the user types a path instead. */
