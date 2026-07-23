@@ -41,7 +41,7 @@ use crate::unlock::{self, PasswordSource};
 /// # Errors
 ///
 /// - [`CliError::Usage`] (exit 1) on a bad file, malformed input, unknown vault,
-///   or the KDBX stub.
+///   or a wrong KDBX database password.
 /// - [`CliError::Auth`] (exit 2) on a wrong master password.
 /// - [`CliError::Internal`] (exit 3) on a storage failure.
 pub fn run(
@@ -80,9 +80,8 @@ fn parse(args: &ImportArgs, src: PasswordSource) -> Result<ImportOutcome> {
             dotenv::parse_file(path, args.title.as_deref()).map_err(porter_usage)?
         }
         ImportFormat::Kdbx => {
-            // Prompt/read the KDBX password (the stub ignores it, but we honour
-            // the documented input path so wiring a real parser later is a
-            // drop-in and the flag behaves).
+            // Prompt for (or read from stdin) the KDBX database password, then
+            // decrypt + parse it. The file is only read, never modified.
             let password = acquire_archive_passphrase(src, args.kdbx_password_stdin, false)?;
             kdbx::parse_file(path, &password).map_err(porter_usage)?
         }

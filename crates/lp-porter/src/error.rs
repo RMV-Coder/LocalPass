@@ -58,7 +58,16 @@ pub enum PorterError {
     #[error("archive encryption failed")]
     ArchiveEncrypt,
 
-    /// The requested importer is not yet implemented in this build (KDBX stub).
+    /// A KDBX decryption or authentication failure (wrong password or corrupt
+    /// database). Collapsed to a single message so a wrong password is not
+    /// distinguishable from corruption — no decryption oracle, mirroring
+    /// [`ArchiveDecrypt`](PorterError::ArchiveDecrypt).
+    #[error("KDBX decryption failed (wrong password or corrupt database)")]
+    KdbxDecrypt,
+
+    /// The input uses a foreign-format feature this build does not implement
+    /// (e.g. a KDBX with a ChaCha20/Twofish outer cipher, AES-KDF, or a non-4
+    /// major version). Carries an actionable, value-free message.
     #[error("{0}")]
     Unsupported(String),
 

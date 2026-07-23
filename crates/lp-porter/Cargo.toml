@@ -35,6 +35,29 @@ tar = "0.4"
 # --- without a brittle exhaustive schema. ---
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# --- KDBX 4 import (KeePass) — FOREIGN-FORMAT crypto exception, same rationale
+# --- as `age` above: these RustCrypto primitives READ a foreign database's
+# --- envelope; they are NEVER used for LocalPass's own vault crypto (that stays
+# --- in lp-crypto). Versions are deliberately pinned to the lines lp-crypto
+# --- already resolves (cipher 0.4 for aes/cbc/chacha20; argon2 0.5; the
+# --- digest-0.10 line for sha2/hmac) so no parallel crypto stack is introduced.
+# aes-256-cbc is the KDBX4 default outer cipher; chacha20 is the (mandatory)
+# inner protected-field stream. ---
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc", "block-padding"] }
+chacha20 = "0.9"
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+sha2 = "0.10"
+hmac = { version = "0.12", default-features = false }
+# --- GZip inflate for the KDBX4 inner payload. `flate2`'s default `miniz_oxide`
+# --- backend is pure Rust (no C zlib), keeping the build toolchain-free. ---
+flate2 = "1"
+# --- Pull-parser for the KDBX inner XML. Machine-generated but entity/UTF-8
+# --- bearing (titles like `Café ☕ / <b>`); hand-rolling XML entity decode is a
+# --- footgun, so use the standard well-fuzzed reader. ---
+quick-xml = "0.41"
+# --- Base64 decode for protected `<Value>` bodies (reuse lp-crypto's encoder). ---
+data-encoding = "2"
 # --- One error enum; no secret ever appears in a message (workspace-pinned). ---
 thiserror = { workspace = true }
 # --- Drop-zeroed containers for the age passphrase and any transient plaintext

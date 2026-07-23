@@ -1,0 +1,55 @@
+[
+  {
+    "file": "sample_aes256.kdbx",
+    "cipher": "aes256",
+    "entries": [
+      {
+        "cipher": "aes256",
+        "group": "Web",
+        "title": "Example",
+        "username": "alice",
+        "password": null,
+        "url": "https://example.com",
+        "notes": null,
+        "otp": null,
+        "custom": {}
+      },
+      {
+        "cipher": "aes256",
+        "group": "Root",
+        "title": "GitHub",
+        "username": "octocat",
+        "password": "s3cr3t-pw!",
+        "url": "https://github.com",
+        "notes": "my git host\nsecond line",
+        "otp": null,
+        "custom": {
+          "API Token": "tok_ABC123",
+          "Plan": "Pro"
+        }
+      },
+      {
+        "cipher": "aes256",
+        "group": "Root",
+        "title": "TOTP Test",
+        "username": "bob",
+        "password": "pw2",
+        "url": null,
+        "notes": null,
+        "otp": "otpauth://totp/ACME:bob?secret=JBSWY3DPEHPK3PXP&issuer=ACME",
+        "custom": {}
+      },
+      {
+        "cipher": "aes256",
+        "group": "Root",
+        "title": "Café ☕ / <b>",
+        "username": "úser",
+        "password": "ünïcödé",
+        "url": null,
+        "notes": null,
+        "otp": null,
+        "custom": {}
+      }
+    ]
+  }
+]

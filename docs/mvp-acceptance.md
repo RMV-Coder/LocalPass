@@ -38,7 +38,7 @@ requirements), §11 (decision log); [docs/architecture.md](architecture.md);
 | `run` / `env` / reference resolution | ✅ | `localpass run`, `localpass env export/import/diff` | `localpass://` + `op://` references; `--env-set`/`--env-file`/`-e` layering; Unix `exec`, Windows spawn-and-wait. |
 | ssh-agent | ✅ | `localpass ssh list/generate/public`; `lp-daemon/sshagent` | Vault-backed SSH agent on a second same-user-only endpoint (Windows `\\.\pipe\openssh-ssh-agent`, Unix `ssh-agent.sock`); Ed25519 + RSA; keys never touch disk. |
 | backup / restore / verify | ✅ | `localpass backup create/list/verify/restore` | SQLite Online Backup snapshot; verify checks hashes + integrity + (with password) recoverability; full and single-item restore. |
-| import / export | ◑ | `localpass import`, `localpass export`; `lp-porter` | Works for all MVP formats **except KDBX, which is stubbed** — see §1.7. |
+| import / export | ✅ | `localpass import`, `localpass export`; `lp-porter` | Works for all MVP formats, including KDBX 4 (KeePass) — see §1.7. |
 | Daemon | ✅ | `localpass daemon start/stop/status`, `unlock`, `lock`; `lp-daemon` | Holds one unlocked `Session` behind same-user-only IPC; idle auto-lock (default 600s); zeroize on lock. CLI falls back to direct-unlock when no daemon / `--no-daemon`. |
 
 ### 1.3 Desktop GUI (Win/macOS/Linux)
@@ -95,7 +95,7 @@ db credential) are reserved in the payload schema but not implemented
 | Import: 1Password (1PUX) | ✅ | `lp-porter/import/onepux.rs` | ZIP-wrapped `export.data`. |
 | Import: Bitwarden (JSON) | ✅ | `lp-porter/import/bitwarden.rs` | Unencrypted JSON export. |
 | Import: LastPass (CSV) | ✅ | `lp-porter/import/lastpass.rs` | |
-| Import: KeePass (KDBX 4) | ⛔ | `lp-porter/import/kdbx.rs` | **Stubbed** — always returns `Unsupported`. Reason: the `keepass` crate pulls ~85 transitive crates + a parallel crypto stack, colliding with the crypto-boundary rule and cargo-deny (LESSONS.md). Documented escape hatch: export KeePass → CSV. **Gap vs. PRD §9.1** (which lists KeePass as MVP). |
+| Import: KeePass (KDBX 4) | ✅ | `lp-porter/import/kdbx.rs` | Implemented as a focused reader on RustCrypto primitives **aligned to `lp-crypto`'s versions** (cipher 0.4 aes/cbc/chacha20, argon2 0.5, digest-0.10 sha2/hmac) under `lp-porter`'s foreign-format crypto exception — avoiding the 85-crate `keepass` dependency that drove the earlier stub. Scope: AES-256-CBC outer cipher + Argon2d/id KDF + ChaCha20 inner stream (the KeePass/KeePassXC default). ChaCha20/Twofish **outer** ciphers and KDBX 3.x return an actionable "re-save with AES-256" error. Verified end-to-end against a real `pykeepass`-generated database (`lp-porter/tests/kdbx_import.rs`). |
 | Import: generic CSV (column mapping) | ✅ | `lp-porter/import/csv_generic.rs` | `--map field=COLUMN`. CLI provides mapping flags; a GUI mapping UI is not built (CLI-only). |
 | Import: `.env` | ✅ | `lp-porter/import/dotenv.rs`, `env import` | → one env-set item. |
 | Import: plain SSH keys from `~/.ssh` | ◑ | — | No dedicated `~/.ssh` bulk importer; SSH keys are created via `ssh generate` or `item add --type ssh-key`. A direct "import from `~/.ssh`" path is not implemented. |
@@ -166,9 +166,12 @@ tracked follow-ups. They are the real content of this document.
    with `--verify` tamper detection. The one §4.9 event still unsourced is
    `TokenUse` (scoped API tokens are P2/unbuilt).
 
-5. **KDBX (KeePass) import (PRD §9.1 / §4.6).** Stubbed (returns `Unsupported`)
-   for dependency-weight / crypto-boundary reasons; a clean single integration
-   point (`import::kdbx::parse_file`) is left for a feature-gated follow-up.
+5. **KDBX (KeePass) import (PRD §9.1 / §4.6).** Implemented — a focused KDBX 4
+   reader (`import::kdbx::parse_file`) on RustCrypto primitives aligned to
+   `lp-crypto`'s versions (no `keepass` dependency), verified against a real
+   `pykeepass` database. Scope: AES-256 outer + Argon2d/id + ChaCha20 inner (the
+   KeePass default); ChaCha20/Twofish-outer and KDBX 3.x give an actionable
+   "re-save with AES-256" error.
    Workaround documented: KeePass → CSV → `import csv`.
 
 6. **OS-keychain integration for the Secret Key (PRD §4.3, P2).** At MVP the
