@@ -855,7 +855,7 @@ pub enum ImportFormat {
     Csv,
     /// A `.env` file → one env-set item.
     Env,
-    /// KeePass KDBX 4 database (not yet supported; see docs).
+    /// KeePass KDBX 4 database (AES-256 / Argon2; prompts for the password).
     Kdbx,
     /// A LocalPass age archive (re-import of `localpass export age`).
     Age,
@@ -866,7 +866,7 @@ pub enum ImportFormat {
 #[command(
     long_about = "Import items from another password manager's export.\n\n\
 FORMATS: 1password (.1pux), bitwarden (JSON), lastpass (CSV), csv (generic, \
-needs --map), env (.env → one env-set), kdbx (KeePass — NOT yet supported), \
+needs --map), env (.env → one env-set), kdbx (KeePass KDBX 4, AES-256/Argon2), \
 age (a LocalPass age archive).\n\n\
 The input file is only READ — it is never modified or deleted. On a partial \
 parse, LocalPass imports every entry it understands and reports the count plus \

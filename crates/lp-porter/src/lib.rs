@@ -44,7 +44,7 @@
 //! | LastPass CSV | [`import::lastpass`] | implemented |
 //! | Generic CSV (column map) | [`import::csv_generic`] | implemented |
 //! | `.env` file | [`import::dotenv`] | implemented |
-//! | KeePass KDBX 4 | [`import::kdbx`] | **stubbed** (see module docs) |
+//! | KeePass KDBX 4 | [`import::kdbx`] | implemented (AES-256 / Argon2) |
 //!
 //! Every importer returns an [`ImportOutcome`]: the successfully parsed items
 //! plus a list of **skipped** entries reported by *title only* — a partial parse

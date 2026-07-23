@@ -205,9 +205,29 @@ fn partial_import_reports_skips_by_title_only() {
         .stdout(contains("Weird Type"));
 }
 
-/// The KDBX importer is stubbed: a clear "not yet supported" message, exit 1.
+/// KDBX 4 import end-to-end through the CLI: a real KeePass database (AES-256 /
+/// Argon2, shared with the `lp-porter` integration test) unlocks with the DB
+/// password on stdin and its four entries land as items.
 #[test]
-fn kdbx_import_is_stubbed_cleanly() {
+fn kdbx_import_real_database_succeeds() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../lp-porter/tests/fixtures/kdbx/sample_aes256.kdbx");
+    let fixture = fixture.to_str().unwrap();
+    let profile = TestProfile::initialized();
+    profile
+        .cmd()
+        .args(["import", "kdbx", fixture, "--kdbx-password-stdin"])
+        .write_stdin("correct horse battery staple\n")
+        .assert()
+        .success()
+        .stdout(contains("imported 4 item"));
+}
+
+/// A non-KDBX file yields a clean error and exit 1 (never a panic, never a
+/// leaked value) — the wrong-password/corruption paths are covered in
+/// `lp-porter`'s unit tests.
+#[test]
+fn kdbx_import_bad_file_errors_cleanly() {
     let profile = TestProfile::initialized();
     let dir = tempfile::tempdir().unwrap();
     let fake = write_file(dir.path(), "db.kdbx", b"not a real kdbx");
@@ -218,7 +238,7 @@ fn kdbx_import_is_stubbed_cleanly() {
         .assert()
         .failure()
         .code(1)
-        .stderr(contains("not yet supported"));
+        .stderr(contains("kdbx"));
 }
 
 // --- Malformed inputs: clean errors, no panic, exit 1 --------------------
