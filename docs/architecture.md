@@ -111,7 +111,7 @@ graph TB
         CLI -. "direct-unlock fallback<br/>(--no-daemon / no daemon)" .-> DB
         GUI["Tauri GUI<br/>(webview renders only)"] -- "control IPC" --> DaemonP
         HOST["localpass-native-host"] -- "control IPC<br/>(fill-scoped: Status/MatchLogins/FillLogin)" --> DaemonP
-        EXT["Browser extension UI<br/>(not built at MVP)"] -. "native messaging<br/>(stdio, native-endian frames)" .-> HOST
+        EXT["Browser extension UI<br/>(apps/extension, MV3)"] -- "native messaging<br/>(stdio, native-endian frames)" --> HOST
         SSHCLIENT["ssh / ssh-add"] -- "SSH agent protocol<br/>2nd same-user-only endpoint" --> AGENT
         CHILD["Child process<br/>(localpass run)"]
         CLI -- "env injection at spawn" --> CHILD
@@ -293,9 +293,11 @@ Notes grounded in the specs and code:
 - **Sync is file-based only** at MVP. Live Noise/mDNS transport, the relay, and
   team sharing/roles/revocation are Phase 2 / documented extension points
   (sync-protocol.md §6, §7.4, §10).
-- **Browser: host, not extension.** The native-messaging *host* binary is built
-  and registrable (`localpass browser register`); the browser *extension UI*
-  (the WebExtension itself) is not in this repository.
+- **Browser: host + extension.** The native-messaging *host* binary is built and
+  registrable (`localpass browser register`); the MV3 *extension UI*
+  (`apps/extension/`, MPL-2.0) is built on top of it — fill-on-gesture, no
+  auto-submit, top-frame-only, minimal permissions. Save-from-browser is a
+  follow-up (the host is fill-scoped by design).
 - **KDBX 4 import** (KeePass, AES-256 / Argon2) is implemented with a focused
   reader on RustCrypto primitives aligned to `lp-crypto`'s versions — not the
   85-crate `keepass` dependency — under `lp-porter`'s foreign-format crypto
