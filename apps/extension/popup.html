@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LocalPass</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="lp-header">
+      <span class="lp-lock" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="18" height="18" role="img" aria-hidden="true">
+          <path
+            fill="currentColor"
+            d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5Zm-3 8V7a3 3 0 0 1 6 0v3H9Zm3 4a1.5 1.5 0 0 1 .75 2.8V19a.75.75 0 0 1-1.5 0v-2.2A1.5 1.5 0 0 1 12 14Z"
+          />
+        </svg>
+      </span>
+      <h1 class="lp-title">LocalPass</h1>
+    </header>
+
+    <main id="lp-body" class="lp-body" aria-live="polite">
+      <div id="lp-state" class="lp-state">
+        <p class="lp-msg">Loading…</p>
+      </div>
+      <ul id="lp-list" class="lp-list" hidden></ul>
+    </main>
+
+    <footer class="lp-footer">
+      <span id="lp-origin" class="lp-origin" title="">—</span>
+      <button id="lp-refresh" class="lp-refresh" type="button" title="Refresh">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+          <path
+            fill="currentColor"
+            d="M12 5V2L8 6l4 4V7a5 5 0 1 1-5 5H5a7 7 0 1 0 7-7Z"
+          />
+        </svg>
+        <span class="lp-sr-only">Refresh</span>
+      </button>
+    </footer>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

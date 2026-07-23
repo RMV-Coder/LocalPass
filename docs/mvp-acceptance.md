@@ -86,7 +86,7 @@ db credential) are reserved in the payload schema but not implemented
 | Native-messaging **host** | ✅ | `localpass-native-host` (`lp-native-host`) | Built: native-endian u32-framed stdio, 1 MiB cap, fill-scoped (`Status`/`MatchLogins`/`FillLogin` only), holds no keys. |
 | Host **registration** | ✅ | `localpass browser register/unregister`; `lp-native-host/register.rs` | Writes the `com.localpass.host` manifest per-OS (+ Windows HKCU registry key); `allowed_origins`/`allowed_extensions` allowlist; placeholder extension id until a real one is published. |
 | Server-side origin re-validation | ✅ | `lp-daemon/origin.rs` (`registrable_domain`) | eTLD+1 match is the authoritative server-side check on `FillLogin`; lookalikes never match; bare suffixes/IP/localhost refused. **MVP limitation:** conservative heuristic, no full PSL (see §3). |
-| Browser **extension UI** (the WebExtension itself: fill on gesture, inline save prompt, no auto-submit, no cross-origin iframe fill) | ⛔ | — | **Not in this repository.** No `extension/` directory or webextension `manifest.json` exists. The host provides the trustworthy primitive; the extension that would call it — and enforce the PRD §4.7 gesture/no-auto-submit/no-iframe rules — is a separate, unbuilt deliverable. So **fill + save from a browser does not work end-to-end yet.** |
+| Browser **extension UI** (the WebExtension itself: fill on gesture, no auto-submit, no cross-origin iframe fill) | ◑ | `apps/extension/` | **Built** — MV3 extension talking to the native host. Enforces the PRD §4.7 rules: fill only on the user's click, never auto-submit, top-frame only (no cross-origin iframe fill), minimal permissions, no always-on content scripts. **Fill** works end-to-end; **inline save prompt is not built** (the host is fill-scoped — no save capability). Pending live in-browser verification (client-side, not covered by cargo CI). |
 
 ### 1.7 Import / Export
 
@@ -154,10 +154,14 @@ tracked follow-ups. They are the real content of this document.
    built. (LESSONS.md confirms the sync MVP boundary was consciously set to
    single-user multi-device, file-based.)
 
-3. **Browser extension UI (PRD §9.1 "browser extension: fill + save").** Only the
-   native-messaging **host** is built; the WebExtension itself is not in the
-   repo. So browser autofill/save does not function end-to-end. The host is the
-   secure primitive; the extension is a separate unbuilt deliverable.
+3. **Browser extension UI (PRD §9.1 "browser extension: fill + save").** The MV3
+   WebExtension is now built (`apps/extension/`) on top of the native-messaging
+   host: fill-on-gesture, no auto-submit, top-frame-only (no cross-origin iframe
+   fill), minimal permissions, no always-on content scripts. **Fill** works
+   end-to-end; **save-from-browser is not implemented** — the host is fill-scoped
+   by design (no save capability), so capturing new logins from the browser
+   remains a follow-up. Pending live in-browser verification (like the mobile
+   apps, verified on-device rather than in cargo CI).
 
 4. **Local audit log (PRD §4.9 / §9.1). — RESOLVED.** Implemented in
    `lp-vault/audit.rs` (`localpass audit`): a device-local, append-only,
@@ -230,8 +234,9 @@ tracked follow-ups. They are the real content of this document.
 - The [README.md](../README.md) "What exists today" table is **stale**: it lists
   the daemon, `localpass run`, SSH agent, import/export, backup, file-based sync,
   and pairing as "🔜 next / planned", but all of those are now built (this
-  scorecard supersedes it). The GUI and browser-extension rows remain accurate
-  (GUI shell built; extension UI not).
+  scorecard supersedes it). GUI shell and the browser extension UI
+  (`apps/extension/`) are both built; extension fill is pending live in-browser
+  verification.
 - The `lp-cli` `Cargo.toml` package description still says "direct-unlock CLI
   (no daemon yet)"; the daemon and daemon-client path are in fact built.
 
