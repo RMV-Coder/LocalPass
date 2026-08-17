@@ -323,6 +323,17 @@ input[type="range"] {
   margin: 0;
 }
 
+/* --- Inline new-vault form (sidebar + mobile Items screen) --- */
+.new-vault {
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+.new-vault-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
 /* --- List rows --- */
 .list {
   list-style: none;
@@ -455,6 +466,10 @@ input[type="range"] {
 .field-name {
   color: var(--text-muted);
   font-weight: 600;
+  /* Long unbroken names (env KEYs) must wrap inside the 140px track instead
+     of overflowing across the value/actions columns. */
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .field-value {
   font-family: var(--mono);
