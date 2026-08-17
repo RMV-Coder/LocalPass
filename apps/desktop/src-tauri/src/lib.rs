@@ -106,6 +106,8 @@ pub fn run() {
             commands::create_item,
             commands::update_item,
             commands::delete_item,
+            commands::list_trash,
+            commands::untrash_item,
             commands::preview_fingerprint,
             commands::export_identity,
             commands::identity_qr_svg,

@@ -20,7 +20,7 @@
 //! to unit-test exhaustively — see the tests at the bottom.
 
 use lp_daemon::protocol::{
-    LockState, Response, WireField, WireItem, WireItemSummary, WirePasswordHealth,
+    LockState, Response, WireField, WireItem, WireItemSummary, WirePasswordHealth, WireTrashEntry,
 };
 use serde::Serialize;
 
@@ -88,6 +88,22 @@ pub struct ItemSummaryView {
     pub updated_at: i64,
     /// Tags.
     pub tags: Vec<String>,
+}
+
+/// One trashed-item row for the item pane's Trash section. Metadata + title
+/// only — never a field value (same boundary as [`ItemSummaryView`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct TrashEntryView {
+    /// Item id (hyphenated) — the handle `untrash_item` takes.
+    pub id: String,
+    /// Item title (at its current — trashed — version).
+    pub title: String,
+    /// Item type string (e.g. `"login"`).
+    pub type_str: String,
+    /// When the item was deleted (unix millis).
+    pub deleted_at: i64,
+    /// When it becomes eligible for permanent purge (unix millis).
+    pub purge_after: i64,
 }
 
 /// One field in the masked item detail view.
@@ -370,6 +386,18 @@ pub fn summary_view(s: &WireItemSummary) -> ItemSummaryView {
         type_str: s.type_str.clone(),
         updated_at: s.updated_at,
         tags: s.tags.clone(),
+    }
+}
+
+/// Map a daemon [`WireTrashEntry`] to a [`TrashEntryView`].
+#[must_use]
+pub fn trash_entry_view(e: &WireTrashEntry) -> TrashEntryView {
+    TrashEntryView {
+        id: e.id.clone(),
+        title: e.title.clone(),
+        type_str: e.type_str.clone(),
+        deleted_at: e.deleted_at,
+        purge_after: e.purge_after,
     }
 }
 

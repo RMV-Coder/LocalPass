@@ -80,6 +80,15 @@ export interface ItemSummaryView {
   tags: string[];
 }
 
+// One trashed-item row (the item pane's Trash section). Metadata + title only.
+export interface TrashEntryView {
+  id: string;
+  title: string;
+  type_str: string;
+  deleted_at: number;
+  purge_after: number;
+}
+
 // One password-health verdict (the Security/Watchtower view). No secret value.
 export interface PasswordHealthView {
   item_id: string;
