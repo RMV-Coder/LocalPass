@@ -261,6 +261,25 @@ pub enum Request {
         /// The version number to restore.
         version: i64,
     },
+    /// List a vault's trashed (tombstoned) items — metadata + title only, never
+    /// a secret value. Answered by [`Response::TrashEntries`].
+    ListTrash {
+        /// The profile directory being operated on.
+        profile: String,
+        /// Vault name or id.
+        vault: String,
+    },
+    /// Restore a trashed item out of the trash (PRD §4.10 recover-within-window):
+    /// the item's current version is forward-restored as a new version and the
+    /// tombstone is dropped. `target` resolves among **trashed** items only.
+    UntrashItem {
+        /// The profile directory being operated on.
+        profile: String,
+        /// Vault name or id.
+        vault: String,
+        /// Item title or id (matched against the trash, not live items).
+        target: String,
+    },
     /// **Browser autofill (fill-scoped):** list the non-secret login candidates
     /// whose stored URLs match `origin`'s registrable domain (eTLD+1), across all
     /// vaults. Answered by [`Response::LoginCandidates`].
@@ -518,6 +537,8 @@ impl Request {
             Request::UpdateItem { .. } => "UpdateItem",
             Request::DeleteItem { .. } => "DeleteItem",
             Request::RestoreVersion { .. } => "RestoreVersion",
+            Request::ListTrash { .. } => "ListTrash",
+            Request::UntrashItem { .. } => "UntrashItem",
             Request::MatchLogins { .. } => "MatchLogins",
             Request::FillLogin { .. } => "FillLogin",
             Request::ExportIdentity { .. } => "ExportIdentity",
@@ -635,6 +656,22 @@ pub struct WireItemSummary {
     pub updated_at: i64,
     /// Tags.
     pub tags: Vec<String>,
+}
+
+/// One trash entry ([`Response::TrashEntries`]) — the tombstone metadata plus
+/// the decrypted title/type for display. Never carries a field value.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct WireTrashEntry {
+    /// Hyphenated item id.
+    pub id: String,
+    /// The item title (at its current — trashed — version).
+    pub title: String,
+    /// The item type string.
+    pub type_str: String,
+    /// When the item was deleted (unix millis).
+    pub deleted_at: i64,
+    /// When it becomes eligible for permanent purge (unix millis).
+    pub purge_after: i64,
 }
 
 /// One password-health verdict for the "Watchtower" check
@@ -832,6 +869,12 @@ pub enum Response {
         /// One verdict per analyzed secret field.
         entries: Vec<WirePasswordHealth>,
     },
+    /// A vault's trash listing (answer to [`Request::ListTrash`]). Metadata +
+    /// titles only — never a field value.
+    TrashEntries {
+        /// The trashed items, oldest deletion first.
+        entries: Vec<WireTrashEntry>,
+    },
     /// An item's version history (metadata per version).
     Versions {
         /// The item id (hyphenated).
@@ -1019,6 +1062,7 @@ impl Response {
             Response::AccountCreated { .. } => "AccountCreated",
             Response::Vaults { .. } => "Vaults",
             Response::Items { .. } => "Items",
+            Response::TrashEntries { .. } => "TrashEntries",
             Response::PasswordHealth { .. } => "PasswordHealth",
             Response::Versions { .. } => "Versions",
             Response::Item { .. } => "Item",

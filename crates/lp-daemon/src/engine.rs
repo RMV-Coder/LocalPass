@@ -340,6 +340,35 @@ fn find_item(vault: &Vault<'_>, reference: &str) -> Result<Item, Response> {
     }
 }
 
+/// Resolve an item reference (title or id) among the vault's **trashed** items
+/// only. The trash-side mirror of [`find_item`]: an id must be tombstoned to
+/// match, and a title is matched against the decrypted titles of the trash
+/// listing (unique, else ambiguous).
+fn find_trashed_item(vault: &Vault<'_>, reference: &str) -> Result<lp_vault::ItemId, Response> {
+    if let Some(id) = parse_id(reference) {
+        match vault.get_trashed_item(id) {
+            Ok(item) => return Ok(item.item_id),
+            Err(lp_vault::Error::NotFound(_)) => {}
+            Err(e) => return Err(vault_err(e)),
+        }
+    }
+    let mut matches = Vec::new();
+    for e in vault.list_trash().map_err(vault_err)? {
+        let it = vault.get_trashed_item(e.item_id).map_err(vault_err)?;
+        if it.payload.title == reference {
+            matches.push(e.item_id);
+        }
+    }
+    match matches.as_slice() {
+        [] => Err(usage(format!("no trashed item titled or id {reference:?}"))),
+        [only] => Ok(*only),
+        _ => Err(usage(format!(
+            "trashed item title {reference:?} is ambiguous ({} match); use the item id",
+            matches.len()
+        ))),
+    }
+}
+
 /// Build a usage-style error response (never an auth error, never a secret).
 fn usage(message: impl Into<String>) -> Response {
     Response::Error {
@@ -701,6 +730,34 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
             })
         }),
 
+        Request::ListTrash { vault, .. } => with_session(state, |session| {
+            let v = open_vault(session, &vault)?;
+            let entries = v.list_trash().map_err(vault_err)?;
+            let mut out = Vec::with_capacity(entries.len());
+            for e in entries {
+                // Decrypt the trashed item's current payload for its title/type
+                // (metadata + title only — never a field value on the wire).
+                let it = v.get_trashed_item(e.item_id).map_err(vault_err)?;
+                out.push(crate::protocol::WireTrashEntry {
+                    id: e.item_id.to_hyphenated(),
+                    title: it.payload.title,
+                    type_str: it.payload.type_data.type_str().to_string(),
+                    deleted_at: e.deleted_at,
+                    purge_after: e.purge_after,
+                });
+            }
+            Ok(Response::TrashEntries { entries: out })
+        }),
+
+        Request::UntrashItem { vault, target, .. } => with_session(state, |session| {
+            let v = open_vault(session, &vault)?;
+            let item_id = find_trashed_item(&v, &target)?;
+            let new_version = v.untrash_item(item_id).map_err(vault_err)?;
+            Ok(Response::Ok {
+                message: Some(format!("version {new_version}")),
+            })
+        }),
+
         Request::MatchLogins { origin, .. } => {
             with_session(state, |session| match_logins(session, &origin))
         }
@@ -892,6 +949,8 @@ fn request_profile(request: &Request) -> Option<&str> {
         | Request::UpdateItem { profile, .. }
         | Request::DeleteItem { profile, .. }
         | Request::RestoreVersion { profile, .. }
+        | Request::ListTrash { profile, .. }
+        | Request::UntrashItem { profile, .. }
         | Request::MatchLogins { profile, .. }
         | Request::FillLogin { profile, .. }
         | Request::ExportIdentity { profile }
