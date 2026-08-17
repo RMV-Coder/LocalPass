@@ -58,6 +58,41 @@ pub fn open_vault<'s>(session: &'s Session, reference: &str) -> Result<Vault<'s>
     }
 }
 
+/// Resolve an item reference (title or id) among `vault`'s **trashed** items
+/// only — the trash-side mirror of [`find_item`]: an id must be tombstoned to
+/// match, and a title is matched against the decrypted titles of the trash
+/// listing (unique, else ambiguous).
+///
+/// # Errors
+///
+/// - [`CliError::Usage`] if no trashed item matches, or the title is ambiguous.
+pub fn find_trashed_item(vault: &Vault<'_>, reference: &str) -> Result<Item> {
+    if let Some(id) = parse_id(reference) {
+        match vault.get_trashed_item(id) {
+            Ok(item) => return Ok(item),
+            Err(lp_vault::Error::NotFound(_)) => {}
+            Err(e) => return Err(map_vault_error(e).into()),
+        }
+    }
+    let mut matches = Vec::new();
+    for entry in vault.list_trash().map_err(map_vault_error)? {
+        let item = vault
+            .get_trashed_item(entry.item_id)
+            .map_err(map_vault_error)?;
+        if item.payload.title == reference {
+            matches.push(item);
+        }
+    }
+    match matches.len() {
+        0 => Err(CliError::usage(format!("no trashed item titled or id {reference:?}")).into()),
+        1 => Ok(matches.remove(0)),
+        n => Err(CliError::usage(format!(
+            "trashed item title {reference:?} is ambiguous ({n} match); use the item id"
+        ))
+        .into()),
+    }
+}
+
 /// Resolve an item reference (title or id) to a live [`Item`] in `vault`.
 ///
 /// # Errors

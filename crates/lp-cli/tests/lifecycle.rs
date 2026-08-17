@@ -159,6 +159,60 @@ fn login_item_round_trip() {
         .assert()
         .success()
         .stdout(contains("GitHub").not());
+
+    // trash list shows it (title + type, no secret values), and --json parses.
+    profile
+        .cmd()
+        .args(["item", "trash", "list"])
+        .assert()
+        .success()
+        .stdout(contains("GitHub"))
+        .stdout(contains("login"))
+        .stdout(contains("s3cr3t").not());
+    profile
+        .cmd()
+        .args(["item", "trash", "list", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"title\": \"GitHub\""));
+
+    // A trashed item cannot be untrashed under a wrong name, but a live item
+    // can't be untrashed either (usage errors, exit 1).
+    profile
+        .cmd()
+        .args(["item", "untrash", "NoSuch"])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(contains("no trashed item"));
+
+    // untrash → back in the live list with its content intact; trash is empty.
+    profile
+        .cmd()
+        .args(["item", "untrash", "GitHub"])
+        .assert()
+        .success()
+        .stdout(contains("restored"));
+    profile
+        .cmd()
+        .args(["item", "get", "GitHub", "--field", "username"])
+        .assert()
+        .success()
+        .stdout("octocat\n");
+    profile
+        .cmd()
+        .args(["item", "trash", "list"])
+        .assert()
+        .success()
+        .stdout(contains("trash is empty"));
+
+    // Untrashing it again (now live) is a usage error.
+    profile
+        .cmd()
+        .args(["item", "untrash", "GitHub"])
+        .assert()
+        .failure()
+        .code(1);
 }
 
 /// env-set round-trip: build from a `.env` file (+ inline `--env`), values are

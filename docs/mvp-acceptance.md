@@ -25,14 +25,14 @@ requirements), §11 (decision log); [docs/architecture.md](architecture.md);
 | Argon2id + 128-bit Secret Key | ✅ | `lp-crypto` (`derive_master_unlock_key`, `SecretKey`) | HKDF mixes Argon2id output + Secret Key under label `localpass/v1/muk`. |
 | XChaCha20-Poly1305 | ✅ | `lp-crypto` (`SymmetricKey::seal/open`, `Envelope`) | Envelope v1 `0x01 ‖ nonce(24) ‖ ct+tag`, AAD out-of-band. |
 | SQLite envelope-encrypted vaults | ✅ | `lp-vault` (`db`, `account`, `vault`) | Account store + one file per vault; WAL + `synchronous=FULL`; per-item app-layer encryption, not SQLCipher (vault-format.md §6.3). |
-| Versioning + trash | ✅ | `lp-vault` (`Vault::update_item`/`history`/`restore_version`/`delete_item`/`list_trash`/`purge_expired_trash`) | Immutable `item_versions`; 30-day default trash then shred; keep-forever + `prune_versions` (PRD §11 #8). |
+| Versioning + trash | ✅ | `lp-vault` (`Vault::update_item`/`history`/`restore_version`/`delete_item`/`list_trash`/`get_trashed_item`/`untrash_item`/`purge_expired_trash`) | Immutable `item_versions`; 30-day default trash then shred (restore via CLI `item trash list`/`item untrash` + the GUI Trash section); keep-forever + `prune_versions` (PRD §11 #8). |
 | Encrypted search index | ✅ | `lp-vault` (`index`, `Vault::search`/`rebuild_index`) | Persisted, encrypted under IndexKey, incremental (updates in the item write transaction), generation-checked; linear fallback on index miss (search-index.md). |
 
 ### 1.2 CLI + daemon
 
 | PRD MVP item | Status | Command / crate | Note |
 |--------------|--------|-----------------|------|
-| Full item CRUD | ✅ | `localpass item add/get/list/edit/rm/history/restore` | Masked by default; `--reveal` / `--field` to print secrets; `--json` throughout. |
+| Full item CRUD | ✅ | `localpass item add/get/list/edit/rm/history/restore/trash list/untrash` | Masked by default; `--reveal` / `--field` to print secrets; `--json` throughout; `item trash list` + `item untrash` recover within the 30-day window. |
 | `generate` | ✅ | `localpass generate` (`lp-cli/generate.rs`) | Char passwords + EFF-wordlist passphrases; entropy shown; OS CSPRNG. |
 | TOTP | ✅ | `localpass totp` (`lp-crypto/totp.rs`) | RFC 6238; `--watch`, `--json`; code computed in daemon when unlocked (secret never crosses the wire). |
 | `run` / `env` / reference resolution | ✅ | `localpass run`, `localpass env export/import/diff` | `localpass://` + `op://` references; `--env-set`/`--env-file`/`-e` layering; Unix `exec`, Windows spawn-and-wait. |

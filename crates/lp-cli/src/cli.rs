@@ -1109,6 +1109,34 @@ pub enum ItemCommand {
         #[arg(long, default_value = "personal", value_name = "NAME_OR_ID")]
         vault: String,
     },
+    /// Inspect the trash (items deleted with `item rm`, recoverable for 30 days).
+    Trash {
+        #[command(subcommand)]
+        command: ItemTrashCommand,
+    },
+    /// Restore an item out of the trash (undo an `item rm` within the window).
+    Untrash {
+        /// The trashed item's title or id (see `item trash list`).
+        target: String,
+        /// Vault to look in (name or id).
+        #[arg(long, default_value = "personal", value_name = "NAME_OR_ID")]
+        vault: String,
+    },
+}
+
+/// `localpass item trash ...`
+#[derive(Debug, Subcommand)]
+pub enum ItemTrashCommand {
+    /// List trashed items (title, type, deleted, purge deadline). Never prints
+    /// secret values.
+    List {
+        /// Vault to list (name or id).
+        #[arg(long, default_value = "personal", value_name = "NAME_OR_ID")]
+        vault: String,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `localpass attach ...`

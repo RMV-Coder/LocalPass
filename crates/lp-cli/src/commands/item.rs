@@ -74,6 +74,12 @@ fn run_direct(profile_dir: &Path, src: PasswordSource, command: &ItemCommand) ->
             version,
             vault,
         } => restore(&session, vault, target, *version),
+        ItemCommand::Trash { command } => match command {
+            crate::cli::ItemTrashCommand::List { vault, json } => {
+                trash_list(&session, vault, *json)
+            }
+        },
+        ItemCommand::Untrash { target, vault } => untrash(&session, vault, target),
     }
 }
 
@@ -121,6 +127,12 @@ fn run_proxied(
             version,
             vault,
         } => restore_proxied(&profile, client, vault, target, *version),
+        ItemCommand::Trash { command } => match command {
+            crate::cli::ItemTrashCommand::List { vault, json } => {
+                trash_list_proxied(&profile, client, vault, *json)
+            }
+        },
+        ItemCommand::Untrash { target, vault } => untrash_proxied(&profile, client, vault, target),
     }
 }
 
@@ -416,6 +428,100 @@ fn restore(session: &lp_vault::Session, vault_ref: &str, target: &str, version: 
     Ok(())
 }
 
+// --- trash ----------------------------------------------------------------
+
+/// One display row of the trash listing (shared by the direct and proxied
+/// paths). Metadata + title only — never a field value.
+struct TrashRow {
+    id: String,
+    title: String,
+    type_str: String,
+    deleted_at: i64,
+    purge_after: i64,
+}
+
+/// Print the trash listing (table or JSON). The ID column is included because
+/// it is the only stable way to name a trashed item whose title collides with
+/// another trashed item (`item untrash <id>`).
+fn print_trash(rows: &[TrashRow], json_out: bool) -> Result<()> {
+    if json_out {
+        let arr: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.id,
+                    "title": r.title,
+                    "type": r.type_str,
+                    "deleted_at": r.deleted_at,
+                    "purge_after": r.purge_after,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&arr)?);
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("(trash is empty)");
+        return Ok(());
+    }
+    let width = rows
+        .iter()
+        .map(|r| r.title.chars().count())
+        .max()
+        .unwrap_or(5)
+        .clamp(5, 40);
+    println!(
+        "{:<width$}  {:<8}  {:<20}  {:<20}  ID",
+        "TITLE",
+        "TYPE",
+        "DELETED",
+        "PURGES AFTER",
+        width = width
+    );
+    for r in rows {
+        println!(
+            "{:<width$}  {:<8}  {:<20}  {:<20}  {}",
+            truncate(&r.title, width),
+            r.type_str,
+            crate::timestamp::format_millis_utc(r.deleted_at),
+            crate::timestamp::format_millis_utc(r.purge_after),
+            r.id,
+            width = width
+        );
+    }
+    println!("(restore with: localpass item untrash <title-or-id>)");
+    Ok(())
+}
+
+fn trash_list(session: &lp_vault::Session, vault_ref: &str, json_out: bool) -> Result<()> {
+    let vault = resolve::open_vault(session, vault_ref)?;
+    let mut rows = Vec::new();
+    for entry in vault.list_trash().map_err(map_vault_error)? {
+        let item = vault
+            .get_trashed_item(entry.item_id)
+            .map_err(map_vault_error)?;
+        rows.push(TrashRow {
+            id: entry.item_id.to_hyphenated(),
+            title: item.payload.title,
+            type_str: item.payload.type_data.type_str().to_string(),
+            deleted_at: entry.deleted_at,
+            purge_after: entry.purge_after,
+        });
+    }
+    print_trash(&rows, json_out)
+}
+
+fn untrash(session: &lp_vault::Session, vault_ref: &str, target: &str) -> Result<()> {
+    let vault = resolve::open_vault(session, vault_ref)?;
+    let item = resolve::find_trashed_item(&vault, target)?;
+    let version = vault.untrash_item(item.item_id).map_err(map_vault_error)?;
+    println!(
+        "restored {:?} from trash (now version {version})",
+        item.payload.title
+    );
+    Ok(())
+}
+
 // --- proxied paths (daemon holds the session) ----------------------------
 
 /// Serialize an [`lp_vault::ItemPayload`] to the wire JSON `Value`.
@@ -686,6 +792,58 @@ fn restore_proxied(
     )?;
     let new_version = expect_ok_message(&resp)?.unwrap_or_default();
     println!("restored version {version} of {target} as new {new_version}");
+    Ok(())
+}
+
+fn trash_list_proxied(
+    profile: &str,
+    client: &mut Client,
+    vault_ref: &str,
+    json_out: bool,
+) -> Result<()> {
+    let resp = daemonctl::call(
+        client,
+        &Request::ListTrash {
+            profile: profile.to_string(),
+            vault: vault_ref.to_string(),
+        },
+    )?;
+    daemonctl::check_error(&resp)?;
+    let Response::TrashEntries { entries } = resp else {
+        bail!(CliError::internal(anyhow::anyhow!(
+            "unexpected daemon response: {}",
+            resp.kind()
+        )));
+    };
+    let rows: Vec<TrashRow> = entries
+        .into_iter()
+        .map(|e| TrashRow {
+            id: e.id,
+            title: e.title,
+            type_str: e.type_str,
+            deleted_at: e.deleted_at,
+            purge_after: e.purge_after,
+        })
+        .collect();
+    print_trash(&rows, json_out)
+}
+
+fn untrash_proxied(
+    profile: &str,
+    client: &mut Client,
+    vault_ref: &str,
+    target: &str,
+) -> Result<()> {
+    let resp = daemonctl::call(
+        client,
+        &Request::UntrashItem {
+            profile: profile.to_string(),
+            vault: vault_ref.to_string(),
+            target: target.to_string(),
+        },
+    )?;
+    let version = expect_ok_message(&resp)?.unwrap_or_default();
+    println!("restored {target:?} from trash (now {version})");
     Ok(())
 }
 
