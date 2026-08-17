@@ -53,6 +53,12 @@ anyhow = "1"
 # --- Stable, documented --json output. Also parses `key=value` field flags into
 # --- typed payload values via serde_json::Value. ---
 serde_json = "1"
+# --- Derive-only. Used by the `localpass mcp` server for the JSON-RPC envelope
+# --- (Deserialize) and the masked item shapes (Serialize), so the masking choke
+# --- point can hand out a type that is serializable *by construction* while the
+# --- raw view is not. No new crates in the tree — lp-vault/lp-daemon already
+# --- resolve the exact same serde + serde_derive. ---
+serde = { version = "1", features = ["derive"] }
 # --- Generation randomness ONLY. This is the same OS CSPRNG lp-crypto uses
 # --- (getrandom → OsRng, PRD §5.2); permitted here for password/passphrase
 # --- generation because no key-hierarchy secret is involved. NOT used for any

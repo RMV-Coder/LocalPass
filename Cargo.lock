@@ -1278,6 +1278,7 @@ dependencies = [
  "predicates",
  "rpassword",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "uuid",
