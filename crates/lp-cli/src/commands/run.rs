@@ -109,7 +109,10 @@ fn compose_resolved_proxied(
 }
 
 /// Load an env-set's entries through the daemon (`GetRawPayload`).
-fn load_env_set_proxied(
+///
+/// Shared with the MCP server's `run_with_secrets` tool ([`crate::mcp`]), which
+/// injects secrets exactly the way `run` does.
+pub(crate) fn load_env_set_proxied(
     profile: &str,
     client: &mut Client,
     vault_ref: &str,
@@ -147,7 +150,7 @@ fn load_env_set_proxied(
 /// (`ResolveField`), naming the failing KEY on error without leaking a value.
 /// A reference always carries its own vault (unlike a bare `--env-set` name),
 /// so no default-vault argument is needed here.
-fn resolve_reference_proxied(
+pub(crate) fn resolve_reference_proxied(
     profile: &str,
     client: &mut Client,
     key: &str,
@@ -215,7 +218,9 @@ fn compose_resolved(session: &Session, args: &RunArgs) -> Result<OrderedEnv> {
 }
 
 /// Load all entries of an env-set item as `(key, value)` pairs.
-fn load_env_set(
+///
+/// Shared with the MCP server's `run_with_secrets` tool ([`crate::mcp`]).
+pub(crate) fn load_env_set(
     session: &Session,
     vault_ref: &str,
     set_ref: &str,
@@ -323,7 +328,7 @@ fn spawn_and_wait(mut cmd: Command, program: &str) -> Result<()> {
 
 /// The child's effective `PATH` (case-insensitively), for program resolution.
 #[cfg(windows)]
-fn env_path(env: &OrderedEnv) -> Option<String> {
+pub(crate) fn env_path(env: &OrderedEnv) -> Option<String> {
     env.iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("PATH"))
         .map(|(_, v)| v.to_string())
@@ -338,7 +343,7 @@ fn env_path(env: &OrderedEnv) -> Option<String> {
 /// (the caller meant that exact thing). A name that cannot be resolved is also
 /// returned as-is, so `Command` still produces the same clear "not found" error.
 #[cfg(windows)]
-fn resolve_program(program: &str, path_var: Option<String>) -> std::ffi::OsString {
+pub(crate) fn resolve_program(program: &str, path_var: Option<String>) -> std::ffi::OsString {
     use std::path::Path;
 
     if Path::new(program).extension().is_some() || program.contains('\\') || program.contains('/') {
