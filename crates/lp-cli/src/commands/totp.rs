@@ -41,13 +41,19 @@ use lp_daemon::client::Client;
 use lp_daemon::protocol::{Request, Response};
 
 /// The computed TOTP code plus its (non-secret) display metadata. Shared shape
-/// for the direct and proxied paths so output is identical.
-struct Computed {
-    code: String,
-    seconds_remaining: u32,
-    period: u32,
-    digits: u32,
-    algo: String,
+/// for the direct and proxied paths so output is identical — and reused by the
+/// MCP server's `totp_code` tool ([`crate::mcp`]).
+pub(crate) struct Computed {
+    /// The current zero-padded code.
+    pub code: String,
+    /// Whole seconds left in the current time window.
+    pub seconds_remaining: u32,
+    /// The time step in seconds.
+    pub period: u32,
+    /// The digit count.
+    pub digits: u32,
+    /// The algorithm token (`SHA1` / `SHA256` / `SHA512`).
+    pub algo: String,
 }
 
 /// The poll interval for `--watch` (short, so a clock jump can't leave a stale
@@ -87,7 +93,11 @@ fn run_direct(profile_dir: &Path, src: PasswordSource, args: &TotpArgs) -> Resul
 /// Resolve the item, verify it is a totp item, decode the secret, compute the
 /// code, and zeroize the secret. The base32 secret exists only inside this
 /// function and is wiped before it returns.
-fn compute_direct(session: &lp_vault::Session, vault_ref: &str, target: &str) -> Result<Computed> {
+pub(crate) fn compute_direct(
+    session: &lp_vault::Session,
+    vault_ref: &str,
+    target: &str,
+) -> Result<Computed> {
     let vault = resolve::open_vault(session, vault_ref)?;
     let item = resolve::find_item(&vault, target)?;
 
@@ -148,7 +158,7 @@ fn run_proxied(profile_dir: &Path, client: &mut Client, args: &TotpArgs) -> Resu
     Ok(())
 }
 
-fn compute_proxied(
+pub(crate) fn compute_proxied(
     profile: &str,
     client: &mut Client,
     vault_ref: &str,
