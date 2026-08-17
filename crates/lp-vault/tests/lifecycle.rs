@@ -133,6 +133,29 @@ fn full_lifecycle_create_edit_history_restore_delete_purge_unlock() {
     assert!(vault.get_item(note_id).is_err());
     assert_eq!(vault.list_trash().unwrap().len(), 1);
 
+    // The trashed item's payload is still readable via the trash view (for the
+    // trash list UX) — but NOT via the live getter.
+    let trashed = vault.get_trashed_item(note_id).unwrap();
+    assert_eq!(trashed.payload.title, "secure note body");
+    // A live item is not readable through the trash view.
+    assert!(vault.get_trashed_item(login_id).is_err());
+
+    // Untrash → revived as a new version; back in the live list, out of trash.
+    let revived_ver = vault.untrash_item(note_id).unwrap();
+    assert_eq!(revived_ver, 2);
+    assert_eq!(vault.list_items().unwrap().len(), 6);
+    assert!(vault.list_trash().unwrap().is_empty());
+    assert_eq!(
+        vault.get_item(note_id).unwrap().payload.title,
+        "secure note body"
+    );
+    // Untrashing a live item is invalid.
+    assert!(vault.untrash_item(note_id).is_err());
+
+    // Delete it again for the purge leg below.
+    vault.delete_item(note_id, 30 * 24 * 3600 * 1000).unwrap();
+    assert_eq!(vault.list_trash().unwrap().len(), 1);
+
     // Purge with a `now` past the purge window → item is shredded, unrecoverable.
     let far_future = i64::MAX / 2;
     let purged = vault.purge_expired_trash(far_future).unwrap();

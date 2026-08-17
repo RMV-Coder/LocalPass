@@ -873,6 +873,63 @@ impl<'s> Vault<'s> {
         Ok(out)
     }
 
+    /// Get a trashed (tombstoned) item's current version (decrypted) — the
+    /// trash-view counterpart of [`get_item`](Self::get_item), which hides
+    /// tombstoned items. Only items that are **in** the trash resolve here, so
+    /// a caller cannot use this to bypass the live/trash split.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotFound`] if the item does not exist or is not in the trash;
+    /// [`Error::DecryptionFailed`].
+    pub fn get_trashed_item(&self, item_id: ItemId) -> Result<Item> {
+        let conn = self.connect()?;
+        if !is_tombstoned(&conn, &item_id)? {
+            return Err(Error::NotFound("item (not in trash)"));
+        }
+        self.read_item(&conn, &item_id)
+    }
+
+    /// Restore a trashed item out of the trash (PRD §4.10 recover-within-window).
+    ///
+    /// A forward-restore of the item's **current** version via
+    /// [`restore_version`](Self::restore_version): the payload is re-sealed as a
+    /// new version and the tombstone is dropped, so the revival is an ordinary
+    /// signed `restore` op the sync layer already understands ("restore is an
+    /// edit", sync-protocol.md §4.3). Returns the new current version.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Invalid`] if the item exists but is not in the trash.
+    /// - [`Error::NotFound`] if the item does not exist.
+    pub fn untrash_item(&self, item_id: ItemId) -> Result<i64> {
+        let current: i64 = {
+            let conn = self.connect()?;
+            if !is_tombstoned(&conn, &item_id)? {
+                // Distinguish "live item" (invalid to untrash) from "no item".
+                return match conn
+                    .query_row(
+                        "SELECT 1 FROM items WHERE item_id = ?1",
+                        params![item_id.to_vec()],
+                        |_| Ok(true),
+                    )
+                    .optional()?
+                {
+                    Some(_) => Err(Error::Invalid("item is not in trash")),
+                    None => Err(Error::NotFound("item")),
+                };
+            }
+            conn.query_row(
+                "SELECT current_version FROM items WHERE item_id = ?1",
+                params![item_id.to_vec()],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(Error::NotFound("item"))?
+        };
+        self.restore_version(item_id, current)
+    }
+
     /// Permanently shred trash whose `purge_after <= now`: delete the item, its
     /// versions, wrapped keys, and the tombstone (vault-format.md §4.10 shred).
     /// Op rows are append-only and are **not** removed (chain integrity).
