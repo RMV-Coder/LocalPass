@@ -1,6 +1,7 @@
-# Publish a GitHub release for the desktop app whenever a new app version
-# lands on main: build the Windows bundle and attach the MSI + NSIS installers
-# under a `desktop-v<version>` tag.
+# Publish a GitHub release for the app whenever a new app version lands on
+# main: build the Windows bundle (MSI + NSIS) and the signed Android APK and
+# attach them under a `desktop-v<version>` tag (the tag prefix is historical;
+# the release covers every platform the app ships on).
 #
 # Trigger model: `npm run bundle` (or bundle:minor / bundle:major) bumps the
 # version locally; the bump merges through a PR like any other change; this
@@ -9,7 +10,7 @@
 # version whose tag already exists) is skipped, so ordinary desktop work never
 # spams releases.
 
-name: Desktop release
+name: App release
 
 on:
   push:
@@ -85,7 +86,7 @@ jobs:
           $assets = @(Get-ChildItem "$bundle/msi/*.msi") + @(Get-ChildItem "$bundle/nsis/*-setup.exe")
           if ($assets.Count -eq 0) { throw "no installer artifacts found under $bundle" }
           gh release create $tag @($assets.FullName) `
-            --title "LocalPass Desktop v${{ steps.version.outputs.version }}" `
+            --title "LocalPass v${{ steps.version.outputs.version }}" `
             --generate-notes
 
   # Build, sign, and attach the Android APK to the same release. Signing uses

@@ -1,6 +1,6 @@
 {
   "name": "localpass-desktop",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "LocalPass desktop GUI — a fully local, offline password & secrets manager (Tauri 2 + Svelte 5). MPL-2.0.",
   "license": "MPL-2.0",
   "type": "module",
