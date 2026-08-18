@@ -4,7 +4,7 @@
 
 [package]
 name = "localpass-desktop"
-version = "0.1.1"
+version = "0.1.2"
 description = "LocalPass desktop GUI (Tauri 2 backend) — a thin daemon client; the webview renders and requests, all secret handling stays in Rust."
 edition = "2024"
 rust-version = "1.90"
