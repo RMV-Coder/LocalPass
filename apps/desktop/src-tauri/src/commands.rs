@@ -35,7 +35,7 @@ use crate::item_input::{self, NewItemInput};
 use crate::model::{
     self, AdoptedVaultView, CreatedAccount, DeviceIdentityView, GeneratedView, ItemSummaryView,
     ItemView, PeerView, PendingDeviceView, SessionState, SyncAdoptView, SyncDeviceView,
-    SyncPullView, SyncPushView, SyncStatusView, TotpView, VaultView,
+    SyncPullView, SyncPushView, SyncStatusView, TotpView, TrashEntryView, VaultView,
 };
 
 /// Map a [`DaemonError`] into the `SessionState`-flavoured error the UI shows.
@@ -502,6 +502,38 @@ pub fn update_item(vault: String, id: String, input: NewItemInput) -> Result<(),
         vault,
         target: id,
         payload,
+    })
+    .map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    match resp {
+        Response::Ok { .. } => Ok(()),
+        other => Err(format!("unexpected daemon response: {}", other.kind())),
+    }
+}
+
+/// List a vault's trashed items (metadata + titles only; no field values).
+#[tauri::command]
+pub fn list_trash(vault: String) -> Result<Vec<TrashEntryView>, String> {
+    let profile = daemon::profile_string()?;
+    let resp = daemon::call(&Request::ListTrash { profile, vault }).map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    match resp {
+        Response::TrashEntries { entries } => {
+            Ok(entries.iter().map(model::trash_entry_view).collect())
+        }
+        other => Err(format!("unexpected daemon response: {}", other.kind())),
+    }
+}
+
+/// Restore a trashed item out of the trash (the daemon forward-restores its
+/// current version and drops the tombstone). Returns `()` on success.
+#[tauri::command]
+pub fn untrash_item(vault: String, id: String) -> Result<(), String> {
+    let profile = daemon::profile_string()?;
+    let resp = daemon::call(&Request::UntrashItem {
+        profile,
+        vault,
+        target: id,
     })
     .map_err(|e| e.to_string())?;
     check_response_error(&resp)?;

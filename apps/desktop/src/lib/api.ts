@@ -31,6 +31,7 @@ import type {
   SyncPushView,
   SyncStatusView,
   TotpView,
+  TrashEntryView,
   VaultView,
 } from "./types";
 
@@ -145,6 +146,16 @@ export function updateItem(vault: string, id: string, input: NewItemInput): Prom
 /** Move an item to the trash (30-day retention). */
 export function deleteItem(vault: string, id: string): Promise<void> {
   return invoke<void>("delete_item", { vault, id });
+}
+
+/** Trashed items in a vault (metadata + titles only; no secret values). */
+export function listTrash(vault: string): Promise<TrashEntryView[]> {
+  return invoke<TrashEntryView[]>("list_trash", { vault });
+}
+
+/** Restore a trashed item out of the trash (undo a delete within the window). */
+export function untrashItem(vault: string, id: string): Promise<void> {
+  return invoke<void>("untrash_item", { vault, id });
 }
 
 // --- Devices & Sync ------------------------------------------------------

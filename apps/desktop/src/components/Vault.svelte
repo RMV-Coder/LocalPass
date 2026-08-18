@@ -8,8 +8,8 @@
   reveals happen inside ItemDetail.
 -->
 <script lang="ts">
-  import { listVaults, createVault, deleteVault, listItems, search as searchApi, getItem } from "../lib/api";
-  import type { VaultView, ItemSummaryView, ItemView } from "../lib/types";
+  import { listVaults, createVault, deleteVault, listItems, listTrash, untrashItem, search as searchApi, getItem } from "../lib/api";
+  import type { VaultView, ItemSummaryView, ItemView, TrashEntryView } from "../lib/types";
   import { typeLabel, formatTimestamp } from "../lib/format";
   import ItemDetail from "./ItemDetail.svelte";
   import ItemForm from "./ItemForm.svelte";
@@ -54,6 +54,8 @@
     selectedItem = "";
     query = "";
     view = "item";
+    showTrash = false;
+    trash = [];
     await refreshItems();
   }
 
@@ -140,11 +142,54 @@
     view = "item";
   }
 
-  // After a delete: clear selection and refresh the list.
+  // After a delete: clear selection and refresh the list (and the trash
+  // section, which just gained an entry, if it is open).
   async function onItemDeleted() {
     selectedItem = "";
     view = "item";
     await refreshItems();
+    if (showTrash) await refreshTrash();
+  }
+
+  // --- Trash (deleted items, recoverable for 30 days) ---
+  let showTrash = $state(false);
+  let trash = $state<TrashEntryView[]>([]);
+  let trashLoading = $state(false);
+  let restoringId = $state(""); // the entry currently being restored
+
+  async function refreshTrash() {
+    if (!selectedVault) return;
+    trashLoading = true;
+    try {
+      trash = await listTrash(selectedVault);
+    } catch (err) {
+      trash = [];
+      error = typeof err === "string" ? err : "Could not load the trash.";
+    } finally {
+      trashLoading = false;
+    }
+  }
+
+  async function toggleTrash() {
+    showTrash = !showTrash;
+    if (showTrash) await refreshTrash();
+  }
+
+  async function restoreFromTrash(id: string) {
+    if (restoringId) return;
+    restoringId = id;
+    error = "";
+    try {
+      await untrashItem(selectedVault, id);
+      await refreshTrash();
+      await refreshItems();
+      selectedItem = id; // show the revived item
+      view = "item";
+    } catch (err) {
+      error = typeof err === "string" ? err : "Could not restore the item.";
+    } finally {
+      restoringId = "";
+    }
   }
 
   // The selected vault's display name. Declared before the derived values that
@@ -417,6 +462,54 @@
           </li>
         {/each}
       </ul>
+    {/if}
+
+    <!-- Trash: deleted items, recoverable for 30 days (PRD §4.10). Collapsed by
+         default; loads (decrypts titles) only when opened. -->
+    {#if selectedVault}
+      <div style="border-top:1px solid var(--border);margin-top:auto">
+        <button
+          class="row"
+          aria-expanded={showTrash}
+          onclick={toggleTrash}
+          title="Deleted items are recoverable for 30 days"
+        >
+          <span class="row-title">🗑 Trash</span>
+          {#if showTrash && !trashLoading}
+            <span class="row-meta"><span class="badge">{trash.length}</span></span>
+          {/if}
+        </button>
+        {#if showTrash}
+          {#if trashLoading}
+            <p class="empty">Loading…</p>
+          {:else if trash.length === 0}
+            <p class="empty">Trash is empty.</p>
+          {:else}
+            <ul class="list" aria-label="Trashed items">
+              {#each trash as t (t.id)}
+                <li>
+                  <div class="row" style="display:flex;align-items:center;gap:0.5rem">
+                    <span style="flex:1;min-width:0">
+                      <span class="row-title">{t.title}</span>
+                      <span class="row-meta">
+                        <span class="badge">{typeLabel(t.type_str)}</span>
+                        <span>deleted {formatTimestamp(t.deleted_at)}</span>
+                      </span>
+                    </span>
+                    <button
+                      class="btn btn-small"
+                      onclick={() => restoreFromTrash(t.id)}
+                      disabled={restoringId !== ""}
+                    >
+                      {restoringId === t.id ? "Restoring…" : "Restore"}
+                    </button>
+                  </div>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        {/if}
+      </div>
     {/if}
   </section>
 
