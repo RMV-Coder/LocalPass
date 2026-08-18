@@ -17,7 +17,7 @@ status against the PRD (including what is still partial or deferred).
 | `lp-crypto` — crypto core | ✅ Argon2id + Secret Key KDF, XChaCha20-Poly1305 envelopes, key wrapping, X25519 sealing, Ed25519 signing, BLAKE3 chaining, RFC-6238 TOTP |
 | `lp-vault` — storage core | ✅ Account store, vaults, item CRUD with per-version keys, immutable history, trash + prune, signed op log with hash chain, encrypted incremental search index, backups |
 | `lp-daemon` — key-holding daemon | ✅ Same-user IPC session reuse, idle auto-lock, vault-backed SSH agent |
-| `lp-cli` — `localpass` binary | ✅ init/vault/item/search/generate/password, `run`/`env` secret injection, `totp`, `ssh`, `backup`, `import`/`export`, `sync`, `device`, `kit` |
+| `lp-cli` — `localpass` binary | ✅ init/vault/item/search/generate/password, `run`/`env` secret injection, `totp`, `ssh`, `backup`, `import`/`export`, `sync`, `device`, `kit`, `mcp` (MCP server for AI agents) |
 | `lp-sync` — sync engine | ✅ Signed op-log ingest + deterministic merge, file-based shipping, cross-device key sharing (live LAN/mDNS transport is a documented follow-up) |
 | `lp-porter` — import/export | ✅ 1Password/Bitwarden/LastPass/CSV/`.env`/KeePass KDBX 4 import, age-encrypted archive export |
 | `lp-native-host` — browser bridge | ✅ Fill-scoped native-messaging host (the extension UI itself is not yet built) |
@@ -44,6 +44,23 @@ cargo run -p lp-cli -- generate --words 5
 ```
 
 **Print your Emergency Kit and store it offline.** There is no cloud reset: losing your master password, Secret Key, and devices means the data is gone — by design.
+
+## Secrets for AI coding agents (MCP)
+
+`localpass mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io) server on stdio, so an AI coding agent can **use** your secrets without ever **seeing** them.
+
+```sh
+localpass unlock                          # so the server proxies through the daemon
+claude mcp add localpass -- localpass mcp # register it with Claude Code
+```
+
+The rule is absolute: **no MCP tool ever returns a raw secret value.** Anything a tool returns is copied into the agent's transcript — logged, replayed, often sent to a third party — so a password that reaches a transcript must be considered disclosed. Instead:
+
+- `list_vaults` / `list_items` / `get_item` return ids, titles, kinds, and field **names**, with every secret value **masked**;
+- `run_with_secrets` is the only path a value takes out of the vault, and it goes exactly one place — the **environment of a child process** the agent runs (`npm test`, `psql`, a migration) — then every occurrence of it is **redacted out of the captured stdout/stderr** before the reply is sent;
+- `totp_code` returns the current 6-digit code (a short-lived derivative), never the TOTP seed.
+
+There is no tool to create, edit, delete, or export anything. Full tool reference and the redaction contract: [docs/specs/mcp-server.md](docs/specs/mcp-server.md).
 
 ## Desktop app (GUI)
 

@@ -66,6 +66,38 @@
   $effect(() => {
     boot();
   });
+
+  // Fall back to the unlock screen when the daemon's idle auto-lock fires:
+  // schedule a status refresh for the moment the current idle window expires.
+  // `Status` is a PASSIVE request server-side (it does not reset the idle
+  // timer), so this observation cannot postpone the auto-lock it is watching
+  // for. While the vault stays in use, each refresh re-arms the timer with the
+  // fresh remaining time; once the daemon has locked, the refresh routes to
+  // Unlock and the unlocked panes unmount (wiping any revealed values).
+  $effect(() => {
+    if (session?.state !== "unlocked" || session.idle_remaining_secs === null) {
+      return;
+    }
+    const t = setTimeout(refresh, (session.idle_remaining_secs + 2) * 1000);
+    return () => clearTimeout(t);
+  });
+
+  // Also re-check on window focus/visibility: a laptop that slept past the
+  // timeout should show the unlock screen the moment the user comes back, not
+  // stale (previously revealed) data.
+  $effect(() => {
+    const onWake = () => {
+      if (session?.state === "unlocked" && document.visibilityState === "visible") {
+        refresh();
+      }
+    };
+    window.addEventListener("focus", onWake);
+    document.addEventListener("visibilitychange", onWake);
+    return () => {
+      window.removeEventListener("focus", onWake);
+      document.removeEventListener("visibilitychange", onWake);
+    };
+  });
 </script>
 
 <svelte:head>

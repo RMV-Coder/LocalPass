@@ -14,6 +14,8 @@
 //! - [`commands`] — one module per command; each returns `anyhow::Result<()>`.
 //! - [`daemonctl`] — the daemon-first / direct-fallback routing and daemon
 //!   lifecycle (start/stop/unlock/lock proxying).
+//! - [`mcp`] — the `localpass mcp` Model Context Protocol stdio server, which
+//!   lets an AI coding agent use secrets without ever seeing their values.
 //! - [`unlock`] — the shared Secret-Key-load + password + unlock flow.
 //! - [`profile`] — profile-dir resolution and on-device Secret Key storage.
 //! - [`content`] / [`output`] / [`resolve`] — payload building, masked
@@ -37,6 +39,7 @@ mod dotenv;
 mod envmap;
 mod error;
 mod generate;
+mod mcp;
 mod otpauth;
 mod output;
 mod profile;
@@ -120,6 +123,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Ssh { command } => commands::ssh::run(&profile_dir, src, no_daemon, command),
         Command::Totp(args) => commands::totp::run(&profile_dir, src, no_daemon, args),
         Command::Audit(args) => commands::audit::run(&profile_dir, src, args),
+        Command::Mcp => mcp::run(&profile_dir, src, no_daemon),
         Command::Browser { command } => commands::browser::run(command),
     }
 }

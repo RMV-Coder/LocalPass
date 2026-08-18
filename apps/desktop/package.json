@@ -1,6 +1,6 @@
 {
   "name": "localpass-desktop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "LocalPass desktop GUI — a fully local, offline password & secrets manager (Tauri 2 + Svelte 5). MPL-2.0.",
   "license": "MPL-2.0",
   "type": "module",
@@ -12,7 +12,11 @@
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
     "tauri": "tauri",
-    "bundle": "node scripts/prepare-sidecar.mjs && tauri build"
+    "bump": "node scripts/bump-version.mjs",
+    "bundle": "node scripts/bump-version.mjs patch && node scripts/prepare-sidecar.mjs && tauri build",
+    "bundle:minor": "node scripts/bump-version.mjs minor && node scripts/prepare-sidecar.mjs && tauri build",
+    "bundle:major": "node scripts/bump-version.mjs major && node scripts/prepare-sidecar.mjs && tauri build",
+    "bundle:nobump": "node scripts/prepare-sidecar.mjs && tauri build"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1",
