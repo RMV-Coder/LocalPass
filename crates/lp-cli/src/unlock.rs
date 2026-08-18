@@ -14,7 +14,7 @@
 //!
 //! | Source                | When                          | Note |
 //! |-----------------------|-------------------------------|------|
-//! | `LOCALPASS_PASSWORD`  | always checked first          | script-only; env vars can leak into process listings and are inherited by children — prefer stdin |
+//! | `LOCALPASS_PASSWORD`  | always checked first          | script-only; env vars can leak into process listings and are inherited by your shell's children — prefer stdin. (LocalPass itself never passes it on: [`crate::envmap::base_env`] strips it from every `run`/`mcp` child.) |
 //! | `--password-stdin`    | flag set                      | read one line from stdin; the recommended scripted path (pipe it) |
 //! | hidden TTY prompt     | interactive, no other source  | via `rpassword`; never echoed |
 //!
