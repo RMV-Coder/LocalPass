@@ -12,7 +12,11 @@
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
     "tauri": "tauri",
-    "bundle": "node scripts/prepare-sidecar.mjs && tauri build"
+    "bump": "node scripts/bump-version.mjs",
+    "bundle": "node scripts/bump-version.mjs patch && node scripts/prepare-sidecar.mjs && tauri build",
+    "bundle:minor": "node scripts/bump-version.mjs minor && node scripts/prepare-sidecar.mjs && tauri build",
+    "bundle:major": "node scripts/bump-version.mjs major && node scripts/prepare-sidecar.mjs && tauri build",
+    "bundle:nobump": "node scripts/prepare-sidecar.mjs && tauri build"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1",

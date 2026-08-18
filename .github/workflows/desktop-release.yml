@@ -1,0 +1,180 @@
+# Publish a GitHub release for the desktop app whenever a new app version
+# lands on main: build the Windows bundle and attach the MSI + NSIS installers
+# under a `desktop-v<version>` tag.
+#
+# Trigger model: `npm run bundle` (or bundle:minor / bundle:major) bumps the
+# version locally; the bump merges through a PR like any other change; this
+# workflow notices the new version on main, builds it, and tags + releases it.
+# One release per version — a push that does not change the version (or a
+# version whose tag already exists) is skipped, so ordinary desktop work never
+# spams releases.
+
+name: Desktop release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/desktop/**"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Tag + release the bundled version
+    runs-on: windows-latest
+    outputs:
+      new: ${{ steps.gate.outputs.new }}
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need tags to decide whether this version is released
+
+      - name: Read the app version
+        id: version
+        shell: pwsh
+        run: |
+          $v = (Get-Content apps/desktop/src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          "version=$v" >> $env:GITHUB_OUTPUT
+          "tag=desktop-v$v" >> $env:GITHUB_OUTPUT
+
+      - name: Skip if this version is already released
+        id: gate
+        shell: pwsh
+        run: |
+          git fetch --tags --quiet
+          $exists = git tag --list "${{ steps.version.outputs.tag }}"
+          if ($exists) { "new=false" >> $env:GITHUB_OUTPUT } else { "new=true" >> $env:GITHUB_OUTPUT }
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.gate.outputs.new == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.gate.outputs.new == 'true'
+        with:
+          workspaces: |
+            .
+            apps/desktop/src-tauri
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.new == 'true'
+        with:
+          node-version: 22
+
+      - name: Build the bundle (no version bump in CI)
+        if: steps.gate.outputs.new == 'true'
+        working-directory: apps/desktop
+        run: |
+          npm ci
+          npm run bundle:nobump
+
+      - name: Tag and create the release
+        if: steps.gate.outputs.new == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ steps.version.outputs.tag }}"
+          git tag $tag ${{ github.sha }}
+          git push origin $tag
+          $bundle = "apps/desktop/src-tauri/target/release/bundle"
+          $assets = @(Get-ChildItem "$bundle/msi/*.msi") + @(Get-ChildItem "$bundle/nsis/*-setup.exe")
+          if ($assets.Count -eq 0) { throw "no installer artifacts found under $bundle" }
+          gh release create $tag @($assets.FullName) `
+            --title "LocalPass Desktop v${{ steps.version.outputs.version }}" `
+            --generate-notes
+
+  # Build, sign, and attach the Android APK to the same release. Signing uses
+  # the dedicated RELEASE keystore from repo secrets (ANDROID_KEYSTORE_B64,
+  # ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS) — NOT the debug keystore, so
+  # a device that still runs a debug-signed build needs one uninstall/reinstall
+  # when first moving to a released APK (signature change; see docs/android.md).
+  # If the secrets are absent the job skips quietly rather than failing the
+  # desktop release.
+  android:
+    name: Android APK
+    needs: release
+    if: needs.release.outputs.new == 'true'
+    runs-on: ubuntu-latest
+    env:
+      NDK_VERSION: "27.0.12077973"
+    steps:
+      - name: Check signing secrets
+        id: secrets
+        env:
+          KS: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KS" ]; then echo "have=true" >> "$GITHUB_OUTPUT"; else echo "have=false" >> "$GITHUB_OUTPUT"; echo "signing secrets not set; skipping the Android build"; fi
+
+      - uses: actions/checkout@v4
+        if: steps.secrets.outputs.have == 'true'
+      - uses: actions/setup-java@v4
+        if: steps.secrets.outputs.have == 'true'
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: actions/setup-node@v4
+        if: steps.secrets.outputs.have == 'true'
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.secrets.outputs.have == 'true'
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        if: steps.secrets.outputs.have == 'true'
+        with:
+          workspaces: |
+            .
+            apps/desktop/src-tauri
+
+      - name: Install Android SDK pieces
+        if: steps.secrets.outputs.have == 'true'
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "ndk;$NDK_VERSION" "platforms;android-34" "build-tools;34.0.0" > /dev/null
+          echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: Build the release APK (aarch64)
+        if: steps.secrets.outputs.have == 'true'
+        working-directory: apps/desktop
+        run: |
+          npm ci
+          # gen/android is gitignored, so init from scratch and regenerate the
+          # icons afterwards (tauri icon's android output does not persist).
+          npx tauri android init
+          npx tauri icon app-icon.png
+          npx tauri android build --apk --target aarch64
+
+      - name: Sign the APK with the release keystore
+        if: steps.secrets.outputs.have == 'true'
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          unsigned=$(find apps/desktop/src-tauri/gen/android -name "*-release-unsigned.apk" | head -1)
+          if [ -z "$unsigned" ]; then echo "no unsigned release APK found"; find apps/desktop/src-tauri/gen/android -name "*.apk"; exit 1; fi
+          tools="$ANDROID_HOME/build-tools/34.0.0"
+          echo "$ANDROID_KEYSTORE_B64" | base64 -d > release.keystore
+          out="LocalPass_${{ needs.release.outputs.version }}_aarch64.apk"
+          "$tools/zipalign" -f -p 4 "$unsigned" aligned.apk
+          "$tools/apksigner" sign --ks release.keystore \
+            --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --out "$out" aligned.apk
+          "$tools/apksigner" verify "$out"
+          rm -f release.keystore aligned.apk
+          echo "APK=$out" >> "$GITHUB_ENV"
+
+      - name: Attach the APK to the release
+        if: steps.secrets.outputs.have == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ needs.release.outputs.tag }}" "$APK"
