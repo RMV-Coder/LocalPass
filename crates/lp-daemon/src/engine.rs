@@ -241,7 +241,8 @@ impl State {
         }
     }
 
-    /// Reset the idle timer (called after every successful request).
+    /// Reset the idle timer (called after every handled request that
+    /// [`counts_as_activity`] — i.e. everything except the passive `Status`).
     fn touch(&mut self) {
         self.last_activity = Instant::now();
     }
@@ -437,6 +438,12 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
             expected: state.profile().display().to_string(),
         });
     }
+
+    // Whether this request counts as user activity for the idle auto-lock.
+    // `Status` is a passive read: the GUI refreshes it on a timer to discover
+    // an auto-lock that already happened, and a poll that reset the idle timer
+    // would keep the vault awake forever.
+    let is_activity = counts_as_activity(&request);
 
     let handled = match request {
         Request::Ping | Request::Shutdown => unreachable!("handled above"),
@@ -865,10 +872,24 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
         }),
     };
 
-    // Any successfully-handled request (even one returning a usage Error) counts
-    // as activity and resets the idle timer — the user is clearly present.
-    state.touch();
+    // Any successfully-handled ACTIVE request (even one returning a usage
+    // Error) counts as activity and resets the idle timer — the user is
+    // clearly present. Passive reads (`Status`) do not; see above.
+    if is_activity {
+        state.touch();
+    }
     handled
+}
+
+/// Whether a request counts as user activity for the idle auto-lock timer.
+///
+/// `Status` is the one passive request: clients poll it to *observe* lock
+/// state (the GUI schedules a refresh for the moment `idle_remaining_secs`
+/// expires so it can fall back to the unlock screen), and an observation must
+/// not postpone the thing it is observing. `Ping`/`Shutdown` never reach the
+/// activity accounting at all.
+fn counts_as_activity(request: &Request) -> bool {
+    !matches!(request, Request::Status { .. })
 }
 
 /// The profile string carried by a request, if any.
@@ -1464,6 +1485,66 @@ mod tests {
         let st = State::new(PathBuf::from("/tmp/x"), Duration::from_secs(600));
         assert!(!st.is_unlocked());
         assert_eq!(st.idle_remaining_secs(), None);
+    }
+
+    #[test]
+    fn status_is_passive_but_active_requests_reset_the_idle_timer() {
+        use std::thread::sleep;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let autolock = Duration::from_secs(600);
+        let mut st = State::new(dir.path().to_path_buf(), autolock);
+        // CreateAccount unlocks the session (one real Argon2 derivation).
+        let created = handle(
+            &mut st,
+            Request::CreateAccount {
+                profile: dir.path().display().to_string(),
+                password: "test-password-123".into(),
+            },
+        );
+        assert!(
+            !matches!(created.response, Response::Error { .. }),
+            "create failed: {:?}",
+            created.response
+        );
+        assert!(st.is_unlocked());
+
+        // Let some idle time accrue, then observe via Status: the remaining
+        // time must have DECREASED (the poll did not reset the timer).
+        sleep(Duration::from_millis(1100));
+        let _ = handle(
+            &mut st,
+            Request::Status {
+                profile: dir.path().display().to_string(),
+            },
+        );
+        let after_status = st.idle_remaining_secs().expect("unlocked");
+        assert!(
+            after_status < autolock.as_secs(),
+            "Status must not reset the idle timer (remaining: {after_status})"
+        );
+
+        // An active request resets it back to the full window.
+        let _ = handle(
+            &mut st,
+            Request::ListVaults {
+                profile: dir.path().display().to_string(),
+            },
+        );
+        // `idle_remaining_secs` truncates the sub-second sliver that elapsed
+        // since the reset, so "full window" reads as `autolock` or one below.
+        let after_active = st.idle_remaining_secs().expect("unlocked");
+        assert!(
+            after_active >= autolock.as_secs() - 1,
+            "ListVaults must reset the idle timer (remaining: {after_active})"
+        );
+        assert!(after_active > after_status);
+
+        assert!(!counts_as_activity(&Request::Status {
+            profile: String::new()
+        }));
+        assert!(counts_as_activity(&Request::ListVaults {
+            profile: String::new()
+        }));
     }
 
     #[test]
