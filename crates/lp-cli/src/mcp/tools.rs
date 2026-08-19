@@ -357,22 +357,11 @@ fn run_with_secrets(backend: &mut Backend, args: &Value) -> Result<Value> {
 }
 
 /// The child's base environment: this process's, minus the master-password
-/// channel.
-///
-/// [`crate::envmap::base_env`] inherits everything, which is right for
-/// `localpass run` (the child's output goes to the user's own terminal). Here
-/// the child's output is captured and returned to a model, so `LOCALPASS_PASSWORD`
-/// — which a scripted launcher may well have set for us — must not be reachable
-/// by a child that runs `env`.
+/// channel. [`crate::envmap::base_env`] strips `LOCALPASS_PASSWORD` for every
+/// child spawner (`localpass run` included) — doubly important here, where the
+/// child's output is captured and returned to a model.
 fn inherited_env() -> OrderedEnv {
-    let mut env = OrderedEnv::new();
-    for (k, v) in std::env::vars() {
-        if k == crate::unlock::PASSWORD_ENV {
-            continue;
-        }
-        env.set(k, v);
-    }
-    env
+    crate::envmap::base_env(true)
 }
 
 /// Read `command` as either an array of strings or a tokenized string.

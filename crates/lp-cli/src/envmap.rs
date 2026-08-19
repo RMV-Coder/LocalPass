@@ -77,22 +77,38 @@ pub const MINIMAL_PASSTHROUGH: &[&str] = &[
 
 /// Build the base environment onto which resolved vars are layered.
 ///
-/// - `inherit == true`: a snapshot of the whole parent environment.
+/// - `inherit == true`: a snapshot of the whole parent environment, **minus**
+///   [`crate::unlock::PASSWORD_ENV`] — the master password is LocalPass's own
+///   credential channel and is never a child's business; a child running `env`
+///   (or logging its environment) must not be able to disclose it.
 /// - `inherit == false`: only [`MINIMAL_PASSTHROUGH`] names that are actually
 ///   set in the parent.
 #[must_use]
 pub fn base_env(inherit: bool) -> OrderedEnv {
-    let mut env = OrderedEnv::new();
     if inherit {
-        for (k, v) in std::env::vars() {
-            env.set(k, v);
+        return inherit_filtered(std::env::vars());
+    }
+    let mut env = OrderedEnv::new();
+    for name in MINIMAL_PASSTHROUGH {
+        if let Ok(val) = std::env::var(name) {
+            env.set(*name, val);
         }
-    } else {
-        for name in MINIMAL_PASSTHROUGH {
-            if let Ok(val) = std::env::var(name) {
-                env.set(*name, val);
-            }
+    }
+    env
+}
+
+/// The inherit-mode filter: every `(name, value)` pair except
+/// [`crate::unlock::PASSWORD_ENV`]. Split from [`base_env`] so the filter is
+/// testable against a synthetic environment (the crate forbids `unsafe`, so
+/// tests cannot plant real process-env vars; `tests/run_and_env.rs` proves the
+/// live path end-to-end).
+fn inherit_filtered<I: IntoIterator<Item = (String, String)>>(vars: I) -> OrderedEnv {
+    let mut env = OrderedEnv::new();
+    for (k, v) in vars {
+        if k == crate::unlock::PASSWORD_ENV {
+            continue;
         }
+        env.set(k, v);
     }
     env
 }
@@ -106,6 +122,29 @@ mod tests {
         e.iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn inherit_filter_strips_the_master_password() {
+        let vars = vec![
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            (
+                crate::unlock::PASSWORD_ENV.to_string(),
+                "hunter2-test-only".to_string(),
+            ),
+            ("APP_MODE".to_string(), "dev".to_string()),
+        ];
+        let env = inherit_filtered(vars);
+        assert_eq!(
+            pairs(&env),
+            vec![
+                ("PATH".to_string(), "/usr/bin".to_string()),
+                ("APP_MODE".to_string(), "dev".to_string()),
+            ],
+            "LOCALPASS_PASSWORD must be stripped; everything else passes through in order"
+        );
+        // The minimal passthrough list never contained it either.
+        assert!(!MINIMAL_PASSTHROUGH.contains(&crate::unlock::PASSWORD_ENV));
     }
 
     #[test]

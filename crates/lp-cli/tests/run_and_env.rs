@@ -507,3 +507,29 @@ fn item_list_shows_iso_timestamp() {
         // A YYYY-MM-DD HH:MMZ column: match the year prefix and the trailing Z.
         .stdout(predicate::str::is_match(r"20\d\d-\d\d-\d\d \d\d:\d\dZ").unwrap());
 }
+
+/// `run` must never pass `LOCALPASS_PASSWORD` on to the child: it is
+/// LocalPass's own credential channel (here it authenticates the unlock), and
+/// a child that prints its environment must not be able to disclose it.
+#[test]
+fn run_never_passes_the_master_password_to_the_child() {
+    let profile = TestProfile::initialized();
+    add_login(&profile, "Leaky", "u", "pw-not-under-test");
+
+    let mut args: Vec<String> = vec![
+        "run".into(),
+        "-e".into(),
+        "PROOF=localpass://personal/Leaky/username".into(),
+        "--".into(),
+    ];
+    args.extend(echo_var_args("LOCALPASS_PASSWORD"));
+
+    // profile.cmd() sets LOCALPASS_PASSWORD (the unlock path under test); the
+    // child echoes that very variable and must not see the value.
+    profile
+        .cmd()
+        .args(args.iter().map(String::as_str))
+        .assert()
+        .success()
+        .stdout(contains(common::TEST_PASSWORD).not());
+}

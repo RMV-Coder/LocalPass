@@ -42,10 +42,12 @@ impl DisplayField {
     }
 
     /// The value as shown given `reveal`: the raw value, or the mask if secret
-    /// and not revealed. An empty value renders empty (nothing to mask).
+    /// and not revealed. An **empty** secret masks too — rendering it empty
+    /// would disclose whether the secret is set, a small oracle a masked view
+    /// has no business leaking.
     #[must_use]
     pub fn shown(&self, reveal: bool) -> String {
-        if self.secret && !reveal && !self.value.is_empty() {
+        if self.secret && !reveal {
             MASK.to_string()
         } else {
             self.value.clone()
@@ -248,6 +250,24 @@ mod tests {
         let user = find_field(&fields, "username").unwrap();
         assert!(!user.secret);
         assert_eq!(user.shown(false), "alice");
+    }
+
+    #[test]
+    fn empty_secret_masks_too_no_set_unset_oracle() {
+        let f = DisplayField::new("password", "", true);
+        assert_eq!(
+            f.shown(false),
+            MASK,
+            "a masked view must not disclose whether the secret is set"
+        );
+        assert_eq!(
+            f.shown(true),
+            "",
+            "reveal still shows the true (empty) value"
+        );
+        // Non-secret empty values keep rendering empty.
+        let plain = DisplayField::new("username", "", false);
+        assert_eq!(plain.shown(false), "");
     }
 
     #[test]

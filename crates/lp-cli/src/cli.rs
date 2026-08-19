@@ -769,7 +769,9 @@ op://<vault>/<item>/<field> resolve identically. <vault> is a name or id, \
 <item> a title or id, <field> a field name (or an env-set entry key). \
 Percent-encoding (%XX) in a segment is decoded.\n\n\
 The child environment is the parent environment plus the resolved vars \
-(resolved vars override inherited ones). With --no-inherit the child gets ONLY \
+(resolved vars override inherited ones). LOCALPASS_PASSWORD is never passed \
+to the child in either mode: it is LocalPass's own credential channel, not \
+the child's. With --no-inherit the child gets ONLY \
 the resolved vars plus a minimal passthrough (PATH, SYSTEMROOT, TEMP/TMP, \
 HOME/USERPROFILE, and a few OS essentials) for basic operability.\n\n\
 SPAWN: on Unix, LocalPass calls exec() and is replaced by the child (it \
