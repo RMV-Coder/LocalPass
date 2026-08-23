@@ -9,10 +9,32 @@
 //!   daemon;
 //! - otherwise (no daemon, locked daemon, `--no-daemon`) → [`Backend::Direct`],
 //!   the server unlocks with the master password itself and holds the
-//!   `lp_vault::Session` for its lifetime.
+//!   `lp_vault::Session` in this process.
 //!
 //! Either way the *outputs* of this module are identical, so the tool layer
 //! above never branches on the route.
+//!
+//! # Idle auto-lock on the Direct route
+//!
+//! An MCP server is long-lived — an agent host starts it once and leaves it
+//! running for hours. On the **Proxy** route that is safe: the keys live in the
+//! daemon, which auto-locks on its own idle timer, and each tool call is a
+//! request that resets it (so an *active* agent keeps the vault awake and an
+//! idle one does not).
+//!
+//! On the **Direct** route there was no such timer at all: the process held an
+//! unlocked `Session` from startup until stdin EOF, which meant a forgotten MCP
+//! server kept the vault unlocked indefinitely — strictly weaker than every
+//! other surface. [`DirectSession`] closes that: it mirrors the daemon's idle
+//! timeout ([`lp_daemon::DEFAULT_AUTOLOCK_SECS`], overridable with the same
+//! [`lp_daemon::AUTOLOCK_ENV`] variable), each vault-touching call resets it,
+//! and once it lapses the session is dropped (zeroizing key material) and every
+//! later call fails cleanly.
+//!
+//! It **fails rather than re-unlocking** on purpose: re-unlocking would require
+//! keeping the master password in memory for the process's lifetime, which is
+//! the very exposure the timeout exists to end. The agent's host restarts the
+//! server (and re-prompts) instead.
 //!
 //! # Secret exposure
 //!
@@ -24,6 +46,7 @@
 //! masked them before they cross the pipe (defense in depth).
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
 use lp_daemon::client::Client;
@@ -55,11 +78,74 @@ pub enum Backend {
         /// The profile string every request carries.
         profile: String,
     },
-    /// Hold an unlocked session in this process.
-    Direct {
-        /// The unlocked session.
-        session: Box<Session>,
-    },
+    /// Hold an unlocked session in this process, under its own idle timeout.
+    Direct(DirectSession),
+}
+
+/// An in-process unlocked session with an idle auto-lock, for the Direct route.
+///
+/// The session is `Some` while unlocked and `None` once the idle window has
+/// lapsed. Dropping it runs `Session`'s zeroizing teardown, so the key material
+/// is gone the moment the timeout fires — not merely flagged as expired.
+pub struct DirectSession {
+    /// The unlocked session, or `None` once auto-locked.
+    session: Option<Box<Session>>,
+    /// The idle window. `Duration::ZERO` means "never auto-lock".
+    autolock: Duration,
+    /// When the last vault-touching call happened.
+    last_activity: Instant,
+}
+
+impl DirectSession {
+    /// Wrap `session` with the configured idle window.
+    fn new(session: Session) -> Self {
+        Self {
+            session: Some(Box::new(session)),
+            autolock: configured_autolock(),
+            last_activity: Instant::now(),
+        }
+    }
+
+    /// Borrow the session for one vault-touching call, enforcing the idle
+    /// window first and resetting it on success.
+    ///
+    /// # Errors
+    ///
+    /// [`CliError::Usage`] once the window has lapsed — a clean, secret-free
+    /// failure the agent sees as a tool error. It never re-unlocks: that would
+    /// require holding the master password for the process's lifetime.
+    fn session(&mut self) -> Result<&Session> {
+        if self.session.is_some()
+            && !self.autolock.is_zero()
+            && self.last_activity.elapsed() >= self.autolock
+        {
+            // Dropping the session zeroizes its key material.
+            if let Some(s) = self.session.take() {
+                s.lock();
+            }
+        }
+        let secs = self.autolock.as_secs();
+        let session = self.session.as_deref().ok_or_else(|| {
+            CliError::usage(format!(
+                "the LocalPass session auto-locked after {secs}s idle; \
+                 restart the MCP server to unlock again"
+            ))
+        })?;
+        self.last_activity = Instant::now();
+        Ok(session)
+    }
+}
+
+/// The Direct-route idle window: [`lp_daemon::AUTOLOCK_ENV`] if it parses, else
+/// [`lp_daemon::DEFAULT_AUTOLOCK_SECS`]. `0` disables auto-lock, exactly as it
+/// does for the daemon — the two surfaces read the same knob so a user who sets
+/// a policy once gets it everywhere.
+fn configured_autolock() -> Duration {
+    let secs = std::env::var(lp_daemon::AUTOLOCK_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(lp_daemon::DEFAULT_AUTOLOCK_SECS);
+    Duration::from_secs(secs)
 }
 
 impl Backend {
@@ -77,9 +163,7 @@ impl Backend {
             }),
             Route::Direct => {
                 let (session, _sk) = unlock::unlock(profile_dir, src)?;
-                Ok(Backend::Direct {
-                    session: Box::new(session),
-                })
+                Ok(Backend::Direct(DirectSession::new(session)))
             }
         }
     }
@@ -89,7 +173,7 @@ impl Backend {
     pub fn route_label(&self) -> &'static str {
         match self {
             Backend::Proxy { .. } => "daemon",
-            Backend::Direct { .. } => "direct",
+            Backend::Direct(_) => "direct",
         }
     }
 
@@ -116,7 +200,8 @@ impl Backend {
                     .map(|(id, name)| VaultEntry { id, name })
                     .collect())
             }
-            Backend::Direct { session } => Ok(session
+            Backend::Direct(direct) => Ok(direct
+                .session()?
                 .list_vaults()
                 .map_err(crate::error::map_vault_error)?
                 .into_iter()
@@ -161,7 +246,8 @@ impl Backend {
                 }
                 Ok(out)
             }
-            Backend::Direct { session } => {
+            Backend::Direct(direct) => {
+                let session = direct.session()?;
                 let vault = resolve::open_vault(session, vault)?;
                 let items = vault.list_items().map_err(crate::error::map_vault_error)?;
                 Ok(items.iter().map(view_from_item).collect())
@@ -177,7 +263,8 @@ impl Backend {
     pub fn get_item(&mut self, vault: &str, item: &str) -> Result<ItemView> {
         match self {
             Backend::Proxy { client, profile } => get_item_proxied(client, profile, vault, item),
-            Backend::Direct { session } => {
+            Backend::Direct(direct) => {
+                let session = direct.session()?;
                 let vault = resolve::open_vault(session, vault)?;
                 let item = resolve::find_item(&vault, item)?;
                 Ok(view_from_item(&item))
@@ -199,7 +286,8 @@ impl Backend {
             Backend::Proxy { client, profile } => {
                 run_cmd::resolve_reference_proxied(profile, client, key, reference)
             }
-            Backend::Direct { session } => {
+            Backend::Direct(direct) => {
+                let session = direct.session()?;
                 reference::resolve_str(session, reference).map_err(|e| {
                     CliError::usage(format!("could not resolve {key}={reference}: {e:#}")).into()
                 })
@@ -219,7 +307,7 @@ impl Backend {
             Backend::Proxy { client, profile } => {
                 run_cmd::load_env_set_proxied(profile, client, vault, item)
             }
-            Backend::Direct { session } => run_cmd::load_env_set(session, vault, item),
+            Backend::Direct(direct) => run_cmd::load_env_set(direct.session()?, vault, item),
         }
     }
 
@@ -238,7 +326,7 @@ impl Backend {
             Backend::Proxy { client, profile } => {
                 totp_cmd::compute_proxied(profile, client, vault, item)
             }
-            Backend::Direct { session } => totp_cmd::compute_direct(session, vault, item),
+            Backend::Direct(direct) => totp_cmd::compute_direct(direct.session()?, vault, item),
         }
     }
 }

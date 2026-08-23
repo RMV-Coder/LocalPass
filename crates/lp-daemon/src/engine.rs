@@ -931,6 +931,28 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
             })
         }),
 
+        Request::GetEnvSet { vault, item, .. } => with_session(state, |session| {
+            let v = open_vault(session, &vault)?;
+            let it = find_item(&v, &item)?;
+            let lp_vault::TypeData::EnvSet { entries } = &it.payload.type_data else {
+                return Err(usage(format!(
+                    "item {item:?} is a {} item, not an env-set",
+                    it.payload.type_data.type_str()
+                )));
+            };
+            // Audit (PRD §4.9): handing over every value of an env-set is a bulk
+            // secret disclosure — record a whole-item secret read, matching what
+            // the direct route records. Best-effort, and only after the type
+            // check passed (a refused request disclosed nothing).
+            v.record_secret_read(&it.item_id, None).ok();
+            Ok(Response::EnvEntries {
+                entries: entries
+                    .iter()
+                    .map(|e| (e.key.clone(), e.value.clone()))
+                    .collect(),
+            })
+        }),
+
         Request::AuditList { limit, since, .. } => {
             with_session(state, |session| audit_list(session, limit, since))
         }
@@ -1065,6 +1087,7 @@ fn request_profile(request: &Request) -> Option<&str> {
     match request {
         Request::Status { profile, .. }
         | Request::AuditList { profile, .. }
+        | Request::GetEnvSet { profile, .. }
         | Request::Unlock { profile, .. }
         | Request::CreateAccount { profile, .. }
         | Request::ListVaults { profile }

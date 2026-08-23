@@ -545,6 +545,26 @@ pub enum Request {
         /// The attachment id (hyphenated) to delete.
         attachment_id: String,
     },
+    /// Read every `(key, value)` of an **env-set** item, in plaintext, for
+    /// secret injection (`localpass run --env-set`, and the MCP
+    /// `run_with_secrets` tool). Answered by [`Response::EnvEntries`].
+    ///
+    /// This exists as its own request rather than reusing
+    /// [`GetRawPayload`](Request::GetRawPayload) because the two mean different
+    /// things: a raw-payload fetch is the support call behind `item edit` and is
+    /// deliberately **not** audited, whereas handing over every value of an
+    /// env-set is a bulk secret disclosure that **is** — recorded as a
+    /// whole-item secret read, exactly as the direct route records it. Splitting
+    /// them is what keeps proxied and direct injection symmetric in the audit
+    /// log. A non-env-set target is a usage error.
+    GetEnvSet {
+        /// The profile directory being operated on.
+        profile: String,
+        /// Vault name or id.
+        vault: String,
+        /// Item title or id (must be an `env_set` item).
+        item: String,
+    },
     /// **Audit:** read this device's recent audit records (PRD §4.9). Answered by
     /// [`Response::AuditRecords`].
     ///
@@ -618,6 +638,7 @@ impl Request {
             Request::ListAttachments { .. } => "ListAttachments",
             Request::GetAttachment { .. } => "GetAttachment",
             Request::DeleteAttachment { .. } => "DeleteAttachment",
+            Request::GetEnvSet { .. } => "GetEnvSet",
             Request::AuditList { .. } => "AuditList",
             Request::Shutdown => "Shutdown",
         }
@@ -1189,6 +1210,13 @@ pub enum Response {
         /// How many plaintext bytes were written to the destination path.
         bytes_written: u64,
     },
+    /// Every entry of an env-set item (answer to [`Request::GetEnvSet`]).
+    /// Carries plaintext secret values — the same exposure as
+    /// [`Response::Field`], and audited as a whole-item secret read.
+    EnvEntries {
+        /// The `(key, value)` pairs, in the item's stored order.
+        entries: Vec<(String, String)>,
+    },
     /// This device's audit records (answer to [`Request::AuditList`]), **most
     /// recent first**. Metadata only — see [`WireAuditRecord`].
     AuditRecords {
@@ -1244,6 +1272,7 @@ impl Response {
             Response::Attachment { .. } => "Attachment",
             Response::Attachments { .. } => "Attachments",
             Response::AttachmentSaved { .. } => "AttachmentSaved",
+            Response::EnvEntries { .. } => "EnvEntries",
             Response::AuditRecords { .. } => "AuditRecords",
             Response::Locked => "Locked",
             Response::WrongProfile { .. } => "WrongProfile",

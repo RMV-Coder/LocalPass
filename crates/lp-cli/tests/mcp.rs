@@ -40,8 +40,18 @@ struct McpServer {
 impl McpServer {
     /// Spawn `localpass --profile <dir> mcp` with piped stdio.
     fn spawn(profile: &TestProfile) -> Self {
+        Self::spawn_with_autolock(profile, None)
+    }
+
+    /// [`spawn`](Self::spawn), optionally pinning the Direct route's idle
+    /// auto-lock window (seconds) so the lapse can be tested without a long wait.
+    fn spawn_with_autolock(profile: &TestProfile, autolock_secs: Option<u64>) -> Self {
         let exe = assert_cmd::cargo::cargo_bin("localpass");
-        let mut child = Command::new(exe)
+        let mut cmd = Command::new(exe);
+        if let Some(secs) = autolock_secs {
+            cmd.env("LOCALPASS_AUTOLOCK_SECS", secs.to_string());
+        }
+        let mut child = cmd
             .arg("--profile")
             .arg(profile.path())
             .arg("--no-daemon") // hermetic: never touch a stray developer daemon
@@ -379,6 +389,54 @@ fn mcp_server_serves_tools_without_ever_returning_a_secret() {
     assert_eq!(wrong_type["isError"], json!(true));
 
     // --- clean shutdown on EOF -------------------------------------------
+    mcp.shutdown();
+}
+
+/// The Direct route holds an unlocked session in-process, so it must auto-lock
+/// on its own idle timer — otherwise a forgotten MCP server keeps the vault
+/// unlocked for as long as the agent host lives.
+///
+/// Drives one tool call (which succeeds and resets the timer), waits past a
+/// deliberately tiny window, and asserts the next call fails **cleanly** — as a
+/// tool error, not a crash — and that the failure never carries a secret.
+#[test]
+fn the_direct_route_auto_locks_when_idle() {
+    let profile = TestProfile::initialized();
+    seed(&profile);
+
+    // A 1-second window; the sleep below is comfortably past it.
+    let mut mcp = McpServer::spawn_with_autolock(&profile, Some(1));
+    mcp.request("initialize", json!({ "protocolVersion": "2025-06-18" }));
+    mcp.notify("notifications/initialized");
+
+    // While active, everything works.
+    let (before, _) = mcp.call_tool("list_vaults", json!({}));
+    assert!(
+        before.get("isError").is_none() || before["isError"] == json!(false),
+        "the first call must succeed: {before}"
+    );
+
+    // Go idle past the window.
+    std::thread::sleep(std::time::Duration::from_millis(2500));
+
+    let (after, _) = mcp.call_tool("list_vaults", json!({}));
+    assert_eq!(
+        after["isError"],
+        json!(true),
+        "an idle Direct session must auto-lock: {after}"
+    );
+    let text = after.to_string();
+    assert!(
+        text.contains("auto-locked"),
+        "the failure must say why: {text}"
+    );
+    assert_no_secret(&text, "the auto-lock error");
+
+    // It stays locked — it never silently re-unlocks (that would mean the
+    // master password was retained for the process's lifetime).
+    let (still, _) = mcp.call_tool("list_vaults", json!({}));
+    assert_eq!(still["isError"], json!(true), "stays locked: {still}");
+
     mcp.shutdown();
 }
 

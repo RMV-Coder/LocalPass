@@ -275,3 +275,194 @@ fn proxied_actions_record_audit_events_exactly_once() {
         let _ = handle.join();
     }
 }
+
+/// Kind code for `AuditKind::AccessDenied`.
+const KIND_ACCESS_DENIED: i64 = 13;
+
+/// End-to-end over the real IPC channel: caller attribution reaches the log, a
+/// keep-alive `Status` resets the idle timer while a passive one does not, a
+/// refused request is audited and does NOT reset the timer, and `AuditList`
+/// hands the records back without ever carrying a title or a secret.
+#[test]
+fn attribution_keepalive_and_refusals_over_ipc() {
+    let _env = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let username = unique_user("attrib");
+    let tmp = make_profile();
+    let profile = tmp.path().display().to_string();
+    let profile_path = tmp.path().to_path_buf();
+    let autolock_secs = 600u64;
+
+    let cfg = Config {
+        profile: tmp.path().to_path_buf(),
+        autolock: Duration::from_secs(autolock_secs),
+        username: username.clone(),
+        verbose: false,
+        no_ssh_agent: true,
+    };
+    let handle = std::thread::spawn(move || server::run(cfg));
+    assert!(wait_ready(&username, Duration::from_secs(5)), "server up");
+
+    // This test process speaks as an MCP server, so every frame it sends carries
+    // that attribution and everything the daemon audits for it says `mcp`.
+    lp_vault::audit::set_process_origin(lp_vault::AuditOrigin::sanitized(
+        lp_vault::AuditSource::Mcp,
+        Some("localpass-mcp-test"),
+        Some(std::process::id()),
+    ));
+
+    // --- A refusal while LOCKED is audited, keylessly ----------------------
+    {
+        let mut c = connect(&username);
+        let resp = c
+            .call(&Request::ListVaults {
+                profile: profile.clone(),
+            })
+            .unwrap();
+        assert!(matches!(resp, Response::Locked), "locked refusal");
+    }
+    assert_eq!(
+        count_kind(&profile_path, KIND_ACCESS_DENIED),
+        1,
+        "a locked refusal is audited even with no session and no keys"
+    );
+
+    // --- Unlock, then a revealed read attributed to us ---------------------
+    {
+        let mut c = connect(&username);
+        c.call(&Request::Unlock {
+            profile: profile.clone(),
+            password: TEST_PASSWORD.into(),
+            secret_key: None,
+            autolock_secs: None,
+        })
+        .unwrap();
+        c.call(&Request::GetItem {
+            profile: profile.clone(),
+            vault: "personal".into(),
+            target: "Login".into(),
+            version: None,
+            reveal: true,
+        })
+        .unwrap();
+    }
+
+    // --- Idle timer: passive Status observes, keep-alive Status refreshes ---
+    let remaining = |c: &mut Client, keepalive: bool| -> u64 {
+        let resp = c
+            .call(&Request::Status {
+                profile: profile.clone(),
+                keepalive,
+            })
+            .unwrap();
+        match resp {
+            Response::Status {
+                idle_remaining_secs,
+                ..
+            } => idle_remaining_secs.expect("unlocked"),
+            other => panic!("expected Status, got {other:?}"),
+        }
+    };
+    let mut c = connect(&username);
+    std::thread::sleep(Duration::from_millis(1100));
+    let after_passive = remaining(&mut c, false);
+    assert!(
+        after_passive < autolock_secs,
+        "a passive Status must not reset the idle timer (remaining {after_passive})"
+    );
+    // The keep-alive's OWN answer reports the timer as it was when the request
+    // arrived, so read it back with a second passive poll.
+    let _ = remaining(&mut c, true);
+    let after_keepalive = remaining(&mut c, false);
+    assert!(
+        after_keepalive > after_passive,
+        "a keepalive Status must reset the idle timer ({after_passive} -> {after_keepalive})"
+    );
+
+    // A refused request must not reset it either.
+    std::thread::sleep(Duration::from_millis(1100));
+    let before_refusal = remaining(&mut c, false);
+    let resp = c
+        .call(&Request::ListVaults {
+            profile: "/not/this/profile".into(),
+        })
+        .unwrap();
+    assert!(matches!(resp, Response::WrongProfile { .. }));
+    let after_refusal = remaining(&mut c, false);
+    assert!(
+        after_refusal <= before_refusal,
+        "a refused request must not reset the idle timer \
+         ({before_refusal} -> {after_refusal})"
+    );
+    assert_eq!(
+        count_kind(&profile_path, KIND_ACCESS_DENIED),
+        2,
+        "the wrong-profile refusal is audited too"
+    );
+
+    // --- AuditList: attributed, metadata-only, no title, no secret ---------
+    let resp = c
+        .call(&Request::AuditList {
+            profile: profile.clone(),
+            limit: Some(50),
+            since: None,
+        })
+        .unwrap();
+    let Response::AuditRecords { records } = resp else {
+        panic!("expected AuditRecords");
+    };
+    assert!(!records.is_empty(), "records came back");
+    // Newest first.
+    assert!(
+        records.windows(2).all(|w| w[0].seq >= w[1].seq),
+        "AuditList returns newest first"
+    );
+    let read = records
+        .iter()
+        .find(|r| r.kind == "item_secret_read")
+        .expect("the revealed read is in the log");
+    assert_eq!(
+        read.source.as_deref(),
+        Some("mcp"),
+        "attributed to the MCP client"
+    );
+    assert_eq!(read.process.as_deref(), Some("localpass-mcp-test"));
+    assert!(read.pid.is_some());
+    assert!(read.item_id.is_some(), "the read names its item id");
+    assert!(
+        records
+            .iter()
+            .any(|r| r.kind == "access_denied" && r.deny_reason.as_deref() == Some("locked")),
+        "the locked refusal is visible to a client"
+    );
+
+    // The whole response must carry no secret and no item TITLE — the log holds
+    // neither, and this is the boundary where a leak would show up.
+    let serialized = serde_json::to_string(&records).expect("serialize records");
+    assert!(
+        !serialized.contains(SECRET_PW),
+        "AuditList leaked a secret: {serialized}"
+    );
+    for title in ["Login", "RFC", "personal"] {
+        assert!(
+            !serialized.contains(title),
+            "AuditList leaked the {title:?} name: {serialized}"
+        );
+    }
+
+    // Reset the process-global attribution for any test that follows.
+    lp_vault::audit::set_process_origin(lp_vault::AuditOrigin::default());
+
+    {
+        let mut c = connect(&username);
+        let _ = c.call(&Request::Shutdown);
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && !handle.is_finished() {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    if handle.is_finished() {
+        let _ = handle.join();
+    }
+}
