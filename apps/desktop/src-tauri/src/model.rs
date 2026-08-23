@@ -20,7 +20,8 @@
 //! to unit-test exhaustively — see the tests at the bottom.
 
 use lp_daemon::protocol::{
-    LockState, Response, WireField, WireItem, WireItemSummary, WirePasswordHealth, WireTrashEntry,
+    LockState, Response, WireAuditRecord, WireField, WireItem, WireItemSummary, WirePasswordHealth,
+    WireTrashEntry,
 };
 use serde::Serialize;
 
@@ -398,6 +399,77 @@ pub fn trash_entry_view(e: &WireTrashEntry) -> TrashEntryView {
         type_str: e.type_str.clone(),
         deleted_at: e.deleted_at,
         purge_after: e.purge_after,
+    }
+}
+
+/// Environment description for the Dev tab's CLI/MCP guides.
+///
+/// Paths only, and only ones the user could read off their own filesystem. No
+/// session, no vault, no secret.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DevEnvView {
+    /// The profile directory this app operates on (display string).
+    pub profile: String,
+    /// The resolved path of the `localpass` CLI, if one was found beside the
+    /// app or on `PATH`. `None` means the UI should show the bare command name.
+    pub localpass_path: Option<String>,
+}
+
+/// One audit record for the Dev tab's activity viewer.
+///
+/// A near-verbatim mirror of [`WireAuditRecord`], and deliberately so: the audit
+/// log is **metadata only** and there is nothing here to mask. In particular
+/// there is **no title field** — the plaintext log stores ids, never names,
+/// because names are ciphertext everywhere else (`lp_vault::audit`). The webview
+/// resolves `item_id` to a title itself, against the unlocked vault it already
+/// lists, and falls back to a short id when the item is gone. Nothing in this
+/// struct is, or may become, a secret value.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct AuditRecordView {
+    /// Per-device gapless sequence number (1-based) — the row key.
+    pub seq: u64,
+    /// When the action happened (unix millis).
+    pub timestamp: i64,
+    /// The stable kind label (e.g. `item_secret_read`).
+    pub kind: String,
+    /// The item this record references, if any (hyphenated id — never a title).
+    pub item_id: Option<String>,
+    /// The vault this record references, if any (hyphenated id — never a name).
+    pub vault_id: Option<String>,
+    /// Which surface acted (`cli` / `gui` / `mcp` / …); `None` for a record
+    /// written before caller attribution existed.
+    pub source: Option<String>,
+    /// The caller's short process name (base name only, never a command line).
+    pub process: Option<String>,
+    /// The caller's process id, when known.
+    pub pid: Option<u32>,
+    /// The revealed field *name* for a secret read (never a value).
+    pub field: Option<String>,
+    /// Why an operation was refused, for an `access_denied` record.
+    pub deny_reason: Option<String>,
+    /// The record's optional short non-secret detail string.
+    pub detail: Option<String>,
+}
+
+/// Map a daemon [`WireAuditRecord`] to an [`AuditRecordView`].
+///
+/// A projection, not a masking step: the wire record has no secret to drop. The
+/// fields left behind (`device_id`, `peer_device_id`, `export_format`,
+/// `item_count`) are simply not rendered by this UI.
+#[must_use]
+pub fn audit_record_view(r: &WireAuditRecord) -> AuditRecordView {
+    AuditRecordView {
+        seq: r.seq,
+        timestamp: r.timestamp,
+        kind: r.kind.clone(),
+        item_id: r.item_id.clone(),
+        vault_id: r.vault_id.clone(),
+        source: r.source.clone(),
+        process: r.process.clone(),
+        pid: r.pid,
+        field: r.field.clone(),
+        deny_reason: r.deny_reason.clone(),
+        detail: r.detail.clone(),
     }
 }
 

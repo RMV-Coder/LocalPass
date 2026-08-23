@@ -118,6 +118,8 @@ pub fn run() {
             commands::update_item,
             commands::delete_item,
             commands::list_trash,
+            commands::audit_list,
+            commands::dev_env,
             commands::untrash_item,
             commands::preview_fingerprint,
             commands::export_identity,

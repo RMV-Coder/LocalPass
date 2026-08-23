@@ -15,7 +15,9 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AttachmentSavedView,
   AttachmentView,
+  AuditRecordView,
   CreatedAccount,
+  DevEnvView,
   DeviceIdentityView,
   EnvEntryView,
   GeneratedView,
@@ -151,6 +153,22 @@ export function deleteItem(vault: string, id: string): Promise<void> {
 /** Trashed items in a vault (metadata + titles only; no secret values). */
 export function listTrash(vault: string): Promise<TrashEntryView[]> {
   return invoke<TrashEntryView[]>("list_trash", { vault });
+}
+
+/** Paths the Dev tab's CLI/MCP guides quote: the profile directory and the
+ *  resolved `localpass` executable (or null if neither a sibling of the app nor
+ *  a `PATH` entry exists). Environment description only — no session, no
+ *  secret. */
+export function devEnv(): Promise<DevEnvView> {
+  return invoke<DevEnvView>("dev_env");
+}
+
+/** Recent audit records for this device, newest first (the Dev tab's activity
+ *  viewer). Metadata only — ids, kind labels, timestamps, caller attribution;
+ *  never a title and never a secret value. `limit` is clamped backend-side to
+ *  the daemon's own cap. Rejects when the vault is locked. */
+export function auditList(limit?: number): Promise<AuditRecordView[]> {
+  return invoke<AuditRecordView[]>("audit_list", { limit: limit ?? null });
 }
 
 /** Restore a trashed item out of the trash (undo a delete within the window). */
