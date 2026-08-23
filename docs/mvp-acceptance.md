@@ -110,7 +110,7 @@ db credential) are reserved in the payload schema but not implemented
 |--------------|--------|-------|------|
 | Emergency Kit | ✅ | `localpass init` (auto), `localpass kit`; `lp-cli/commands/kit.rs` | Text or HTML; contains the Secret Key + recovery instructions + no-recovery doctrine; refuses to write inside the profile dir. |
 | Automatic local backups | ◑ | `localpass backup create --to --keep`; `lp-vault/backup.rs` | Rotating encrypted snapshots with `--keep` (default 30) pruning **exist**, but they are **on-demand / user-or-scheduler-driven** — there is no built-in daily scheduler/timer. PRD §4.11 "automatic (default: daily)" scheduling is not implemented in-process; the mechanism is present, the automatic cadence is not. |
-| Local audit log (hash-chained: unlocks, failed unlocks, item reads, edits, exports, shares, token uses) | ✅ | `localpass audit [--since --json --verify]`; `lp-vault/audit.rs` (`audit_log` table in the account store) | Device-local, append-only, BLAKE3-chained log of unlock success/failure, item create/update/delete/restore, secret reads (reveal/`--field`/`localpass://`/totp/daemon reveal/resolve/fill), export, vault-share, and device-trust. Plaintext **metadata only** — ids, kinds, timestamps, field *names*; never a secret value or vault/item name (verified by dumping the table after a real reveal). `--verify` checks the chain + sequence for tamper. **`TokenUse` is the one §4.9 event with no source yet** (scoped API tokens are P2/unbuilt). |
+| Local audit log (hash-chained: unlocks, failed unlocks, item reads, edits, exports, shares, token uses) | ✅ | `localpass audit [--since --json --verify]`; `lp-vault/audit.rs` (`audit_log` table in the account store) | Device-local, append-only, BLAKE3-chained log of unlock success/failure, item create/update/delete/restore, secret reads (reveal/`--field`/`localpass://`/totp/daemon reveal/resolve/fill), export, vault-share, and device-trust. Plaintext **metadata only** — ids, kinds, timestamps, field *names*, a caller surface label + process *name* + pid; never a secret value, a vault/item name, or a command line (verified by dumping the table after a real reveal, and after passing a secret as a command-line argument). Refused attempts are recorded too (`access_denied`), keylessly, so a locked daemon still logs them. `--verify` checks the chain + sequence for tamper. **`TokenUse` is the one §4.9 event with no source yet** (scoped API tokens are P2/unbuilt). |
 
 ### 1.9 Signed releases + published format specs
 
@@ -167,8 +167,15 @@ tracked follow-ups. They are the real content of this document.
    `lp-vault/audit.rs` (`localpass audit`): a device-local, append-only,
    BLAKE3-chained log of unlocks/failed-unlocks/secret-reads/edits/exports/
    shares/device-trust, holding metadata only (never secret values or names),
-   with `--verify` tamper detection. The one §4.9 event still unsourced is
-   `TokenUse` (scoped API tokens are P2/unbuilt).
+   with `--verify` tamper detection. Records also carry **caller attribution**
+   (which surface acted — cli/gui/mcp/native_host/ssh_agent/daemon — plus the
+   caller's process name and pid, never a command line) and **refused attempts**
+   (`access_denied`: locked / wrong profile / not authorized), which a locked
+   daemon can still write because the append needs no keys. Both additions are
+   backward-compatible with existing chains: attribution is appended to a
+   record's canonical bytes only when present, so a pre-attribution log verifies
+   unchanged. The one §4.9 event still unsourced is `TokenUse` (scoped API
+   tokens are P2/unbuilt).
 
 5. **KDBX (KeePass) import (PRD §9.1 / §4.6).** Implemented — a focused KDBX 4
    reader (`import::kdbx::parse_file`) on RustCrypto primitives aligned to

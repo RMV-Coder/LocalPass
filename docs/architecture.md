@@ -189,7 +189,18 @@ Full envelope, AAD, and lifecycle rules are in
 5. VaultKey unwraps ItemKey → AEAD-decrypts the item payload
 6. daemon extracts the one requested field and returns its value over the channel
 7. plaintext existed only in daemon memory; only the single field crossed the wire
+8. audit log appends a secret read: {ts, kind, item id, field NAME, source, pid}
 ```
+
+**Idle auto-lock and activity.** Step 2's route probe is a keep-alive `Status`:
+a tool only probes because it is about to do real work, so it resets the
+daemon's idle timer — which is what keeps the vault unlocked across a long
+`localpass run` or MCP session even while the GUI sits idle. A *passive*
+`Status` (what the GUI and `localpass status` poll) does not: an observer must
+not postpone the auto-lock it is observing. A **refused** request — locked,
+wrong profile, or an authentication failure — never resets the timer either, so
+a probing process cannot hold the vault open by failing repeatedly; each such
+refusal is written to the audit log as `access_denied`.
 
 For the GUI the same read runs with `reveal = false` and is re-masked through
 `model::item_view_masked` (§6); a single revealed field takes the dedicated
@@ -287,10 +298,21 @@ Notes grounded in the specs and code:
   archive, and `lp-daemon` uses `ssh-key` for OpenSSH-format user keys in the SSH
   agent. Both reuse the exact primitive versions `lp-crypto` pins — no duplicated
   crypto surface ([LESSONS.md](../LESSONS.md)).
-- **No dedicated audit log.** The only hash-chained log in the system is the
-  **sync op log** (item mutations: create/update/delete/restore/rewrap). A
-  dedicated tamper-evident *audit* log of reads/unlocks/exports per PRD §4.9 is
-  **not implemented** — see [mvp-acceptance.md](mvp-acceptance.md).
+- **Two hash-chained logs, for different jobs.** The **sync op log** carries item
+  mutations between devices (create/update/delete/restore/rewrap). The
+  **audit log** (`lp-vault/audit.rs`, an `audit_log` table in the account store,
+  PRD §4.9) is device-local, never synced, and records *who did what, when*:
+  unlocks and failed unlocks, secret reads, mutations, exports, shares, pairing
+  toggles, and **refused attempts** (`access_denied` — locked / wrong profile /
+  not authorized, which a locked daemon can still write because the append needs
+  no keys). Each record carries a **caller attribution**: the surface
+  (`cli`/`gui`/`mcp`/`native_host`/`ssh_agent`/`daemon`) plus the caller's short
+  process name and pid — never a command line, which can contain a password.
+  Daemon clients self-report that attribution on the request envelope, which is
+  provenance over a same-user-only channel, not authentication. The log is
+  **plaintext metadata only** — ids, kinds, timestamps, field *names* — and
+  never a secret value or a vault/item name. Read it with `localpass audit`
+  (`--since`, `--json`, `--verify`) or, from a daemon client, `Request::AuditList`.
 - **Sync is file-based only** at MVP. Live Noise/mDNS transport, the relay, and
   team sharing/roles/revocation are Phase 2 / documented extension points
   (sync-protocol.md §6, §7.4, §10).

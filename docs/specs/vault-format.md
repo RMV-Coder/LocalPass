@@ -131,7 +131,53 @@ CREATE TABLE settings (
     value             TEXT,                      -- plaintext for non-sensitive
     value_env         BLOB                       -- Envelope v1 for sensitive; exactly one of value/value_env
 );
+
+-- The device-local, append-only, tamper-evident AUDIT LOG (PRD §4.9).
+-- Entirely PLAINTEXT METADATA, by design: integrity comes from the hash chain,
+-- not confidentiality (§2.1). Device-local and never synced.
+CREATE TABLE audit_log (
+    seq               INTEGER NOT NULL,          -- per-device, gapless, 1-based
+    device_id         BLOB    NOT NULL,          -- 16 bytes, the acting device
+    prev_hash         BLOB    NOT NULL,          -- BLAKE3-256 of the previous record's canonical bytes
+    timestamp         INTEGER NOT NULL,          -- unix millis
+    kind              INTEGER NOT NULL,          -- AuditKind wire code (1..=13)
+    item_id           BLOB,                      -- 16 bytes, when the kind references one
+    vault_id          BLOB,                      -- 16 bytes, when the kind references one
+    peer_device_id    BLOB,                      -- 16 bytes, for share/trust kinds
+    field             TEXT,                      -- a field NAME for a secret read (never a value)
+    format            TEXT,                      -- export format token
+    item_count        INTEGER NOT NULL DEFAULT 0,-- exported item count
+    detail            TEXT,                      -- optional short non-secret note
+    deny_reason       INTEGER,                   -- DenyReason code for kind 13 (access_denied)
+    origin_source     INTEGER,                   -- AuditSource code: which surface acted
+    origin_process    TEXT,                      -- caller's executable BASE NAME, <= 32 chars
+    origin_pid        INTEGER,                   -- caller's process id
+    PRIMARY KEY (device_id, seq)
+);
+CREATE INDEX idx_audit_timestamp ON audit_log (timestamp);
 ```
+
+### 2.1 Audit log rules
+
+- **Never stored:** any secret value, the master password, the Secret Key, any
+  vault or item **name** (names are ciphertext everywhere else — a name here
+  would be a plaintext leak), and **any command line** (a command line can carry
+  a password typed as an argument; only `origin_process`, an executable base
+  name, is kept, truncated to 32 characters).
+- **Chain:** `prev_hash` is the BLAKE3-256 of the previous record's canonical
+  bytes; the genesis is `blake3_256("localpass/v1/audit-genesis" || device_id)`,
+  raw-byte framed. `seq` must be gapless from 1 per device.
+- **Canonical bytes are append-only-compatible.** The caller attribution
+  (`origin_*`) is appended to a record's canonical bytes **only when present**,
+  so a record with no attribution — every record written before the columns
+  existed — hashes to exactly what it always did and **pre-existing chains still
+  verify**. Any future addition must follow the same rule or version the format.
+- **Refusals are recorded** (`kind = 13`, `access_denied`, with a `deny_reason`)
+  and the append needs **no key material** — the device id is a plaintext column
+  — so a *locked* vault can still log an attempt against it.
+- **Additive migration:** `deny_reason` and the `origin_*` columns arrived after
+  the table shipped and are added by an idempotent, `PRAGMA table_info`-gated
+  `ALTER TABLE` on first use, with no `format_version` bump (§9).
 
 **AAD for account-store envelopes** (out-of-band, reconstructed at
 decrypt time — never stored):

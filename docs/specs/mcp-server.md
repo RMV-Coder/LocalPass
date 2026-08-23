@@ -114,6 +114,31 @@ The server acquires a session **once at startup**, through the same
 `--profile`, `--no-daemon`, `--password-stdin` and `LOCALPASS_PASSWORD` behave
 exactly as documented for every other command. It then serves until stdin EOF.
 
+### 3.1 Idle auto-lock
+
+An MCP server is long-lived, so **both routes auto-lock when idle**:
+
+| Route | Mechanism |
+|-------|-----------|
+| proxy | the daemon's own idle timer. Each tool call is a request that resets it, so an active agent keeps the vault awake and a forgotten server does not. The server's startup route probe is sent as a **keep-alive** `Status`; a passive `Status` (what a GUI polls) never resets the timer. |
+| direct | the server's own timer, mirroring the daemon default of **600s** and reading the same `LOCALPASS_AUTOLOCK_SECS` variable (`0` = never). Each vault-touching tool call resets it. |
+
+When the direct-route window lapses the `lp_vault::Session` is **dropped**
+(zeroizing key material) and every later tool call returns an `isError` result
+saying the session auto-locked. The server does **not** re-unlock: doing so would
+require holding the master password in memory for the process's lifetime, which
+is exactly the exposure the timeout exists to end. The MCP host restarts the
+server (and re-prompts) instead.
+
+### 3.2 Audit attribution
+
+The server declares itself as the `mcp` surface, so every audited action it
+causes — a `localpass://` reference resolution, an env-set injection, a TOTP
+code — is recorded with `source = mcp` plus the server's process name and pid,
+on either route (on the proxy route the attribution rides on the request
+envelope and the daemon records it). See PRD §4.9 and `lp_vault::audit`. The
+audit log never stores a command line.
+
 There is **no MCP tool to unlock, lock, create, edit, delete, or export**. The
 surface is read-plus-inject only, by construction — an agent that is confused,
 prompt-injected, or adversarial cannot mutate a vault through it.
@@ -303,10 +328,12 @@ secret at all.
   trusting the child.
 - **Transcript capture** is the threat this surface exists to defeat, and §1
   covers it.
-- **The server holds an unlocked session for its whole lifetime** on the direct
-  route, so an MCP host that keeps the server alive keeps the vault unlocked for
-  that process. Prefer the daemon route (`localpass unlock` first), where the
-  daemon's idle auto-lock still applies.
+- **The server holds an unlocked session between tool calls** on the direct
+  route. It is bounded by the idle auto-lock in §3.1 — a forgotten server locks
+  itself — but within the window the key material is in this process's memory,
+  which is the T3 (same-user malware, vault unlocked) limit the PRD already
+  states honestly. The daemon route (`localpass unlock` first) is still
+  preferable: there the server holds no keys at all.
 
 ---
 
