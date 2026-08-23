@@ -14,7 +14,7 @@ use lp_vault::{Item, ItemPayload};
 
 use crate::protocol::{WireAuditRecord, WireField, WireItem, WireItemSummary, WirePasswordHealth};
 
-/// Render one audit record for the wire ([`crate::Request::AuditList`]).
+/// Render one audit record for the wire ([`crate::protocol::Request::AuditList`]).
 ///
 /// Ids become hyphenated UUIDs, the kind and the deny reason become their stable
 /// labels, and the caller attribution is flattened. **No title is produced and
