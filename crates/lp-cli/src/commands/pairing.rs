@@ -73,12 +73,15 @@ fn set(profile_dir: &Path, no_daemon: bool, enabled: bool) -> Result<()> {
 
 /// `pairing status` — report whether pairing mode is on and the seconds left.
 fn status(profile_dir: &Path, no_daemon: bool, json_out: bool) -> Result<()> {
-    match daemonctl::route(profile_dir, no_daemon) {
+    // Observing only — this reports countdowns, so neither the route probe nor
+    // the Status below may restart them.
+    match daemonctl::route_observing(profile_dir, no_daemon) {
         Route::Proxy(mut client) => {
             let resp = daemonctl::call(
                 &mut client,
                 &Request::Status {
                     profile: profile_dir.display().to_string(),
+                    keepalive: false,
                 },
             )?;
             if let Response::Status {

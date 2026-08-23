@@ -59,6 +59,18 @@ use unlock::PasswordSource;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // Declare which surface this process is, once, before anything can write an
+    // audit record (PRD §4.9 caller attribution). `localpass mcp` is a distinct
+    // surface — an AI agent driving the vault is worth telling apart from a
+    // human at a terminal — so it is labelled `mcp`, not `cli`. This also rides
+    // out on every daemon request envelope, so proxied work is attributed to us
+    // rather than to the daemon.
+    lp_vault::audit::set_process_origin(lp_vault::AuditOrigin::for_current_process(
+        match &cli.command {
+            Command::Mcp => lp_vault::AuditSource::Mcp,
+            _ => lp_vault::AuditSource::Cli,
+        },
+    ));
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {

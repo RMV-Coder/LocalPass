@@ -12,7 +12,44 @@ use lp_vault::health::PasswordHealth;
 use lp_vault::payload::{FieldKind, TypeData};
 use lp_vault::{Item, ItemPayload};
 
-use crate::protocol::{WireField, WireItem, WireItemSummary, WirePasswordHealth};
+use crate::protocol::{WireAuditRecord, WireField, WireItem, WireItemSummary, WirePasswordHealth};
+
+/// Render one audit record for the wire ([`crate::Request::AuditList`]).
+///
+/// Ids become hyphenated UUIDs, the kind and the deny reason become their stable
+/// labels, and the caller attribution is flattened. **No title is produced and
+/// none could be**: the audit log stores ids, not names, precisely so this
+/// plaintext record leaks nothing (`lp_vault::audit`). A client resolves ids to
+/// titles against its own unlocked vault.
+#[must_use]
+pub fn audit_to_wire(r: &lp_vault::AuditRecord) -> WireAuditRecord {
+    use lp_vault::AuditKind;
+    let (export_format, item_count) = match &r.kind {
+        AuditKind::Export { format, item_count } => (Some(format.clone()), Some(*item_count)),
+        _ => (None, None),
+    };
+    let field = match &r.kind {
+        AuditKind::ItemSecretRead { field, .. } => field.clone(),
+        _ => None,
+    };
+    WireAuditRecord {
+        seq: r.seq,
+        timestamp: r.timestamp,
+        device_id: r.device_id.to_hyphenated(),
+        kind: r.kind.label().to_string(),
+        item_id: r.kind.item_id().map(lp_vault::Id::to_hyphenated),
+        vault_id: r.kind.vault_id().map(lp_vault::Id::to_hyphenated),
+        peer_device_id: r.kind.peer_device_id().map(lp_vault::Id::to_hyphenated),
+        field,
+        export_format,
+        item_count,
+        deny_reason: r.kind.deny_reason().map(|d| d.label().to_string()),
+        source: r.origin.as_ref().map(|o| o.source.label().to_string()),
+        process: r.origin.as_ref().and_then(|o| o.process.clone()),
+        pid: r.origin.as_ref().and_then(|o| o.pid),
+        detail: r.detail.clone(),
+    }
+}
 
 /// The mask shown in place of a secret value (matches the CLI's `output::MASK`).
 pub const MASK: &str = "••••••";

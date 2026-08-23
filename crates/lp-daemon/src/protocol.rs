@@ -41,6 +41,27 @@
 //! The request/response `Debug` impls are hand-written to render the request
 //! *kind* only (never the password or a secret value), so `--verbose` logging
 //! and any accidental `{:?}` cannot leak.
+//!
+//! # Activity vs. observation
+//!
+//! Handling a request may reset the daemon's idle auto-lock timer. Two rules
+//! govern that, both enforced in [`crate::engine`]:
+//!
+//! 1. A **passive** request does not. [`Request::Status`] is the passive one: a
+//!    client polls it to *discover* a lock, and an observation that postponed
+//!    the auto-lock it observes would keep the vault awake forever. A client
+//!    that is about to do real work says so with `keepalive: true`.
+//! 2. A **refused** request does not, whatever it was. A `Locked`,
+//!    `WrongProfile`, or auth-failure answer leaves the timer alone, so a
+//!    probing process cannot hold the vault open by failing repeatedly.
+//!
+//! # Caller attribution
+//!
+//! Each request frame carries an optional [`WireOrigin`] naming the surface
+//! (CLI, GUI, MCP, …) plus its process name and pid, which the daemon puts in
+//! force while it handles that request so any audit record names the client
+//! rather than the daemon. It is provenance over a same-user-only channel, not
+//! authentication.
 
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
@@ -69,6 +90,23 @@ pub enum Request {
     Status {
         /// The profile the caller expects this daemon to serve.
         profile: String,
+        /// Whether this Status is a **client keep-alive** rather than a passive
+        /// observation.
+        ///
+        /// - `false` (the default, and what a GUI/`localpass daemon status` poll
+        ///   sends): a pure observation. It does **not** reset the idle
+        ///   auto-lock timer — an observer must not postpone the auto-lock it is
+        ///   observing, or a UI that polls to notice the lock would keep the
+        ///   vault awake forever.
+        /// - `true`: a tool is about to do real work and is probing which route
+        ///   to take (`lp_cli::daemonctl::route`). That is a present user, so it
+        ///   counts as activity and resets the timer — which is what keeps the
+        ///   vault alive across a long CLI/MCP run even when the GUI is idle.
+        ///
+        /// `#[serde(default)]` so a frame from an older peer, which has no such
+        /// field, still decodes — as the safe, passive `false`.
+        #[serde(default)]
+        keepalive: bool,
     },
     /// Unlock the session with a master password (and optionally the Secret Key
     /// display string; if omitted the daemon reads `<profile>/secret-key`).
@@ -507,9 +545,33 @@ pub enum Request {
         /// The attachment id (hyphenated) to delete.
         attachment_id: String,
     },
+    /// **Audit:** read this device's recent audit records (PRD §4.9). Answered by
+    /// [`Response::AuditRecords`].
+    ///
+    /// An authenticated, unlocked-session operation: the log lives in the account
+    /// store, and a locked daemon answers [`Response::Locked`] rather than
+    /// opening it. The response carries **metadata only** — ids, kind labels,
+    /// timestamps, the caller attribution — and never an item *title*, because
+    /// the audit log itself never stores one (a title in this plaintext log
+    /// would be a leak; [`lp_vault::audit`]). A client that wants titles resolves
+    /// the ids against the vault itself while unlocked.
+    AuditList {
+        /// The profile directory being operated on.
+        profile: String,
+        /// Return at most this many records, **most recent first**. `None` means
+        /// no cap. The daemon additionally clamps to [`MAX_AUDIT_LIMIT`].
+        limit: Option<u32>,
+        /// Only records with `timestamp >= since` (unix millis). `None` = all.
+        since: Option<i64>,
+    },
     /// Terminate the daemon: drop the session and exit, removing the endpoint.
     Shutdown,
 }
+
+/// The hard cap on how many audit records one [`Request::AuditList`] returns.
+/// A UI shows a recent window; an auditor uses `localpass audit`, which reads
+/// the store directly and is not limited.
+pub const MAX_AUDIT_LIMIT: u32 = 1000;
 
 impl Request {
     /// A short, non-secret label for logging (`--verbose` logs request kinds
@@ -556,6 +618,7 @@ impl Request {
             Request::ListAttachments { .. } => "ListAttachments",
             Request::GetAttachment { .. } => "GetAttachment",
             Request::DeleteAttachment { .. } => "DeleteAttachment",
+            Request::AuditList { .. } => "AuditList",
             Request::Shutdown => "Shutdown",
         }
     }
@@ -791,6 +854,99 @@ pub struct WireAttachment {
     pub filename: String,
     /// The plaintext size in bytes.
     pub size: i64,
+}
+
+/// One audit record rendered for the wire ([`Response::AuditRecords`]).
+///
+/// Deliberately **metadata only**, mirroring what the log itself stores: ids as
+/// hyphenated UUIDs, a stable kind label, a timestamp, and the caller
+/// attribution. There is **no title field and never will be** — the plaintext
+/// audit log stores no names ([`lp_vault::audit`]), and putting one here would
+/// invent a leak the storage layer refuses to have. Clients resolve `item_id` to
+/// a title themselves, against the unlocked vault.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct WireAuditRecord {
+    /// The per-device gapless sequence number (1-based).
+    pub seq: u64,
+    /// When the action happened (unix millis).
+    pub timestamp: i64,
+    /// The device the action happened on (hyphenated UUID).
+    pub device_id: String,
+    /// The stable kind label (e.g. `item_secret_read`, `access_denied`).
+    pub kind: String,
+    /// The item this record references, if any (hyphenated UUID).
+    pub item_id: Option<String>,
+    /// The vault this record references, if any (hyphenated UUID).
+    pub vault_id: Option<String>,
+    /// The peer device this record references, if any (hyphenated UUID).
+    pub peer_device_id: Option<String>,
+    /// The revealed field *name* for a secret read (never a value).
+    pub field: Option<String>,
+    /// The export format token, for an export record.
+    pub export_format: Option<String>,
+    /// The exported item count, for an export record.
+    pub item_count: Option<u64>,
+    /// Why an operation was refused, for an `access_denied` record.
+    pub deny_reason: Option<String>,
+    /// Which surface performed the action (`cli` / `gui` / `mcp` / …), or `None`
+    /// for a record written before attribution existed.
+    pub source: Option<String>,
+    /// The caller's short process name (base name only, never a command line).
+    pub process: Option<String>,
+    /// The caller's process id, when known.
+    pub pid: Option<u32>,
+    /// The record's optional short non-secret detail string.
+    pub detail: Option<String>,
+}
+
+/// The caller attribution a client self-reports on the request envelope.
+///
+/// Carried once per frame rather than per request variant, so adding it did not
+/// touch a single request shape. The daemon decodes it into an
+/// [`lp_vault::AuditOrigin`] and puts it in force for the duration of that
+/// request's handling, so any audit record written on the client's behalf names
+/// the client rather than the daemon.
+///
+/// **Provenance, not authentication:** the channel is same-user-only and the
+/// daemon already treats its peer as itself (PRD §8 T8), so this answers "which
+/// of my tools did this", not "prove who you are".
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct WireOrigin {
+    /// The surface label (see [`lp_vault::AuditSource::label`]). An unknown
+    /// label decodes to `unknown` rather than failing the frame.
+    #[serde(default)]
+    pub source: String,
+    /// The caller's process base name. Sanitized again daemon-side.
+    #[serde(default)]
+    pub process: Option<String>,
+    /// The caller's process id.
+    #[serde(default)]
+    pub pid: Option<u32>,
+}
+
+impl WireOrigin {
+    /// Render an [`lp_vault::AuditOrigin`] for the wire.
+    #[must_use]
+    pub fn from_origin(origin: &lp_vault::AuditOrigin) -> Self {
+        Self {
+            source: origin.source.label().to_string(),
+            process: origin.process.clone(),
+            pid: origin.pid,
+        }
+    }
+
+    /// Decode into an [`lp_vault::AuditOrigin`], **re-sanitizing** the process
+    /// name daemon-side: the peer is same-user and therefore trusted, but a
+    /// server never stores a peer-supplied string into a plaintext log without
+    /// re-applying its own base-name/length rules.
+    #[must_use]
+    pub fn to_origin(&self) -> lp_vault::AuditOrigin {
+        lp_vault::AuditOrigin::sanitized(
+            lp_vault::AuditSource::from_label(&self.source),
+            self.process.as_deref(),
+            self.pid,
+        )
+    }
 }
 
 /// The unlock/lock state reported by [`Response::Status`].
@@ -1033,6 +1189,12 @@ pub enum Response {
         /// How many plaintext bytes were written to the destination path.
         bytes_written: u64,
     },
+    /// This device's audit records (answer to [`Request::AuditList`]), **most
+    /// recent first**. Metadata only — see [`WireAuditRecord`].
+    AuditRecords {
+        /// The records (may be empty), newest first.
+        records: Vec<WireAuditRecord>,
+    },
     /// The requested operation needs an unlocked session and none is held.
     Locked,
     /// This daemon serves a different profile than the request named.
@@ -1082,6 +1244,7 @@ impl Response {
             Response::Attachment { .. } => "Attachment",
             Response::Attachments { .. } => "Attachments",
             Response::AttachmentSaved { .. } => "AttachmentSaved",
+            Response::AuditRecords { .. } => "AuditRecords",
             Response::Locked => "Locked",
             Response::WrongProfile { .. } => "WrongProfile",
             Response::Error { .. } => "Error",
@@ -1100,9 +1263,17 @@ impl core::fmt::Debug for Response {
 }
 
 /// The versioned request envelope actually placed on the wire: `{"v":1, ...}`.
+///
+/// `origin` is the client's self-reported caller attribution (see
+/// [`WireOrigin`]). It rides on the envelope rather than inside each request so
+/// adding it touched no request shape, and it is `#[serde(default)]` so a frame
+/// from a peer that predates attribution still decodes — as `None`, which the
+/// daemon treats as an unattributed caller rather than guessing.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct RequestEnvelope {
     pub(crate) v: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) origin: Option<WireOrigin>,
     #[serde(flatten)]
     pub(crate) request: Request,
 }
@@ -1219,14 +1390,62 @@ mod tests {
     fn envelope_roundtrips_with_version() {
         let env = RequestEnvelope {
             v: PROTOCOL_VERSION,
+            origin: None,
             request: Request::Ping,
         };
         let bytes = serde_json::to_vec(&env).unwrap();
         let s = String::from_utf8(bytes.clone()).unwrap();
         assert!(s.contains("\"v\":1"));
         assert!(s.contains("\"kind\":\"Ping\""));
+        // An absent origin is omitted entirely, not sent as null.
+        assert!(!s.contains("origin"), "{s}");
         let back: RequestEnvelope = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(back.v, PROTOCOL_VERSION);
         assert!(matches!(back.request, Request::Ping));
+    }
+
+    /// Both additive wire fields must decode from a frame that predates them —
+    /// an older peer's `Status` has no `keepalive`, and no envelope `origin`.
+    #[test]
+    fn an_older_peers_frame_still_decodes() {
+        let body = br#"{"v":1,"kind":"Status","profile":"/p"}"#;
+        let env: RequestEnvelope = serde_json::from_slice(body).unwrap();
+        assert!(env.origin.is_none(), "no attribution claimed");
+        match env.request {
+            // Defaults to the SAFE, passive reading: an unlabelled Status must
+            // not be mistaken for a keep-alive.
+            Request::Status { keepalive, profile } => {
+                assert!(!keepalive);
+                assert_eq!(profile, "/p");
+            }
+            other => panic!("expected Status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn origin_round_trips_and_is_resanitized_on_the_way_in() {
+        let wire = WireOrigin {
+            source: "mcp".into(),
+            // A hostile peer sending a full path gets it reduced daemon-side.
+            process: Some("/home/someone/secret-project/agent".into()),
+            pid: Some(77),
+        };
+        let origin = wire.to_origin();
+        assert_eq!(origin.source, lp_vault::AuditSource::Mcp);
+        assert_eq!(origin.process.as_deref(), Some("agent"));
+        assert_eq!(origin.pid, Some(77));
+        // An unknown label degrades to `unknown` rather than failing the frame.
+        assert_eq!(
+            WireOrigin {
+                source: "from-the-future".into(),
+                process: None,
+                pid: None,
+            }
+            .to_origin()
+            .source,
+            lp_vault::AuditSource::Unknown
+        );
+        // And the round trip preserves the label.
+        assert_eq!(WireOrigin::from_origin(&origin).source, "mcp");
     }
 }

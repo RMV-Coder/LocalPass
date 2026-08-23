@@ -27,6 +27,12 @@ use lp_daemon::transport;
 use lp_daemon::{AUTOLOCK_ENV, DEFAULT_AUTOLOCK_SECS};
 
 fn main() -> ExitCode {
+    // The daemon's own identity, used for anything it audits on its own behalf.
+    // Work done FOR a client is attributed to that client instead, via the
+    // per-request scope in `server::serve_connection`.
+    lp_vault::audit::set_process_origin(lp_vault::AuditOrigin::for_current_process(
+        lp_vault::AuditSource::Daemon,
+    ));
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {

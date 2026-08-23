@@ -321,6 +321,7 @@ fn status_reports_agent_endpoint_and_count() {
     let resp = c
         .call(&Request::Status {
             profile: tmp.path().display().to_string(),
+            keepalive: false,
         })
         .unwrap();
     if let Response::Status {

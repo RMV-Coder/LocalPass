@@ -284,8 +284,11 @@ fn refuse_if_daemon_running(profile_dir: &Path, no_daemon: bool) -> Result<()> {
     let Ok(mut client) = lp_daemon::client::Client::connect() else {
         return Ok(());
     };
+    // Passive: this only asks WHICH profile the daemon serves, to decide whether
+    // to refuse. It performs no vault work, so it must not reset the idle timer.
     let resp = client.call(&Request::Status {
         profile: profile_dir.display().to_string(),
+        keepalive: false,
     });
     if let Ok(Response::Status {
         profile: served, ..

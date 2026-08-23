@@ -459,20 +459,23 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
     }
 
     // Every other request carries a profile (except Lock, which is global to
-    // this single-profile daemon). Enforce the single-profile rule.
+    // this single-profile daemon). Enforce the single-profile rule. A refused
+    // request is audited and never touches the idle timer (see below).
     if let Some(profile) = request_profile(&request)
         && !same_profile(state, profile)
     {
+        record_denied(state, &request, lp_vault::DenyReason::WrongProfile);
         return Handled::reply(Response::WrongProfile {
             expected: state.profile().display().to_string(),
         });
     }
 
-    // Whether this request counts as user activity for the idle auto-lock.
-    // `Status` is a passive read: the GUI refreshes it on a timer to discover
-    // an auto-lock that already happened, and a poll that reset the idle timer
-    // would keep the vault awake forever.
+    // Whether the REQUEST is an active one at all (see `counts_as_activity`);
+    // the response gets a veto further down.
     let is_activity = counts_as_activity(&request);
+    // Remembered for the denial-audit decision, which happens after `request`
+    // has been consumed by the match below.
+    let denial_worth_auditing = audits_denial(&request);
 
     let handled = match request {
         Request::Ping | Request::Shutdown => unreachable!("handled above"),
@@ -927,32 +930,141 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
                 message: Some("removed".into()),
             })
         }),
+
+        Request::AuditList { limit, since, .. } => {
+            with_session(state, |session| audit_list(session, limit, since))
+        }
     };
 
-    // Any successfully-handled ACTIVE request (even one returning a usage
-    // Error) counts as activity and resets the idle timer — the user is
-    // clearly present. Passive reads (`Status`) do not; see above.
-    if is_activity {
+    // A REFUSED request is audited (the denied attempts are the interesting
+    // half of an audit log) and never resets the idle timer.
+    if denial_worth_auditing && let Some(reason) = deny_reason_for(&handled.response) {
+        record_denied_reason(state, reason);
+    }
+
+    // Reset the idle timer only for an active request that was actually served.
+    // A locked/wrong-profile/auth-failure answer is explicitly NOT activity, so
+    // a probing process cannot hold the vault open by failing over and over.
+    if is_activity && response_counts_as_activity(&handled.response) {
         state.touch();
     }
     handled
 }
 
+/// Handle [`Request::AuditList`]: this device's records, **newest first**,
+/// optionally floored at `since` and capped at `limit`.
+///
+/// Metadata only — see [`crate::protocol::WireAuditRecord`]; no item title ever
+/// crosses here because the log stores none.
+fn audit_list(
+    session: &Session,
+    limit: Option<u32>,
+    since: Option<i64>,
+) -> Result<Response, Response> {
+    let records = match since {
+        Some(floor) => session.audit_since(floor).map_err(vault_err)?,
+        None => session.audit_iter().map_err(vault_err)?,
+    };
+    let cap = limit
+        .unwrap_or(crate::protocol::MAX_AUDIT_LIMIT)
+        .min(crate::protocol::MAX_AUDIT_LIMIT) as usize;
+    // Stored ascending by seq; a client wants the recent window, so reverse and
+    // then cap — taking the NEWEST `cap`, not the oldest.
+    let out = records
+        .iter()
+        .rev()
+        .take(cap)
+        .map(render::audit_to_wire)
+        .collect();
+    Ok(Response::AuditRecords { records: out })
+}
+
+/// Whether a *denied* answer to this request is worth an audit record.
+///
+/// Only requests that would have touched the vault qualify. `Status` and `Ping`
+/// are excluded on purpose: a GUI polls `Status` every few seconds against a
+/// locked daemon, and auditing that would bury the real refusals under thousands
+/// of rows of screensaver noise (and grow the log without bound).
+fn audits_denial(request: &Request) -> bool {
+    !matches!(
+        request,
+        Request::Ping | Request::Shutdown | Request::Status { .. } | Request::Lock
+    )
+}
+
+/// The refusal reason a response represents, or `None` if it is not a refusal.
+fn deny_reason_for(response: &Response) -> Option<lp_vault::DenyReason> {
+    match response {
+        Response::Locked => Some(lp_vault::DenyReason::Locked),
+        Response::WrongProfile { .. } => Some(lp_vault::DenyReason::WrongProfile),
+        Response::Error { auth: true, .. } => Some(lp_vault::DenyReason::NotAuthorized),
+        _ => None,
+    }
+}
+
+/// Record an [`lp_vault::AuditKind::AccessDenied`] for a request refused before
+/// it was handled (the wrong-profile gate).
+fn record_denied(state: &State, request: &Request, reason: lp_vault::DenyReason) {
+    if audits_denial(request) {
+        record_denied_reason(state, reason);
+    }
+}
+
+/// Append the refusal record. **Best-effort and keyless**: a locked daemon holds
+/// no session, so this goes through [`AccountStore::record_access_denied`],
+/// which reads the device id from the account store's plaintext column and
+/// needs no key material. A logging failure never changes the answer the client
+/// gets — and a profile with no account store at all simply has nowhere to log.
+fn record_denied_reason(state: &State, reason: lp_vault::DenyReason) {
+    AccountStore::record_access_denied(state.profile(), reason).ok();
+}
+
 /// Whether a request counts as user activity for the idle auto-lock timer.
 ///
-/// `Status` is the one passive request: clients poll it to *observe* lock
-/// state (the GUI schedules a refresh for the moment `idle_remaining_secs`
-/// expires so it can fall back to the unlock screen), and an observation must
-/// not postpone the thing it is observing. `Ping`/`Shutdown` never reach the
-/// activity accounting at all.
+/// `Status` is the one request that can be passive: clients poll it to *observe*
+/// lock state (the GUI schedules a refresh for the moment `idle_remaining_secs`
+/// expires so it can fall back to the unlock screen), and **an observer must not
+/// postpone the auto-lock it is observing**. So a plain `Status` is passive.
+///
+/// A `Status` with `keepalive: true` is a different thing entirely: it is the
+/// route probe a tool sends *because it is about to do real work*
+/// (`lp_cli::daemonctl::route`), which makes it evidence of a present user, not
+/// an observation. That distinction is what keeps the vault alive through a long
+/// CLI or MCP run while an idle GUI polling in the background still lets it lock.
+///
+/// `Ping`/`Shutdown` never reach the activity accounting at all. The *response*
+/// gets a separate veto — see [`response_counts_as_activity`].
 fn counts_as_activity(request: &Request) -> bool {
-    !matches!(request, Request::Status { .. })
+    match request {
+        Request::Status { keepalive, .. } => *keepalive,
+        _ => true,
+    }
+}
+
+/// Whether the ANSWER lets the request reset the idle timer.
+///
+/// A refused request must not: `Locked`, `WrongProfile`, and an authentication
+/// failure all mean the caller got nothing, so letting them touch the timer
+/// would let an unauthenticated process hold the vault open indefinitely just by
+/// failing in a loop.
+///
+/// An ordinary usage error (`Error { auth: false }`) — a typo'd vault name, a
+/// missing item — **does** count. The caller was authenticated and reached a
+/// live session; a user fumbling a name is as present as a user getting it
+/// right, and the alternative would auto-lock the vault out from under someone
+/// who is actively (if clumsily) using it.
+fn response_counts_as_activity(response: &Response) -> bool {
+    !matches!(
+        response,
+        Response::Locked | Response::WrongProfile { .. } | Response::Error { auth: true, .. }
+    )
 }
 
 /// The profile string carried by a request, if any.
 fn request_profile(request: &Request) -> Option<&str> {
     match request {
-        Request::Status { profile }
+        Request::Status { profile, .. }
+        | Request::AuditList { profile, .. }
         | Request::Unlock { profile, .. }
         | Request::CreateAccount { profile, .. }
         | Request::ListVaults { profile }
@@ -1574,15 +1686,33 @@ mod tests {
             &mut st,
             Request::Status {
                 profile: dir.path().display().to_string(),
+                keepalive: false,
             },
         );
         let after_status = st.idle_remaining_secs().expect("unlocked");
         assert!(
             after_status < autolock.as_secs(),
-            "Status must not reset the idle timer (remaining: {after_status})"
+            "a passive Status must not reset the idle timer (remaining: {after_status})"
         );
 
-        // An active request resets it back to the full window.
+        // A KEEP-ALIVE Status — the route probe a tool sends before doing real
+        // work — DOES reset it, even though it is the same request kind.
+        let _ = handle(
+            &mut st,
+            Request::Status {
+                profile: dir.path().display().to_string(),
+                keepalive: true,
+            },
+        );
+        let after_keepalive = st.idle_remaining_secs().expect("unlocked");
+        assert!(
+            after_keepalive >= autolock.as_secs() - 1,
+            "a keepalive Status must reset the idle timer (remaining: {after_keepalive})"
+        );
+        assert!(after_keepalive > after_status);
+
+        // An ordinary active request resets it back to the full window too.
+        sleep(Duration::from_millis(1100));
         let _ = handle(
             &mut st,
             Request::ListVaults {
@@ -1596,14 +1726,148 @@ mod tests {
             after_active >= autolock.as_secs() - 1,
             "ListVaults must reset the idle timer (remaining: {after_active})"
         );
-        assert!(after_active > after_status);
 
         assert!(!counts_as_activity(&Request::Status {
-            profile: String::new()
+            profile: String::new(),
+            keepalive: false,
+        }));
+        assert!(counts_as_activity(&Request::Status {
+            profile: String::new(),
+            keepalive: true,
         }));
         assert!(counts_as_activity(&Request::ListVaults {
             profile: String::new()
         }));
+    }
+
+    /// A refused request must NOT reset the idle timer, so a probing process
+    /// cannot hold the vault open by failing over and over — while an ordinary
+    /// usage error from an authenticated caller still counts.
+    #[test]
+    fn refused_requests_do_not_reset_the_idle_timer() {
+        use std::thread::sleep;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let profile = dir.path().display().to_string();
+        let autolock = Duration::from_secs(600);
+        let mut st = State::new(dir.path().to_path_buf(), autolock);
+        let created = handle(
+            &mut st,
+            Request::CreateAccount {
+                profile: profile.clone(),
+                password: "test-password-123".into(),
+            },
+        );
+        assert!(!matches!(created.response, Response::Error { .. }));
+
+        // Baseline: let the timer drop, then check each refusal leaves it there.
+        for request in [
+            // Wrong profile → refused before it is even handled.
+            Request::ListVaults {
+                profile: "/definitely/not/this/profile".into(),
+            },
+            // Authentication failure → refused by the unlock itself.
+            Request::Unlock {
+                profile: profile.clone(),
+                password: "wrong-password".into(),
+                secret_key: None,
+                autolock_secs: None,
+            },
+        ] {
+            sleep(Duration::from_millis(1100));
+            let before = st.idle_remaining_secs().expect("unlocked");
+            let handled = handle(&mut st, request);
+            assert!(
+                matches!(
+                    handled.response,
+                    Response::WrongProfile { .. } | Response::Error { auth: true, .. }
+                ),
+                "expected a refusal, got {:?}",
+                handled.response
+            );
+            let after = st.idle_remaining_secs().expect("unlocked");
+            assert!(
+                after <= before,
+                "a refused request must not reset the idle timer ({before} -> {after})"
+            );
+        }
+
+        // A LOCKED refusal likewise leaves the timer alone.
+        st.lock();
+        let handled = handle(
+            &mut st,
+            Request::ListVaults {
+                profile: profile.clone(),
+            },
+        );
+        assert!(matches!(handled.response, Response::Locked));
+
+        // Response-level rules, stated directly.
+        assert!(!response_counts_as_activity(&Response::Locked));
+        assert!(!response_counts_as_activity(&Response::WrongProfile {
+            expected: String::new()
+        }));
+        assert!(!response_counts_as_activity(&Response::Error {
+            auth: true,
+            message: String::new()
+        }));
+        // An ordinary usage error from an authenticated caller DOES count.
+        assert!(response_counts_as_activity(&Response::Error {
+            auth: false,
+            message: "no vault named \"nope\"".into()
+        }));
+        assert!(response_counts_as_activity(&Response::Ok { message: None }));
+    }
+
+    /// Every refusal above leaves an `access_denied` audit record, written
+    /// **without keys** even while the daemon is locked.
+    #[test]
+    fn refusals_are_audited_even_when_locked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let profile = dir.path().display().to_string();
+        let mut st = State::new(dir.path().to_path_buf(), Duration::from_secs(600));
+        let created = handle(
+            &mut st,
+            Request::CreateAccount {
+                profile: profile.clone(),
+                password: "test-password-123".into(),
+            },
+        );
+        assert!(!matches!(created.response, Response::Error { .. }));
+        st.lock(); // locked: no session, no keys
+
+        let handled = handle(
+            &mut st,
+            Request::ListVaults {
+                profile: profile.clone(),
+            },
+        );
+        assert!(matches!(handled.response, Response::Locked));
+        let handled = handle(
+            &mut st,
+            Request::ListVaults {
+                profile: "/some/other/profile".into(),
+            },
+        );
+        assert!(matches!(handled.response, Response::WrongProfile { .. }));
+
+        // A passive Status against a locked daemon is NOT audited — a polling
+        // GUI must not bury the real refusals in noise.
+        let _ = handle(
+            &mut st,
+            Request::Status {
+                profile: profile.clone(),
+                keepalive: false,
+            },
+        );
+
+        // Kind code 13 = AccessDenied; exactly the two real refusals.
+        let conn = rusqlite::Connection::open(dir.path().join("account.localpass")).expect("open");
+        let denied: i64 = conn
+            .query_row("SELECT COUNT(*) FROM audit_log WHERE kind = 13", [], |r| {
+                r.get(0)
+            })
+            .expect("count");
+        assert_eq!(denied, 2, "one Locked + one WrongProfile refusal");
     }
 
     #[test]

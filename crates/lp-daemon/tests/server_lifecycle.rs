@@ -60,6 +60,7 @@ fn shutdown_terminates_run() {
         let resp = c
             .call(&Request::Status {
                 profile: tmp.path().display().to_string(),
+                keepalive: false,
             })
             .unwrap();
         match resp {

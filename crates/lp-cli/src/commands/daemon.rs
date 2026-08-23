@@ -85,8 +85,11 @@ fn status(profile_dir: &Path, json_out: bool) -> Result<()> {
             // A daemon that is exiting can accept a connection but close before
             // answering (a shutdown race). Treat a transport-closed/EOF as "not
             // running" rather than an internal error.
+            // `localpass daemon status` is a pure observation — it reports the
+            // countdown, so it must not restart it.
             let resp = match client.call(&Request::Status {
                 profile: profile.clone(),
+                keepalive: false,
             }) {
                 Ok(r) => r,
                 Err(lp_daemon::Error::Closed | lp_daemon::Error::NotRunning) => {
