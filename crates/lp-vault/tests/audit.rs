@@ -47,7 +47,8 @@ fn dump_audit_table(dir: &std::path::Path) -> String {
         .prepare(
             "SELECT seq, hex(device_id), hex(prev_hash), timestamp, kind,
                     hex(item_id), hex(vault_id), hex(peer_device_id), field, format,
-                    item_count, detail
+                    item_count, detail, deny_reason, origin_source, origin_process,
+                    origin_pid
                FROM audit_log ORDER BY device_id, seq",
         )
         .unwrap();
@@ -55,7 +56,8 @@ fn dump_audit_table(dir: &std::path::Path) -> String {
         .query_map([], |r| {
             Ok(format!(
                 "seq={} dev={} prev={} ts={} kind={} item={:?} vault={:?} peer={:?} \
-                 field={:?} format={:?} count={} detail={:?}",
+                 field={:?} format={:?} count={} detail={:?} deny={:?} src={:?} \
+                 proc={:?} pid={:?}",
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
@@ -68,6 +70,10 @@ fn dump_audit_table(dir: &std::path::Path) -> String {
                 r.get::<_, Option<String>>(9)?,
                 r.get::<_, i64>(10)?,
                 r.get::<_, Option<String>>(11)?,
+                r.get::<_, Option<i64>>(12)?,
+                r.get::<_, Option<i64>>(13)?,
+                r.get::<_, Option<String>>(14)?,
+                r.get::<_, Option<i64>>(15)?,
             ))
         })
         .unwrap();
@@ -423,4 +429,165 @@ fn chain_survives_reopen_and_keeps_growing() {
     let n2 = records(&session2).len();
     assert!(n2 > n1, "chain kept growing across a reopen ({n1} -> {n2})");
     session2.verify_audit_chain().unwrap();
+}
+
+// --- Caller attribution (source / process / pid) ---------------------------
+
+/// Attribution rides on the ambient origin, lands on the record, survives a
+/// read-back, and stays inside the hash chain — while still leaking no secret,
+/// username, or title.
+///
+/// Uses the **thread-local** [`lp_vault::audit::with_origin`] scope rather than
+/// the process-wide default so the test is unaffected by (and cannot disturb)
+/// the other tests sharing this binary's process.
+#[test]
+fn source_attribution_is_recorded_and_chained() {
+    let dir = TempDir::new().unwrap();
+    // A full path with a hostile-length name: only the truncated base name may
+    // be stored.
+    let cli = lp_vault::AuditOrigin::sanitized(
+        lp_vault::AuditSource::Cli,
+        Some(&format!("/opt/bin/{}", "n".repeat(80))),
+        Some(4242),
+    );
+    let (session, vault_id, id) = lp_vault::audit::with_origin(cli, || {
+        let (session, _sk) = AccountStore::create(dir.path(), PW).unwrap();
+        let vault_id = session.create_vault("v").unwrap();
+        let id = {
+            let vault = session.open_vault(vault_id).unwrap();
+            vault.create_item(&secret_login()).unwrap()
+        };
+        (session, vault_id, id)
+    });
+    let vault = session.open_vault(vault_id).unwrap();
+
+    // A scoped override attributes one action to a different surface — the shape
+    // the daemon uses to attribute work to the client that asked for it.
+    lp_vault::audit::with_origin(
+        lp_vault::AuditOrigin::sanitized(lp_vault::AuditSource::Mcp, Some("claude.exe"), Some(7)),
+        || vault.record_secret_read(&id, Some("password")).unwrap(),
+    );
+
+    let recs = records(&session);
+    let create = recs
+        .iter()
+        .find(|r| matches!(r.kind, AuditKind::ItemCreate { .. }))
+        .expect("an item_create record");
+    let origin = create.origin.as_ref().expect("create is attributed");
+    assert_eq!(origin.source, lp_vault::AuditSource::Cli);
+    assert_eq!(origin.pid, Some(4242));
+    let proc_name = origin.process.as_deref().unwrap();
+    assert!(!proc_name.contains('/'), "path stripped: {proc_name:?}");
+    assert_eq!(proc_name.len(), lp_vault::audit::MAX_PROCESS_NAME_CHARS);
+
+    let read = recs
+        .iter()
+        .find(|r| matches!(r.kind, AuditKind::ItemSecretRead { .. }))
+        .expect("a secret-read record");
+    let read_origin = read.origin.as_ref().expect("read is attributed");
+    assert_eq!(read_origin.source, lp_vault::AuditSource::Mcp);
+    assert_eq!(read_origin.process.as_deref(), Some("claude.exe"));
+    assert_eq!(read_origin.pid, Some(7));
+
+    // Attribution is covered by the chain and does not break it.
+    session.verify_audit_chain().unwrap();
+
+    // …and the privacy contract still holds with attribution present.
+    let dump = dump_audit_table(dir.path());
+    assert!(!dump.contains(SECRET_PW), "secret leaked: {dump}");
+    assert!(!dump.contains(TITLE), "title leaked: {dump}");
+    assert!(!dump.contains(USERNAME), "username leaked: {dump}");
+}
+
+/// THE chain-compatibility guarantee: a log whose records predate attribution
+/// (origin columns NULL) still verifies, and a *new* attributed record appended
+/// on top of it chains onto the old one correctly.
+#[test]
+fn a_pre_attribution_log_still_verifies_and_can_be_extended() {
+    let dir = TempDir::new().unwrap();
+    // No ambient origin is in force here, so these records are written exactly
+    // as a pre-attribution build wrote them: every origin column NULL. (The
+    // explicit UPDATE below pins that, so the test still means what it says even
+    // if some future default starts attributing.)
+    let (session, sk) = AccountStore::create(dir.path(), PW).unwrap();
+    let vault_id = session.create_vault("v").unwrap();
+    {
+        let vault = session.open_vault(vault_id).unwrap();
+        vault
+            .create_item(&ItemPayload::new(TypeData::Note {}, "old"))
+            .unwrap();
+    }
+    session.lock();
+    {
+        let conn = Connection::open(account_path(dir.path())).unwrap();
+        let changed = conn
+            .execute(
+                "UPDATE audit_log SET origin_source = NULL, origin_process = NULL, \
+                 origin_pid = NULL",
+                [],
+            )
+            .unwrap();
+        assert!(changed > 0, "there are rows to check");
+    }
+
+    // The old log verifies untouched — the origin-free canonical encoding is
+    // byte-identical to what the old build hashed.
+    let session2 = AccountStore::unlock(dir.path(), PW, &sk).unwrap();
+    session2.verify_audit_chain().unwrap();
+    assert!(
+        records(&session2)
+            .iter()
+            .take(2)
+            .all(|r| r.origin.is_none()),
+        "the rewritten rows read back as unattributed"
+    );
+
+    // Appending an attributed record on top keeps the whole chain intact.
+    let gui = lp_vault::AuditOrigin::sanitized(
+        lp_vault::AuditSource::Gui,
+        Some("localpass-desktop"),
+        Some(11),
+    );
+    lp_vault::audit::with_origin(gui, || {
+        let vault2 = session2.open_vault(vault_id).unwrap();
+        vault2
+            .create_item(&ItemPayload::new(TypeData::Note {}, "new"))
+            .unwrap();
+    });
+    session2.verify_audit_chain().unwrap();
+    let recs = records(&session2);
+    assert_eq!(
+        recs.last().unwrap().origin.as_ref().map(|o| o.source),
+        Some(lp_vault::AuditSource::Gui)
+    );
+}
+
+/// A refused attempt is recorded **without any keys** — the locked-daemon case.
+#[test]
+fn access_denied_is_recorded_without_a_session() {
+    let dir = TempDir::new().unwrap();
+    let (session, sk) = AccountStore::create(dir.path(), PW).unwrap();
+    session.lock(); // no session, no keys held
+
+    AccountStore::record_access_denied(dir.path(), lp_vault::DenyReason::Locked).unwrap();
+    AccountStore::record_access_denied(dir.path(), lp_vault::DenyReason::WrongProfile).unwrap();
+
+    // Kind code 13 = AccessDenied.
+    assert_eq!(count_kind(dir.path(), 13), 2);
+
+    // Unlocking later reads them back with their reasons, and the chain — grown
+    // entirely without keys — still verifies.
+    let session2 = AccountStore::unlock(dir.path(), PW, &sk).unwrap();
+    session2.verify_audit_chain().unwrap();
+    let reasons: Vec<_> = records(&session2)
+        .iter()
+        .filter_map(|r| r.kind.deny_reason())
+        .collect();
+    assert_eq!(
+        reasons,
+        vec![
+            lp_vault::DenyReason::Locked,
+            lp_vault::DenyReason::WrongProfile
+        ]
+    );
 }
