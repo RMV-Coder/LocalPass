@@ -496,6 +496,11 @@
     border: 1px solid var(--border);
     border-radius: 8px;
     overflow: hidden;
+    /* The stacked fallback below keys off THIS box, not the viewport: the log
+       lives in the detail pane, which is ~520px wide inside a 1250px window,
+       so a viewport media query would keep the five-column grid long after it
+       stopped fitting (columns clipped off the pane's right edge). */
+    container-type: inline-size;
   }
   .dev-log-row {
     display: grid;
@@ -540,8 +545,10 @@
 
   /* Narrow panes (and the mobile single-screen layout): the five-column grid
      stops working long before the text does, so each record becomes a stacked
-     card with its columns labelled by position rather than by a header row. */
-  @media (max-width: 720px) {
+     card with its columns labelled by position rather than by a header row.
+     Keyed to the log's own inline size, so it fires whenever the PANE is
+     narrow — on a phone and in the desktop three-pane layout alike. */
+  @container (max-width: 720px) {
     .dev-log-head {
       display: none;
     }
