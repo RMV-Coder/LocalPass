@@ -230,6 +230,7 @@ input[type="range"] {
   .shell[data-mobile="generator"] > main.pane,
   .shell[data-mobile="security"] > main.pane,
   .shell[data-mobile="devices"] > main.pane,
+  .shell[data-mobile="dev"] > main.pane,
   .shell[data-mobile="help"] > main.pane { display: block; }
   /* The desktop vault sidebar is replaced by the tab bar + Items vault picker. */
   .shell > .vault-pane { display: none !important; }
@@ -289,12 +290,36 @@ input[type="range"] {
     border: none;
     background: none;
     color: var(--muted);
-    font-size: 11px;
+    /* SIX tabs (Items / Generator / Security / Devices / Dev / Help) share the
+       width, so each gets ~65px at 390px and ~60px at 360px. 10px is the
+       largest size at which the longest label ("Generator", ~9 chars) still
+       fits those tracks whole; at 11px it wrapped or clipped. The icon keeps
+       its full size, so the tab is still readable at a glance. */
+    font-size: 10px;
     font-weight: 600;
     cursor: pointer;
   }
+  /* Belt and braces: whatever the width, a label truncates inside its own tab
+     rather than widening the bar or overlapping its neighbour. */
+  .mobile-tabbar button > span:last-child {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .mobile-tabbar button .ico { font-size: 19px; line-height: 1; }
   .mobile-tabbar button.active { color: var(--accent); }
+}
+
+/* Very narrow phones (≤360px: iPhone SE, older Androids) leave ~53px per tab.
+   Tighten the label a further step so "Generator" still renders whole. */
+@media (max-width: 360px) {
+  .mobile-tabbar button {
+    font-size: 9px;
+    letter-spacing: -0.01em;
+    padding: 6px 1px;
+  }
+  .mobile-tabbar button .ico { font-size: 17px; }
 }
 
 .pane {
