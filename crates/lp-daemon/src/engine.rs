@@ -1003,14 +1003,24 @@ fn audit_list(
 
 /// Whether a *denied* answer to this request is worth an audit record.
 ///
-/// Only requests that would have touched the vault qualify. `Status` and `Ping`
-/// are excluded on purpose: a GUI polls `Status` every few seconds against a
-/// locked daemon, and auditing that would bury the real refusals under thousands
-/// of rows of screensaver noise (and grow the log without bound).
+/// Only requests that would have touched the vault qualify, and only where no
+/// better record already exists:
+///
+/// - `Status`/`Ping`/`Lock`/`Shutdown` are excluded because a GUI polls `Status`
+///   every few seconds against a locked daemon, and auditing that would bury the
+///   real refusals under screensaver noise (and grow the log without bound).
+/// - `Unlock` is excluded because a failed unlock already writes the more
+///   specific [`lp_vault::AuditKind::UnlockFailure`] inside
+///   `AccountStore::unlock`. Adding a generic `AccessDenied` beside it would
+///   double-count the same event.
 fn audits_denial(request: &Request) -> bool {
     !matches!(
         request,
-        Request::Ping | Request::Shutdown | Request::Status { .. } | Request::Lock
+        Request::Ping
+            | Request::Shutdown
+            | Request::Status { .. }
+            | Request::Lock
+            | Request::Unlock { .. }
     )
 }
 
@@ -1883,14 +1893,35 @@ mod tests {
             },
         );
 
-        // Kind code 13 = AccessDenied; exactly the two real refusals.
+        // A failed unlock is NOT double-counted: it already writes the more
+        // specific UnlockFailure, so no generic AccessDenied joins it.
+        let handled = handle(
+            &mut st,
+            Request::Unlock {
+                profile: profile.clone(),
+                password: "definitely-wrong".into(),
+                secret_key: None,
+                autolock_secs: None,
+            },
+        );
+        assert!(matches!(
+            handled.response,
+            Response::Error { auth: true, .. }
+        ));
+
         let conn = rusqlite::Connection::open(dir.path().join("account.localpass")).expect("open");
-        let denied: i64 = conn
-            .query_row("SELECT COUNT(*) FROM audit_log WHERE kind = 13", [], |r| {
-                r.get(0)
-            })
-            .expect("count");
-        assert_eq!(denied, 2, "one Locked + one WrongProfile refusal");
+        let count = |kind: i64| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM audit_log WHERE kind = ?1",
+                [kind],
+                |r| r.get(0),
+            )
+            .expect("count")
+        };
+        // Kind code 13 = AccessDenied; exactly the two real refusals.
+        assert_eq!(count(13), 2, "one Locked + one WrongProfile refusal");
+        // Kind code 2 = UnlockFailure; the failed unlock, recorded once.
+        assert_eq!(count(2), 1, "the failed unlock is recorded exactly once");
     }
 
     #[test]
