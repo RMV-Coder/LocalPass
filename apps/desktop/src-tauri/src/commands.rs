@@ -91,7 +91,14 @@ pub fn status() -> SessionState {
         Ok(p) => p,
         Err(m) => return SessionState::Error { message: m },
     };
-    match daemon::call(&Request::Status { profile }) {
+    // `keepalive: false` is load-bearing: this is a *poll*, and an observer must
+    // not postpone the auto-lock it is observing (PR #28). A keep-alive Status
+    // here would reset the daemon's idle timer on every tick and the vault would
+    // never auto-lock while the window is open.
+    match daemon::call(&Request::Status {
+        profile,
+        keepalive: false,
+    }) {
         Ok(resp) => {
             let state = model::session_state_from_status(&resp);
             // A daemon that is up but Locked may simply have no account yet (a
@@ -750,7 +757,13 @@ pub fn set_pairing_mode(enabled: bool) -> Result<(), String> {
 #[tauri::command]
 pub fn pairing_mode_secs() -> Result<Option<u64>, String> {
     let profile = daemon::profile_string()?;
-    let resp = daemon::call(&Request::Status { profile }).map_err(|e| e.to_string())?;
+    // A passive read, like `status()` above — see the note there on why this is
+    // never a keep-alive.
+    let resp = daemon::call(&Request::Status {
+        profile,
+        keepalive: false,
+    })
+    .map_err(|e| e.to_string())?;
     check_response_error(&resp)?;
     match resp {
         Response::Status {

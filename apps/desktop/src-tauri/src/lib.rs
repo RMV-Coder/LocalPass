@@ -59,6 +59,17 @@ pub fn run() {
 
     builder
         .setup(|app| {
+            // Declare which surface this process is, once, before any command
+            // can run and therefore before anything can write an audit record
+            // (PRD §4.9 caller attribution). Without this every GUI action is
+            // audited as `unknown`. It covers both backends: on desktop the
+            // origin rides out on each daemon request envelope
+            // (`lp_daemon::frame::write_request`), and on mobile the in-process
+            // engine writes records under it directly.
+            lp_vault::audit::set_process_origin(lp_vault::AuditOrigin::for_current_process(
+                lp_vault::AuditSource::Gui,
+            ));
+
             // On mobile there is no daemon — the app process *is* the vault (see
             // `daemon.rs`). Point the in-process backend at the Android
             // app-private data dir by setting `LOCALPASS_PROFILE`, so
