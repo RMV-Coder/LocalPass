@@ -127,7 +127,7 @@ pub fn write_request<W: Write>(w: &mut W, request: &Request) -> Result<()> {
     let origin = lp_vault::audit::current_origin();
     let env = RequestEnvelope {
         v: PROTOCOL_VERSION,
-        origin: if origin.is_empty() {
+        caller: if origin.is_empty() {
             None
         } else {
             Some(crate::protocol::WireOrigin::from_origin(&origin))
@@ -172,7 +172,7 @@ pub fn read_request<R: Read>(r: &mut R) -> Result<Option<IncomingRequest>> {
         request: env.request,
         // Re-sanitized on the way in — see `WireOrigin::to_origin`.
         origin: env
-            .origin
+            .caller
             .as_ref()
             .map(crate::protocol::WireOrigin::to_origin),
     }))

@@ -1293,16 +1293,23 @@ impl core::fmt::Debug for Response {
 
 /// The versioned request envelope actually placed on the wire: `{"v":1, ...}`.
 ///
-/// `origin` is the client's self-reported caller attribution (see
+/// `caller` is the client's self-reported caller attribution (see
 /// [`WireOrigin`]). It rides on the envelope rather than inside each request so
 /// adding it touched no request shape, and it is `#[serde(default)]` so a frame
 /// from a peer that predates attribution still decodes — as `None`, which the
 /// daemon treats as an unattributed caller rather than guessing.
+///
+/// **The name is load-bearing.** `request` is `#[serde(flatten)]`ed into this
+/// same JSON object, so an envelope field that shares a name with any request
+/// field emits that key twice and fails to decode with `duplicate field`. This
+/// field was called `origin` and collided with [`Request::MatchLogins`] /
+/// [`Request::FillLogin`], whose `origin` is the browser origin — every autofill
+/// request died on the wire. Keep this name distinct from every request field.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct RequestEnvelope {
     pub(crate) v: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) origin: Option<WireOrigin>,
+    pub(crate) caller: Option<WireOrigin>,
     #[serde(flatten)]
     pub(crate) request: Request,
 }
@@ -1419,27 +1426,59 @@ mod tests {
     fn envelope_roundtrips_with_version() {
         let env = RequestEnvelope {
             v: PROTOCOL_VERSION,
-            origin: None,
+            caller: None,
             request: Request::Ping,
         };
         let bytes = serde_json::to_vec(&env).unwrap();
         let s = String::from_utf8(bytes.clone()).unwrap();
         assert!(s.contains("\"v\":1"));
         assert!(s.contains("\"kind\":\"Ping\""));
-        // An absent origin is omitted entirely, not sent as null.
-        assert!(!s.contains("origin"), "{s}");
+        // An absent caller is omitted entirely, not sent as null.
+        assert!(!s.contains("caller"), "{s}");
         let back: RequestEnvelope = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(back.v, PROTOCOL_VERSION);
         assert!(matches!(back.request, Request::Ping));
     }
 
+    /// A request that has a field of its own named like an envelope field must
+    /// still round-trip. `request` is `#[serde(flatten)]`ed beside the envelope's
+    /// own fields, so a shared name emits the key twice and decoding dies with
+    /// `duplicate field`. `MatchLogins.origin` (a browser origin) collided with
+    /// an envelope field once called `origin`, which silently killed every
+    /// autofill request on the wire; this pins the fix.
+    #[test]
+    fn envelope_roundtrips_a_request_whose_field_shadows_the_caller_slot() {
+        let env = RequestEnvelope {
+            v: PROTOCOL_VERSION,
+            caller: Some(WireOrigin::from_origin(&lp_vault::AuditOrigin::sanitized(
+                lp_vault::AuditSource::NativeHost,
+                Some("host"),
+                Some(11),
+            ))),
+            request: Request::MatchLogins {
+                profile: "/p".into(),
+                origin: "https://example.com/login".into(),
+            },
+        };
+        let bytes = serde_json::to_vec(&env).expect("serialize");
+        let back: RequestEnvelope = serde_json::from_slice(&bytes)
+            .expect("an envelope field must never share a name with a request field");
+        assert!(back.caller.is_some(), "attribution survived");
+        match back.request {
+            Request::MatchLogins { origin, .. } => {
+                assert_eq!(origin, "https://example.com/login", "the URL is intact");
+            }
+            other => panic!("wrong request back: {other:?}"),
+        }
+    }
+
     /// Both additive wire fields must decode from a frame that predates them —
-    /// an older peer's `Status` has no `keepalive`, and no envelope `origin`.
+    /// an older peer's `Status` has no `keepalive`, and no envelope `caller`.
     #[test]
     fn an_older_peers_frame_still_decodes() {
         let body = br#"{"v":1,"kind":"Status","profile":"/p"}"#;
         let env: RequestEnvelope = serde_json::from_slice(body).unwrap();
-        assert!(env.origin.is_none(), "no attribution claimed");
+        assert!(env.caller.is_none(), "no attribution claimed");
         match env.request {
             // Defaults to the SAFE, passive reading: an unlabelled Status must
             // not be mistaken for a keep-alive.
