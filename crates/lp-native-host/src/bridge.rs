@@ -95,7 +95,12 @@ impl Bridge {
     /// daemon is unreachable it reports unavailable + locked.
     #[must_use]
     pub fn status(&self) -> HostResponse {
-        let Some(resp) = self.call(|profile| Request::Status { profile }) else {
+        // Passive: the extension polls this to render a locked/unlocked badge.
+        // It must not postpone the auto-lock it is reporting on.
+        let Some(resp) = self.call(|profile| Request::Status {
+            profile,
+            keepalive: false,
+        }) else {
             return HostResponse::Status {
                 locked: true,
                 available: false,

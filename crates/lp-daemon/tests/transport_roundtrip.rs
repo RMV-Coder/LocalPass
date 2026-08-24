@@ -20,7 +20,7 @@ fn ping_pong_over_real_endpoint() {
         let mut conn = listener.accept().expect("accept");
         // Read one request, answer Pong.
         let req = frame::read_request(&mut conn).expect("read").expect("some");
-        assert!(matches!(req, Request::Ping));
+        assert!(matches!(req.request, Request::Ping));
         frame::write_response(&mut conn, &Response::Pong).expect("write");
         // Keep the listener alive until we've answered.
         drop(conn);
@@ -74,5 +74,5 @@ fn framing_is_transport_agnostic() {
     frame::write_request(&mut buf, &Request::Lock).expect("write");
     let mut cur = std::io::Cursor::new(buf);
     let got = frame::read_request(&mut cur).expect("read").expect("some");
-    assert!(matches!(got, Request::Lock));
+    assert!(matches!(got.request, Request::Lock));
 }

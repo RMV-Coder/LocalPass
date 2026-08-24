@@ -197,7 +197,9 @@ fn autolock_locks_after_idle() {
         .success();
     p.cmd().arg("unlock").assert().success();
 
-    // Immediately unlocked (this status itself resets the idle timer).
+    // Immediately unlocked. `daemon status` is a PASSIVE observation and does
+    // not reset the idle timer — an observer must not postpone the auto-lock it
+    // is reporting on — so the window below runs from the unlock, not from here.
     p.cmd()
         .args(["daemon", "status"])
         .assert()
@@ -211,6 +213,52 @@ fn autolock_locks_after_idle() {
         .assert()
         .success()
         .stdout(contains("locked").and(contains("unlocked").not()));
+
+    p.cmd().args(["daemon", "stop"]).assert().success();
+}
+
+/// A real CLI command keeps the vault alive across an idle window that pure
+/// observation does not — the owner-visible behaviour this whole mechanism
+/// exists for.
+///
+/// The sibling [`autolock_locks_after_idle`] proves the other half: polling
+/// `daemon status` across the same kind of window does *not* prevent the lock.
+/// Here an `item list` lands mid-window and, because its route probe is a
+/// keep-alive, the vault is still unlocked at a moment when an unrefreshed
+/// timer would already have fired.
+///
+/// Timing: an 8-second window with two 5-second sleeps. At the final check
+/// ~12s have passed since the unlock (so an unrefreshed daemon would be locked)
+/// but only ~6s since the `item list` (so a refreshed one is not). Both margins
+/// are ~2s, which absorbs the ~1s CLI spawn cost this suite is sized around.
+#[test]
+fn a_daemon_routed_command_keeps_the_vault_alive() {
+    let p = DaemonProfile::initialized("keepalive");
+
+    p.cmd()
+        .args(["daemon", "start", "--autolock", "8"])
+        .assert()
+        .success();
+    p.cmd().arg("unlock").assert().success();
+
+    std::thread::sleep(std::time::Duration::from_secs(5));
+
+    // Real work through the daemon: its route probe is a keep-alive, so this
+    // resets the idle timer. No password is supplied, which also proves the
+    // command really went through the daemon's held session.
+    p.cmd_no_password()
+        .args(["--no-input", "item", "list"])
+        .assert()
+        .success();
+
+    std::thread::sleep(std::time::Duration::from_secs(5));
+
+    // ~12s since unlock, ~6s since the item list: still unlocked.
+    p.cmd()
+        .args(["daemon", "status"])
+        .assert()
+        .success()
+        .stdout(contains("unlocked"));
 
     p.cmd().args(["daemon", "stop"]).assert().success();
 }

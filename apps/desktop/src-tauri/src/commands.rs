@@ -91,7 +91,14 @@ pub fn status() -> SessionState {
         Ok(p) => p,
         Err(m) => return SessionState::Error { message: m },
     };
-    match daemon::call(&Request::Status { profile }) {
+    // `keepalive: false` is load-bearing: this is a *poll*, and an observer must
+    // not postpone the auto-lock it is observing (PR #28). A keep-alive Status
+    // here would reset the daemon's idle timer on every tick and the vault would
+    // never auto-lock while the window is open.
+    match daemon::call(&Request::Status {
+        profile,
+        keepalive: false,
+    }) {
         Ok(resp) => {
             let state = model::session_state_from_status(&resp);
             // A daemon that is up but Locked may simply have no account yet (a
@@ -525,6 +532,78 @@ pub fn list_trash(vault: String) -> Result<Vec<TrashEntryView>, String> {
     }
 }
 
+/// Where the CLI/MCP guides in the Dev tab should point the reader.
+///
+/// Pure environment description: a profile path and, if we can find one, the
+/// path of the `localpass` executable this install would use. **No session, no
+/// vault, no secret** is involved — it is the same information `localpass
+/// --profile` already prints, gathered so the Dev tab's registration snippet
+/// names a real path instead of a hopeful bare command.
+#[tauri::command]
+pub fn dev_env() -> Result<model::DevEnvView, String> {
+    let profile = daemon::profile_string()?;
+    Ok(model::DevEnvView {
+        profile,
+        localpass_path: locate_localpass(),
+    })
+}
+
+/// Locate the `localpass` CLI: a sibling of this executable first (the installed
+/// side-by-side layout, and a dev target dir), then a bare-name `PATH` lookup.
+/// Returns `None` when neither is found, and the UI then shows the bare command
+/// with a note — better than printing a path that does not exist.
+fn locate_localpass() -> Option<String> {
+    #[cfg(windows)]
+    const NAME: &str = "localpass.exe";
+    #[cfg(not(windows))]
+    const NAME: &str = "localpass";
+
+    if let Ok(mut cur) = std::env::current_exe() {
+        cur.pop();
+        let sibling = cur.join(NAME);
+        if sibling.is_file() {
+            return Some(sibling.display().to_string());
+        }
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(NAME))
+        .find(|p| p.is_file())
+        .map(|p| p.display().to_string())
+}
+
+/// The hard cap the GUI applies to an audit page, mirroring the daemon's own
+/// [`lp_daemon::protocol::MAX_AUDIT_LIMIT`]. The Dev tab shows a *recent window*;
+/// a full forensic read is `localpass audit`, which goes at the store directly.
+const AUDIT_LIMIT_CAP: u32 = 1000;
+
+/// Read this device's recent audit records for the Dev tab (PRD §4.9).
+///
+/// Metadata only — ids, kind labels, timestamps, and the caller attribution.
+/// **No title and no secret value ever crosses here**: the audit log is
+/// plaintext on disk and therefore stores ids rather than names, so the webview
+/// resolves ids to titles itself against the unlocked vault
+/// ([`crate::model::AuditRecordView`]). Needs an unlocked session; a locked
+/// daemon answers `Locked`, which surfaces as the usual error string.
+#[tauri::command]
+pub fn audit_list(limit: Option<u32>) -> Result<Vec<model::AuditRecordView>, String> {
+    let profile = daemon::profile_string()?;
+    let limit = Some(limit.unwrap_or(AUDIT_LIMIT_CAP).clamp(1, AUDIT_LIMIT_CAP));
+    let resp = daemon::call(&Request::AuditList {
+        profile,
+        limit,
+        since: None,
+    })
+    .map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    match resp {
+        Response::AuditRecords { records } => {
+            Ok(records.iter().map(model::audit_record_view).collect())
+        }
+        other => Err(format!("unexpected daemon response: {}", other.kind())),
+    }
+}
+
 /// Restore a trashed item out of the trash (the daemon forward-restores its
 /// current version and drops the tombstone). Returns `()` on success.
 #[tauri::command]
@@ -750,7 +829,13 @@ pub fn set_pairing_mode(enabled: bool) -> Result<(), String> {
 #[tauri::command]
 pub fn pairing_mode_secs() -> Result<Option<u64>, String> {
     let profile = daemon::profile_string()?;
-    let resp = daemon::call(&Request::Status { profile }).map_err(|e| e.to_string())?;
+    // A passive read, like `status()` above — see the note there on why this is
+    // never a keep-alive.
+    let resp = daemon::call(&Request::Status {
+        profile,
+        keepalive: false,
+    })
+    .map_err(|e| e.to_string())?;
     check_response_error(&resp)?;
     match resp {
         Response::Status {

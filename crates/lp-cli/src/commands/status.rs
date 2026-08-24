@@ -31,11 +31,15 @@ pub fn run(profile_dir: &Path, src: PasswordSource, no_daemon: bool, json_out: b
 
     // If a daemon is running and unlocked for this profile, report its state and
     // take the vault count from it (no direct unlock / re-prompt).
-    if let Route::Proxy(mut client) = daemonctl::route(profile_dir, no_daemon) {
+    if let Route::Proxy(mut client) = daemonctl::route_observing(profile_dir, no_daemon) {
         let resp = daemonctl::call(
             &mut client,
+            // Passive: `localpass status` reports the lock countdown, so it must
+            // not restart it. (The `route` probe above already sent the
+            // keep-alive; this second call must not double as one.)
             &Request::Status {
                 profile: profile_dir.display().to_string(),
+                keepalive: false,
             },
         )?;
         if let Response::Status {

@@ -89,6 +89,32 @@ export interface TrashEntryView {
   purge_after: number;
 }
 
+// Environment description for the Dev tab's CLI/MCP guides. Paths only.
+export interface DevEnvView {
+  profile: string;
+  localpass_path: string | null;
+}
+
+// One audit record (the Dev tab's activity viewer). Metadata only.
+//
+// There is deliberately NO title/name here: the audit log is plaintext on disk,
+// so it stores ids and never names (names are ciphertext everywhere else). The
+// Dev tab resolves `item_id` to a title at DISPLAY TIME against the unlocked
+// vault, and falls back to a short id. Never send a title the other way.
+export interface AuditRecordView {
+  seq: number;
+  timestamp: number;
+  kind: string;
+  item_id: string | null;
+  vault_id: string | null;
+  source: string | null;
+  process: string | null;
+  pid: number | null;
+  field: string | null;
+  deny_reason: string | null;
+  detail: string | null;
+}
+
 // One password-health verdict (the Security/Watchtower view). No secret value.
 export interface PasswordHealthView {
   item_id: string;

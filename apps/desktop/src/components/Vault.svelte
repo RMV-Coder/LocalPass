@@ -17,6 +17,7 @@
   import Devices from "./Devices.svelte";
   import Security from "./Security.svelte";
   import Help from "./Help.svelte";
+  import Dev from "./Dev.svelte";
 
   interface Props {
     /** Called after the set of vaults changes (create/adopt) so the parent can
@@ -30,7 +31,7 @@
   let items = $state<ItemSummaryView[]>([]);
   let selectedItem = $state<string>(""); // item id
   let query = $state("");
-  let view = $state<"item" | "generator" | "form" | "devices" | "security" | "help">("item");
+  let view = $state<"item" | "generator" | "form" | "devices" | "security" | "dev" | "help">("item");
   let loadingItems = $state(false);
   let error = $state("");
   let itemListEl: HTMLUListElement | undefined = $state();
@@ -264,18 +265,20 @@
         ? "security"
         : view === "devices"
           ? "devices"
-          : view === "help"
-            ? "help"
-            : view === "form"
-              ? "form"
-              : selectedItem
-                ? "detail"
-                : "list",
+          : view === "dev"
+            ? "dev"
+            : view === "help"
+              ? "help"
+              : view === "form"
+                ? "form"
+                : selectedItem
+                  ? "detail"
+                  : "list",
   );
 
   // Bottom-tab navigation: switch section, and returning to Items clears any
   // selected item so the tab lands on the list rather than a stale detail.
-  function goTab(next: "item" | "generator" | "security" | "devices" | "help") {
+  function goTab(next: "item" | "generator" | "security" | "devices" | "dev" | "help") {
     view = next;
     if (next === "item") selectedItem = "";
   }
@@ -305,7 +308,7 @@
 {/snippet}
 
 <div
-  class="shell {selectedItem || view === 'generator' || view === 'devices' || view === 'security' || view === 'help' ? 'show-items' : ''}"
+  class="shell {selectedItem || view === 'generator' || view === 'devices' || view === 'security' || view === 'dev' || view === 'help' ? 'show-items' : ''}"
   data-mobile={mobileScreen}
 >
   <!-- Vault sidebar -->
@@ -367,6 +370,16 @@
         }}
       >
         <span class="row-title">Devices &amp; Sync</span>
+      </button>
+      <button
+        class="row {view === 'dev' ? 'selected' : ''}"
+        aria-current={view === "dev"}
+        onclick={() => {
+          view = "dev";
+          selectedItem = "";
+        }}
+      >
+        <span class="row-title">Dev</span>
       </button>
       <button
         class="row {view === 'help' ? 'selected' : ''}"
@@ -524,6 +537,8 @@
       <Generator />
     {:else if view === "security"}
       <Security vault={selectedVault} vaultName={currentVaultName} />
+    {:else if view === "dev"}
+      <Dev {vaults} {selectedVault} />
     {:else if view === "help"}
       <Help />
     {:else if view === "devices"}
@@ -576,6 +591,9 @@
   </button>
   <button class:active={mobileScreen === "devices"} onclick={() => goTab("devices")}>
     <span class="ico" aria-hidden="true">🔗</span><span>Devices</span>
+  </button>
+  <button class:active={mobileScreen === "dev"} onclick={() => goTab("dev")}>
+    <span class="ico" aria-hidden="true">🧰</span><span>Dev</span>
   </button>
   <button class:active={mobileScreen === "help"} onclick={() => goTab("help")}>
     <span class="ico" aria-hidden="true">❔</span><span>Help</span>

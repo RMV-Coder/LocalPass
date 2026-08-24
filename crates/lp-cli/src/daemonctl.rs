@@ -45,10 +45,34 @@ pub enum Route {
 
 /// Decide whether to proxy through the daemon or unlock directly for `profile`.
 ///
-/// This performs a single fast probe (`Ping` then `Status`). It never fails the
-/// command: any daemon-side trouble degrades to [`Route::Direct`].
+/// This performs a single fast probe (`Status`). It never fails the command: any
+/// daemon-side trouble degrades to [`Route::Direct`].
+///
+/// # Idle auto-lock
+///
+/// The probe is sent as a **keep-alive** — a command only routes because it is
+/// about to do real work, which makes it a present user, so the daemon resets
+/// its idle timer. This is what keeps the vault unlocked across a long
+/// `localpass run …` or MCP session while a GUI sits idle, and it is load-bearing
+/// for a command that then goes *Direct*: the daemon sees only this probe.
+///
+/// A command that merely *reports* daemon state must use
+/// [`route_observing`] instead, so it does not restart the countdown it prints.
 #[must_use]
 pub fn route(profile: &Path, no_daemon: bool) -> Route {
+    route_inner(profile, no_daemon, /* keepalive = */ true)
+}
+
+/// [`route`], but for a command that only **observes** the daemon
+/// (`localpass status`, `pairing status`): the probe is passive and does not
+/// reset the idle auto-lock timer, so printing the countdown never extends it.
+#[must_use]
+pub fn route_observing(profile: &Path, no_daemon: bool) -> Route {
+    route_inner(profile, no_daemon, /* keepalive = */ false)
+}
+
+/// The shared probe body for [`route`] / [`route_observing`].
+fn route_inner(profile: &Path, no_daemon: bool, keepalive: bool) -> Route {
     if no_daemon {
         return Route::Direct;
     }
@@ -57,8 +81,10 @@ pub fn route(profile: &Path, no_daemon: bool) -> Route {
     };
     // Ask the daemon its status for this profile. If it's unlocked and serving
     // this profile, proxy; otherwise go direct.
+    //
     let req = Request::Status {
         profile: profile.display().to_string(),
+        keepalive,
     };
     match client.call(&req) {
         Ok(Response::Status {

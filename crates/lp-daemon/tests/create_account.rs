@@ -70,6 +70,7 @@ fn create_account_then_unlock_from_written_secret_key() {
         &mut state,
         Request::Status {
             profile: profile.display().to_string(),
+            keepalive: false,
         },
     );
     match status.response {

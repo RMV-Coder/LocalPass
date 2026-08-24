@@ -170,10 +170,28 @@ CREATE TABLE IF NOT EXISTS audit_log (
     format            TEXT,
     item_count        INTEGER NOT NULL DEFAULT 0,
     detail            TEXT,
+    deny_reason       INTEGER,
+    origin_source     INTEGER,
+    origin_process    TEXT,
+    origin_pid        INTEGER,
     PRIMARY KEY (device_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log (timestamp);
 "#;
+
+/// The `audit_log` columns added after the table first shipped, as
+/// `(name, decl)` pairs for the forward-only `ALTER TABLE` migration.
+///
+/// All are nullable with no default, so an existing row reads back as
+/// `deny_reason: NULL` / `origin: None` — which is exactly the pre-attribution
+/// record shape, and therefore encodes to the same canonical bytes it always did
+/// (`lp_vault::audit` module docs). Migrating a log never invalidates its chain.
+const AUDIT_LOG_ADDED_COLUMNS: &[(&str, &str)] = &[
+    ("deny_reason", "INTEGER"),
+    ("origin_source", "INTEGER"),
+    ("origin_process", "TEXT"),
+    ("origin_pid", "INTEGER"),
+];
 
 /// Idempotently create the `audit_log` table + index if absent
 /// ([`AUDIT_LOG_DDL`]). Safe to call on every unlock/append; a no-op once the
@@ -185,8 +203,21 @@ CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log (timestamp);
 /// # Errors
 ///
 /// [`crate::Error::Sqlite`] if the DDL cannot be applied.
+/// Also brings an *existing* `audit_log` up to the current column set: stores
+/// created before caller attribution shipped lack `deny_reason` / `origin_*`, and
+/// every audit query names them (LESSONS 2026-07-10 — a column added to a
+/// `CREATE TABLE` needs a matching forward-only `ALTER`). The added columns are
+/// nullable with no default, so existing rows keep their exact pre-attribution
+/// canonical bytes and their hash chain still verifies.
 pub fn ensure_audit_table(conn: &Connection) -> Result<()> {
     conn.execute_batch(AUDIT_LOG_DDL)?;
+    // SQLite has no `ADD COLUMN IF NOT EXISTS`, so gate each ALTER on
+    // `PRAGMA table_info`. Idempotent: a no-op once the schema is current.
+    for (name, decl) in AUDIT_LOG_ADDED_COLUMNS {
+        if !column_exists(conn, "audit_log", name)? {
+            conn.execute_batch(&format!("ALTER TABLE audit_log ADD COLUMN {name} {decl}"))?;
+        }
+    }
     Ok(())
 }
 

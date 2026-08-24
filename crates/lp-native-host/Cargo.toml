@@ -20,6 +20,11 @@ path = "src/bin/localpass-native-host.rs"
 # --- the host's pre-filter and the daemon's server-side re-check use one
 # --- implementation. The host itself holds NO keys and cannot unlock. ---
 lp-daemon = { path = "../lp-daemon" }
+# --- Audit caller attribution ONLY (`lp_vault::audit::set_process_origin`), so
+# --- anything the daemon logs on this host's behalf is labelled `native_host`.
+# --- The host still holds no keys and never opens a vault; lp-daemon already
+# --- pulls lp-vault in, so this adds nothing to the dependency tree. ---
+lp-vault = { path = "../lp-vault" }
 # --- The versioned {"v":1,...} native-messaging JSON schema (extension <-> host).
 # --- serde derives the request/response model; serde_json is the on-wire body. ---
 serde = { version = "1", features = ["derive"] }

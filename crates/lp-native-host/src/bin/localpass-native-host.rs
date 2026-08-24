@@ -31,6 +31,11 @@ use lp_native_host::bridge::Bridge;
 use lp_native_host::host;
 
 fn main() -> ExitCode {
+    // Identify this surface so anything the daemon audits on our behalf is
+    // attributed to the browser bridge (PRD §4.9 caller attribution).
+    lp_vault::audit::set_process_origin(lp_vault::AuditOrigin::for_current_process(
+        lp_vault::AuditSource::NativeHost,
+    ));
     let args = parse_args();
 
     // The profile seed: --profile, else LOCALPASS_PROFILE, else empty (adopted

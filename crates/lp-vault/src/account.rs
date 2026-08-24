@@ -284,6 +284,39 @@ impl AccountStore {
         tx.commit()?;
         Ok(())
     }
+
+    /// Record an [`AuditKind::AccessDenied`] against the device identity stored
+    /// at `dir`, **without a session** — the refused-attempt counterpart of
+    /// [`record_unlock_failure`](Self::record_unlock_failure).
+    ///
+    /// This is what makes "log the denied attempts too" possible at all when the
+    /// daemon is *locked*: it holds no [`Session`] and no keys, but the audit log
+    /// is plaintext metadata in the account store and the device id lives in a
+    /// plaintext column, so an append needs no key material. The record is
+    /// attributed to the caller exactly like any other
+    /// ([`crate::audit::current_origin`]).
+    ///
+    /// Nothing about the attempted operation is recorded beyond `reason`: a
+    /// refused request was never resolved against the vault, and its arguments
+    /// (a vault or item *name*) would be a plaintext leak.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NotFound`] if no account store exists at `dir`.
+    /// - [`Error::Sqlite`] on a DB failure.
+    pub fn record_access_denied(dir: &Path, reason: audit::DenyReason) -> Result<()> {
+        let path = dir.join(ACCOUNT_FILE);
+        if !path.exists() {
+            return Err(Error::NotFound("account store"));
+        }
+        let mut conn = db::open_connection(&path)?;
+        db::ensure_audit_table(&conn)?;
+        let device_id = read_device_id(&conn)?;
+        let tx = conn.transaction()?;
+        append_audit_record(&tx, &device_id, AuditKind::AccessDenied { reason }, None)?;
+        tx.commit()?;
+        Ok(())
+    }
 }
 
 /// Read this device's id from the plaintext `device_identity` row (non-secret).
@@ -329,6 +362,12 @@ fn append_audit_record(
         None => audit::genesis_hash(device_id),
     };
 
+    // Attribute the record to whoever is running: the scoped origin the daemon
+    // set for this client's request, else this process's declared identity
+    // (`lp_vault::audit::set_process_origin`). An empty (`Unknown`, no process,
+    // no pid) origin is stored as NULL, which keeps the record byte-identical to
+    // a pre-attribution one.
+    let origin = audit::current_origin();
     let record = AuditRecord {
         seq,
         prev_hash,
@@ -336,6 +375,11 @@ fn append_audit_record(
         device_id: *device_id,
         kind,
         detail: detail.map(str::to_string),
+        origin: if origin.is_empty() {
+            None
+        } else {
+            Some(origin)
+        },
     };
     insert_audit_record(tx, &record)
 }
@@ -354,11 +398,21 @@ fn insert_audit_record(tx: &Connection, record: &AuditRecord) -> Result<()> {
         AuditKind::ItemSecretRead { field, .. } => field.clone(),
         _ => None,
     };
+    let deny_reason = record.kind.deny_reason().map(|r| i64::from(r.code()));
+    let (origin_source, origin_process, origin_pid) = match &record.origin {
+        Some(o) => (
+            Some(i64::from(o.source.code())),
+            o.process.clone(),
+            o.pid.map(i64::from),
+        ),
+        None => (None, None, None),
+    };
     tx.execute(
         "INSERT INTO audit_log
             (seq, device_id, prev_hash, timestamp, kind, item_id, vault_id,
-             peer_device_id, field, format, item_count, detail)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             peer_device_id, field, format, item_count, detail, deny_reason,
+             origin_source, origin_process, origin_pid)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             i64::try_from(record.seq).map_err(|_| Error::Invalid("audit seq out of range"))?,
             record.device_id.to_vec(),
@@ -372,6 +426,10 @@ fn insert_audit_record(tx: &Connection, record: &AuditRecord) -> Result<()> {
             format,
             item_count,
             record.detail,
+            deny_reason,
+            origin_source,
+            origin_process,
+            origin_pid,
         ],
     )?;
     Ok(())
@@ -383,7 +441,8 @@ fn read_last_audit_record(tx: &Connection, device_id: &DeviceId) -> Result<Optio
     let cols = tx
         .query_row(
             "SELECT seq, prev_hash, timestamp, kind, item_id, vault_id, peer_device_id,
-                    field, format, item_count, detail
+                    field, format, item_count, detail, deny_reason,
+                    origin_source, origin_process, origin_pid
                FROM audit_log WHERE device_id = ?1 ORDER BY seq DESC LIMIT 1",
             params![device_id.to_vec()],
             audit_row_columns,
@@ -408,6 +467,10 @@ type AuditRowColumns = (
     Option<String>,  // format
     i64,             // item_count
     Option<String>,  // detail
+    Option<i64>,     // deny_reason
+    Option<i64>,     // origin_source
+    Option<String>,  // origin_process
+    Option<i64>,     // origin_pid
 );
 
 /// Extract the raw columns of an `audit_log` row (SQLite-error domain only).
@@ -424,6 +487,10 @@ fn audit_row_columns(r: &rusqlite::Row<'_>) -> rusqlite::Result<AuditRowColumns>
         r.get(8)?,
         r.get(9)?,
         r.get(10)?,
+        r.get(11)?,
+        r.get(12)?,
+        r.get(13)?,
+        r.get(14)?,
     ))
 }
 
@@ -441,6 +508,10 @@ fn audit_record_from_columns(device_id: DeviceId, cols: AuditRowColumns) -> Resu
         format,
         item_count,
         detail,
+        deny_reason,
+        origin_source,
+        origin_process,
+        origin_pid,
     ) = cols;
     let prev_hash: [u8; 32] = prev_hash
         .as_slice()
@@ -454,7 +525,22 @@ fn audit_record_from_columns(device_id: DeviceId, cols: AuditRowColumns) -> Resu
         field,
         item_count,
         format,
+        deny_reason,
     )?;
+    // Rebuild the attribution. A row with all three origin columns NULL — every
+    // row written before attribution shipped — yields `None`, which is what keeps
+    // its canonical bytes (and therefore the chain) unchanged.
+    let origin = if origin_source.is_none() && origin_process.is_none() && origin_pid.is_none() {
+        None
+    } else {
+        Some(audit::AuditOrigin {
+            source: origin_source
+                .and_then(|c| u8::try_from(c).ok())
+                .map_or(audit::AuditSource::Unknown, audit::AuditSource::from_code),
+            process: origin_process,
+            pid: origin_pid.and_then(|p| u32::try_from(p).ok()),
+        })
+    };
     Ok(AuditRecord {
         seq: u64::try_from(seq).map_err(|_| Error::Invalid("stored audit seq out of range"))?,
         prev_hash,
@@ -462,6 +548,7 @@ fn audit_record_from_columns(device_id: DeviceId, cols: AuditRowColumns) -> Resu
         device_id,
         kind,
         detail,
+        origin,
     })
 }
 
@@ -1533,7 +1620,8 @@ impl Session {
         let device_id = self.device.device_id;
         let mut stmt = conn.prepare(
             "SELECT seq, prev_hash, timestamp, kind, item_id, vault_id, peer_device_id,
-                    field, format, item_count, detail
+                    field, format, item_count, detail, deny_reason,
+                    origin_source, origin_process, origin_pid
                FROM audit_log
               WHERE device_id = ?1 AND timestamp >= ?2
               ORDER BY seq",

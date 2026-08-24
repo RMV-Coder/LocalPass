@@ -50,14 +50,313 @@
 //! alter a record without breaking every link after it —
 //! [`crate::Session::verify_audit_chain`] re-derives the chain and detects any
 //! such tamper, plus a `seq` gap.
+//!
+//! # Caller attribution ([`AuditOrigin`])
+//!
+//! A record also carries **who asked** — the surface ([`AuditSource`]: GUI, CLI,
+//! MCP, the browser native-messaging host, the SSH agent) plus, where cheaply
+//! available, the caller's short process name and pid (PRD §4.10's sketch of an
+//! injection record: `{ts, op, item, requestor:"cli", pid}`). None of that is a
+//! secret, and it deliberately **never includes a command line** — a command line
+//! can carry a password typed as an argument.
+//!
+//! Attribution is *provenance, not authentication*: on the daemon route the
+//! client self-reports it over the same-user-only IPC channel, which the daemon
+//! already treats as itself (PRD §8 T8). It answers "which of my tools did this"
+//! for an honest user, not "prove you are who you say" against same-user malware
+//! — that adversary (T3) is already inside the trust boundary.
+//!
+//! ## Why the canonical bytes stay backward-compatible
+//!
+//! [`AuditRecord::canonical_bytes`] is the input to the tamper-evident hash
+//! chain, so a format change would invalidate every existing log. The origin is
+//! therefore appended **only when present**: a record with `origin: None` — which
+//! is every record written by an earlier build — encodes to exactly the bytes it
+//! always did, so pre-existing chains keep verifying unchanged. The encoding
+//! stays injective because everything before the origin is fixed-width or
+//! length-prefixed (self-delimiting), and appending a suffix to a self-delimiting
+//! prefix cannot collide with a shorter encoding of a different record.
+
+use std::cell::RefCell;
+use std::sync::RwLock;
 
 use lp_crypto::blake3_256;
 
 use crate::ids::{DeviceId, Id, ItemId, VaultId};
 
+/// The maximum stored length of an attributed process name, in **characters**.
+/// A name is a base name (never a path) and is truncated here so a hostile or
+/// merely absurd executable name cannot bloat the plaintext log.
+pub const MAX_PROCESS_NAME_CHARS: usize = 32;
+
 /// The raw-byte-framed genesis label for a device's first audit `prev_hash`
 /// (LESSONS raw-framing rule; parallels [`crate::op`]'s chain genesis).
 const AUDIT_GENESIS_LABEL: &[u8] = b"localpass/v1/audit-genesis";
+
+/// Which LocalPass surface performed an audited action.
+///
+/// A small, closed set with stable wire codes — the plaintext log stores the
+/// code, and [`label`](AuditSource::label) renders it. `Unknown` is the honest
+/// answer for a caller that did not identify itself (an older peer, or an
+/// embedder that never called [`set_process_origin`]); it is never guessed at.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AuditSource {
+    /// The surface did not identify itself (older peer, or unset).
+    #[default]
+    Unknown,
+    /// The `localpass` command-line interface.
+    Cli,
+    /// The desktop GUI (a daemon client).
+    Gui,
+    /// The `localpass mcp` Model Context Protocol server.
+    Mcp,
+    /// The browser native-messaging host (`localpass-native-host`).
+    NativeHost,
+    /// The daemon's built-in SSH agent.
+    SshAgent,
+    /// The daemon itself, acting on its own behalf (e.g. an auto-lock).
+    Daemon,
+}
+
+impl AuditSource {
+    /// The stable wire byte for this source (part of the canonical bytes the
+    /// hash chain covers). Distinct values, never reused.
+    #[must_use]
+    pub fn code(self) -> u8 {
+        match self {
+            AuditSource::Unknown => 0,
+            AuditSource::Cli => 1,
+            AuditSource::Gui => 2,
+            AuditSource::Mcp => 3,
+            AuditSource::NativeHost => 4,
+            AuditSource::SshAgent => 5,
+            AuditSource::Daemon => 6,
+        }
+    }
+
+    /// A short, stable, non-secret label for display (`localpass audit`) and
+    /// `--json`.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            AuditSource::Unknown => "unknown",
+            AuditSource::Cli => "cli",
+            AuditSource::Gui => "gui",
+            AuditSource::Mcp => "mcp",
+            AuditSource::NativeHost => "native_host",
+            AuditSource::SshAgent => "ssh_agent",
+            AuditSource::Daemon => "daemon",
+        }
+    }
+
+    /// The source for a stored wire byte. An unrecognized code decodes to
+    /// [`AuditSource::Unknown`] rather than failing the read — a log written by a
+    /// newer build must still be *readable* by an older one.
+    #[must_use]
+    pub fn from_code(code: u8) -> Self {
+        match code {
+            1 => AuditSource::Cli,
+            2 => AuditSource::Gui,
+            3 => AuditSource::Mcp,
+            4 => AuditSource::NativeHost,
+            5 => AuditSource::SshAgent,
+            6 => AuditSource::Daemon,
+            _ => AuditSource::Unknown,
+        }
+    }
+
+    /// Parse a [`label`](AuditSource::label) back into a source; anything else is
+    /// [`AuditSource::Unknown`]. Used to decode a self-reported label off the
+    /// daemon wire.
+    #[must_use]
+    pub fn from_label(label: &str) -> Self {
+        match label {
+            "cli" => AuditSource::Cli,
+            "gui" => AuditSource::Gui,
+            "mcp" => AuditSource::Mcp,
+            "native_host" => AuditSource::NativeHost,
+            "ssh_agent" => AuditSource::SshAgent,
+            "daemon" => AuditSource::Daemon,
+            _ => AuditSource::Unknown,
+        }
+    }
+}
+
+/// Why an operation was refused, for [`AuditKind::AccessDenied`].
+///
+/// A closed set of non-secret reason tokens — the interesting half of an audit
+/// log is the attempts that did *not* succeed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DenyReason {
+    /// The vault was locked and the operation needs an unlocked session.
+    Locked,
+    /// The request named a profile this daemon does not serve.
+    WrongProfile,
+    /// The caller was authenticated but not permitted to do this.
+    NotAuthorized,
+}
+
+impl DenyReason {
+    /// The stable wire byte for this reason (covered by the hash chain).
+    #[must_use]
+    pub fn code(self) -> u8 {
+        match self {
+            DenyReason::Locked => 1,
+            DenyReason::WrongProfile => 2,
+            DenyReason::NotAuthorized => 3,
+        }
+    }
+
+    /// A short, stable, non-secret label for display and `--json`.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            DenyReason::Locked => "locked",
+            DenyReason::WrongProfile => "wrong_profile",
+            DenyReason::NotAuthorized => "not_authorized",
+        }
+    }
+
+    /// Decode a stored wire byte, or `None` if it is not a known reason.
+    #[must_use]
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(DenyReason::Locked),
+            2 => Some(DenyReason::WrongProfile),
+            3 => Some(DenyReason::NotAuthorized),
+            _ => None,
+        }
+    }
+}
+
+/// Who performed an audited action: the surface, plus the caller's short process
+/// name and pid where cheaply available.
+///
+/// # What is deliberately absent
+///
+/// **No command line, ever.** A command line routinely contains a secret (a
+/// password typed as an argument), and the audit log is plaintext. Only the
+/// executable's base name survives [`sanitized`](AuditOrigin::sanitized), and it
+/// is truncated to [`MAX_PROCESS_NAME_CHARS`] characters.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AuditOrigin {
+    /// The surface that performed the action.
+    pub source: AuditSource,
+    /// The caller's executable base name (never a path, never a command line),
+    /// truncated to [`MAX_PROCESS_NAME_CHARS`] characters. `None` when unknown.
+    pub process: Option<String>,
+    /// The caller's process id, when known.
+    pub pid: Option<u32>,
+}
+
+impl AuditOrigin {
+    /// An origin for `source` with the **current** process's base name and pid.
+    ///
+    /// This is what a binary records about itself at startup (see
+    /// [`set_process_origin`]). A failure to read `current_exe` degrades to
+    /// `process: None` — attribution is best-effort context, never a hard
+    /// dependency.
+    #[must_use]
+    pub fn for_current_process(source: AuditSource) -> Self {
+        let process = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+        Self::sanitized(source, process.as_deref(), Some(std::process::id()))
+    }
+
+    /// Build an origin, sanitizing `process` to a truncated **base name**.
+    ///
+    /// Strips any directory component (a full path can leak a home directory or
+    /// a checkout name into the plaintext log), trims whitespace, drops an empty
+    /// result, and truncates to [`MAX_PROCESS_NAME_CHARS`] characters. A
+    /// command line is never accepted here because only a name is ever passed —
+    /// callers must not join arguments into this field.
+    #[must_use]
+    pub fn sanitized(source: AuditSource, process: Option<&str>, pid: Option<u32>) -> Self {
+        let process = process.and_then(|raw| {
+            // Base name only: split on both separators so a Windows path handed
+            // to a Unix build (or vice versa) is still reduced.
+            let base = raw.rsplit(['/', '\\']).next().unwrap_or(raw).trim();
+            if base.is_empty() {
+                return None;
+            }
+            Some(
+                base.chars()
+                    .take(MAX_PROCESS_NAME_CHARS)
+                    .collect::<String>(),
+            )
+        });
+        Self {
+            source,
+            process,
+            pid,
+        }
+    }
+
+    /// Whether this origin carries nothing worth recording (an unknown surface
+    /// with no process context). Such an origin is stored as `NULL`, which keeps
+    /// its canonical bytes byte-identical to a pre-attribution record.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.source == AuditSource::Unknown && self.process.is_none() && self.pid.is_none()
+    }
+}
+
+/// The process-wide default origin, used when no scoped origin is active.
+static PROCESS_ORIGIN: RwLock<Option<AuditOrigin>> = RwLock::new(None);
+
+thread_local! {
+    /// The origin in force for the current thread, if any — set by
+    /// [`with_origin`] around one request's handling.
+    static SCOPED_ORIGIN: RefCell<Option<AuditOrigin>> = const { RefCell::new(None) };
+}
+
+/// Declare, once at startup, which surface this process is.
+///
+/// Every audit record this process writes is attributed to `origin` unless a
+/// narrower [`with_origin`] scope is active. A process that never calls this
+/// records [`AuditSource::Unknown`] — honest, not guessed.
+pub fn set_process_origin(origin: AuditOrigin) {
+    if let Ok(mut slot) = PROCESS_ORIGIN.write() {
+        *slot = Some(origin);
+    }
+}
+
+/// Run `f` with `origin` in force **on this thread**, restoring the previous
+/// scope afterwards (including on unwind).
+///
+/// This is how a *server* attributes work to its *client*: the daemon handles one
+/// request per connection thread and wraps that handling in the origin the client
+/// self-reported, so a record written deep inside a vault operation is attributed
+/// to the CLI/GUI/MCP caller rather than to the daemon.
+pub fn with_origin<T>(origin: AuditOrigin, f: impl FnOnce() -> T) -> T {
+    /// Restores the previous scoped origin on drop, so an early return or a
+    /// panic inside `f` cannot leave a stale attribution behind.
+    struct Restore(Option<AuditOrigin>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let prev = self.0.take();
+            SCOPED_ORIGIN.with(|slot| *slot.borrow_mut() = prev);
+        }
+    }
+    let prev = SCOPED_ORIGIN.with(|slot| slot.borrow_mut().replace(origin));
+    let _restore = Restore(prev);
+    f()
+}
+
+/// The origin currently in force: the [`with_origin`] scope if any, else the
+/// process default, else an empty (`Unknown`) origin.
+#[must_use]
+pub fn current_origin() -> AuditOrigin {
+    if let Some(scoped) = SCOPED_ORIGIN.with(|slot| slot.borrow().clone()) {
+        return scoped;
+    }
+    PROCESS_ORIGIN
+        .read()
+        .ok()
+        .and_then(|slot| slot.clone())
+        .unwrap_or_default()
+}
 
 /// The kind of an audited action (PRD §4.9). Only kinds that map to a **real**
 /// action in this build are present; see the crate-level notes for the §4.9
@@ -143,6 +442,18 @@ pub enum AuditKind {
     /// user (`device-pairing.md` §4). The unit counterpart of
     /// [`PairingModeEnabled`](AuditKind::PairingModeEnabled); it carries no id.
     PairingModeDisabled,
+    /// An operation was **refused** — the vault was locked, the caller named a
+    /// profile this daemon does not serve, or the caller was not authorized.
+    ///
+    /// The denied attempts are the interesting half of an audit log: a probing
+    /// process leaves a trail even though it got nothing. Carries only a closed
+    /// [`DenyReason`] token; the *operation* it attempted is not recorded,
+    /// because a refused request was never resolved against the vault and its
+    /// arguments (a vault/item name) would be a plaintext leak.
+    AccessDenied {
+        /// Why the operation was refused.
+        reason: DenyReason,
+    },
 }
 
 impl AuditKind {
@@ -163,6 +474,7 @@ impl AuditKind {
             AuditKind::DeviceTrust { .. } => 10,
             AuditKind::PairingModeEnabled => 11,
             AuditKind::PairingModeDisabled => 12,
+            AuditKind::AccessDenied { .. } => 13,
         }
     }
 
@@ -183,6 +495,16 @@ impl AuditKind {
             AuditKind::DeviceTrust { .. } => "device_trust",
             AuditKind::PairingModeEnabled => "pairing_mode_enabled",
             AuditKind::PairingModeDisabled => "pairing_mode_disabled",
+            AuditKind::AccessDenied { .. } => "access_denied",
+        }
+    }
+
+    /// The refusal reason this kind carries, if any (for display/`--json`).
+    #[must_use]
+    pub fn deny_reason(&self) -> Option<DenyReason> {
+        match self {
+            AuditKind::AccessDenied { reason } => Some(*reason),
+            _ => None,
         }
     }
 
@@ -242,6 +564,10 @@ pub struct AuditRecord {
     /// An optional short, **non-secret** detail string (e.g. a field name, an
     /// export format note). Never a secret value.
     pub detail: Option<String>,
+    /// Who performed the action (surface + process name + pid), or `None` for a
+    /// record written before attribution existed — see the module docs on why
+    /// `None` keeps the canonical bytes byte-identical to the old format.
+    pub origin: Option<AuditOrigin>,
 }
 
 impl AuditRecord {
@@ -298,10 +624,28 @@ impl AuditRecord {
             AuditKind::DeviceTrust { peer_device_id } => {
                 out.extend_from_slice(peer_device_id.as_bytes());
             }
+            AuditKind::AccessDenied { reason } => out.push(reason.code()),
         }
 
         // The optional free-form detail (never a secret), length-prefixed.
         push_opt_str(&mut out, self.detail.as_deref());
+
+        // The caller attribution, appended ONLY when present. A record with no
+        // origin — every record written before attribution existed — therefore
+        // encodes exactly as it always did, so pre-existing hash chains still
+        // verify (see the module docs).
+        if let Some(origin) = &self.origin {
+            out.push(1);
+            out.push(origin.source.code());
+            push_opt_str(&mut out, origin.process.as_deref());
+            match origin.pid {
+                None => out.push(0),
+                Some(pid) => {
+                    out.push(1);
+                    out.extend_from_slice(&pid.to_le_bytes());
+                }
+            }
+        }
         out
     }
 
@@ -353,6 +697,9 @@ pub fn genesis_hash(device_id: &DeviceId) -> [u8; 32] {
 ///
 /// [`crate::Error::Invalid`] if the code is unknown or a required id column is
 /// missing/wrong-width for that kind.
+// One parameter per `audit_log` column that feeds a kind. Bundling them into a
+// struct would just re-spell the row tuple the single caller already destructures.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn kind_from_row(
     code: i64,
     item_id: Option<&[u8]>,
@@ -361,6 +708,7 @@ pub(crate) fn kind_from_row(
     field: Option<String>,
     item_count: i64,
     format: Option<String>,
+    deny_reason: Option<i64>,
 ) -> crate::Result<AuditKind> {
     // Helper: a required id column, erroring with a static, secret-free message.
     fn req_id(bytes: Option<&[u8]>, what: &'static str) -> crate::Result<Id> {
@@ -406,6 +754,12 @@ pub(crate) fn kind_from_row(
         },
         Some(11) => AuditKind::PairingModeEnabled,
         Some(12) => AuditKind::PairingModeDisabled,
+        Some(13) => AuditKind::AccessDenied {
+            reason: deny_reason
+                .and_then(|c| u8::try_from(c).ok())
+                .and_then(DenyReason::from_code)
+                .ok_or(crate::Error::Invalid("audit row missing deny reason"))?,
+        },
         _ => return Err(crate::Error::Invalid("unknown audit kind")),
     };
     Ok(kind)
@@ -439,6 +793,7 @@ mod tests {
                 vault_id: Id::from_bytes([3u8; 16]),
             },
             detail: None,
+            origin: None,
         };
         let h = base.chain_hash();
 
@@ -474,6 +829,115 @@ mod tests {
         let mut with_empty = Vec::new();
         push_opt_str(&mut with_empty, Some(""));
         assert_ne!(with_none, with_empty);
+    }
+
+    /// THE chain-compatibility property: attaching an origin must not change
+    /// the bytes of a record that has none, so pre-existing logs keep verifying.
+    #[test]
+    fn an_origin_free_record_encodes_exactly_as_before() {
+        let base = AuditRecord {
+            seq: 7,
+            prev_hash: [4u8; 32],
+            timestamp: 1_700_000_000_000,
+            device_id: dev(),
+            kind: AuditKind::UnlockSuccess,
+            detail: Some("x".into()),
+            origin: None,
+        };
+        // Hand-built expectation of the pre-attribution encoding.
+        let mut expect = Vec::new();
+        expect.extend_from_slice(&7u64.to_le_bytes());
+        expect.extend_from_slice(&[4u8; 32]);
+        expect.extend_from_slice(&1_700_000_000_000i64.to_le_bytes());
+        expect.extend_from_slice(dev().as_bytes());
+        expect.push(1); // UnlockSuccess
+        push_opt_str(&mut expect, Some("x"));
+        assert_eq!(base.canonical_bytes(), expect);
+
+        // Adding an origin changes the hash (it IS covered by the chain).
+        let mut with_origin = base.clone();
+        with_origin.origin = Some(AuditOrigin::sanitized(
+            AuditSource::Cli,
+            Some("localpass"),
+            Some(42),
+        ));
+        assert_ne!(with_origin.chain_hash(), base.chain_hash());
+        // And so does changing any part of it.
+        let mut other = with_origin.clone();
+        other.origin = Some(AuditOrigin::sanitized(
+            AuditSource::Mcp,
+            Some("localpass"),
+            Some(42),
+        ));
+        assert_ne!(other.chain_hash(), with_origin.chain_hash());
+    }
+
+    #[test]
+    fn sanitize_strips_paths_and_truncates() {
+        let o = AuditOrigin::sanitized(AuditSource::Cli, Some(r"C:\tools\localpass.exe"), Some(1));
+        assert_eq!(o.process.as_deref(), Some("localpass.exe"));
+        let o = AuditOrigin::sanitized(AuditSource::Cli, Some("/usr/local/bin/localpass"), None);
+        assert_eq!(o.process.as_deref(), Some("localpass"));
+        let long = "x".repeat(200);
+        let o = AuditOrigin::sanitized(AuditSource::Cli, Some(&long), None);
+        assert_eq!(o.process.as_deref().unwrap().len(), MAX_PROCESS_NAME_CHARS);
+        // Blank / whitespace-only names are dropped rather than stored empty.
+        assert!(
+            AuditOrigin::sanitized(AuditSource::Cli, Some("   "), None)
+                .process
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn source_and_deny_codes_round_trip() {
+        for s in [
+            AuditSource::Unknown,
+            AuditSource::Cli,
+            AuditSource::Gui,
+            AuditSource::Mcp,
+            AuditSource::NativeHost,
+            AuditSource::SshAgent,
+            AuditSource::Daemon,
+        ] {
+            assert_eq!(AuditSource::from_code(s.code()), s);
+            assert_eq!(AuditSource::from_label(s.label()), s);
+        }
+        // An unknown code from a newer build reads as Unknown, never an error.
+        assert_eq!(AuditSource::from_code(200), AuditSource::Unknown);
+        for r in [
+            DenyReason::Locked,
+            DenyReason::WrongProfile,
+            DenyReason::NotAuthorized,
+        ] {
+            assert_eq!(DenyReason::from_code(r.code()), Some(r));
+        }
+        assert_eq!(DenyReason::from_code(0), None);
+    }
+
+    #[test]
+    fn scoped_origin_wins_and_is_restored() {
+        set_process_origin(AuditOrigin::sanitized(
+            AuditSource::Daemon,
+            Some("localpass-daemon"),
+            Some(9),
+        ));
+        assert_eq!(current_origin().source, AuditSource::Daemon);
+        let inner = with_origin(
+            AuditOrigin::sanitized(AuditSource::Mcp, Some("agent"), Some(1)),
+            current_origin,
+        );
+        assert_eq!(inner.source, AuditSource::Mcp);
+        // Restored after the scope ends.
+        assert_eq!(current_origin().source, AuditSource::Daemon);
+        // …and after a panic inside the scope.
+        let caught = std::panic::catch_unwind(|| {
+            with_origin(AuditOrigin::sanitized(AuditSource::Cli, None, None), || {
+                panic!("boom")
+            })
+        });
+        assert!(caught.is_err());
+        assert_eq!(current_origin().source, AuditSource::Daemon);
     }
 
     #[test]
@@ -515,6 +979,9 @@ mod tests {
             },
             AuditKind::PairingModeEnabled,
             AuditKind::PairingModeDisabled,
+            AuditKind::AccessDenied {
+                reason: DenyReason::Locked,
+            },
         ];
         let mut codes: Vec<u8> = kinds.iter().map(AuditKind::code).collect();
         codes.sort_unstable();

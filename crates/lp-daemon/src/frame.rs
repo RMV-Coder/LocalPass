@@ -115,18 +115,41 @@ fn is_peer_disconnect(kind: io::ErrorKind) -> bool {
 
 /// Write a [`Request`] as a versioned, length-prefixed frame.
 ///
+/// The frame carries this process's own declared caller attribution
+/// ([`lp_vault::audit::current_origin`]) on the envelope, so the daemon can
+/// attribute anything it audits to the tool that asked. A process that never
+/// declared itself sends none rather than a guess.
+///
 /// # Errors
 ///
 /// [`Error::Io`], [`Error::Serde`], or [`Error::FrameTooLarge`].
 pub fn write_request<W: Write>(w: &mut W, request: &Request) -> Result<()> {
+    let origin = lp_vault::audit::current_origin();
     let env = RequestEnvelope {
         v: PROTOCOL_VERSION,
+        caller: if origin.is_empty() {
+            None
+        } else {
+            Some(crate::protocol::WireOrigin::from_origin(&origin))
+        },
         // Borrowing would require lifetimes on the envelope; a clone of a
         // small request is fine and keeps the type simple.
         request: request.clone(),
     };
     let bytes = serde_json::to_vec(&env)?;
     write_frame(w, &bytes)
+}
+
+/// One request as it arrived: the request itself plus the caller attribution the
+/// client self-reported on the envelope (`None` from a peer that sent none).
+/// `Debug` is derived from [`Request`]'s own kind-only impl, so it still never
+/// prints a password or a secret value.
+#[derive(Debug)]
+pub struct IncomingRequest {
+    /// The decoded request.
+    pub request: Request,
+    /// Who says they sent it (see [`crate::protocol::WireOrigin`]).
+    pub origin: Option<lp_vault::AuditOrigin>,
 }
 
 /// Read a versioned [`Request`] frame, validating the protocol version.
@@ -137,7 +160,7 @@ pub fn write_request<W: Write>(w: &mut W, request: &Request) -> Result<()> {
 ///
 /// [`Error::Io`], [`Error::Serde`], [`Error::FrameTooLarge`], or
 /// [`Error::UnsupportedVersion`] if the envelope `v` is not [`PROTOCOL_VERSION`].
-pub fn read_request<R: Read>(r: &mut R) -> Result<Option<Request>> {
+pub fn read_request<R: Read>(r: &mut R) -> Result<Option<IncomingRequest>> {
     let Some(body) = read_frame(r)? else {
         return Ok(None);
     };
@@ -145,7 +168,14 @@ pub fn read_request<R: Read>(r: &mut R) -> Result<Option<Request>> {
     if env.v != PROTOCOL_VERSION {
         return Err(Error::UnsupportedVersion(env.v));
     }
-    Ok(Some(env.request))
+    Ok(Some(IncomingRequest {
+        request: env.request,
+        // Re-sanitized on the way in — see `WireOrigin::to_origin`.
+        origin: env
+            .caller
+            .as_ref()
+            .map(crate::protocol::WireOrigin::to_origin),
+    }))
 }
 
 /// Write a [`Response`] as a versioned, length-prefixed frame.
@@ -191,7 +221,7 @@ mod tests {
         write_request(&mut buf, &Request::Ping).unwrap();
         let mut cur = Cursor::new(buf);
         let got = read_request(&mut cur).unwrap().unwrap();
-        assert!(matches!(got, Request::Ping));
+        assert!(matches!(got.request, Request::Ping));
     }
 
     #[test]

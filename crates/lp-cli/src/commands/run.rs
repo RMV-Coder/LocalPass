@@ -108,10 +108,17 @@ fn compose_resolved_proxied(
     Ok(env)
 }
 
-/// Load an env-set's entries through the daemon (`GetRawPayload`).
+/// Load an env-set's entries through the daemon (`GetEnvSet`).
 ///
 /// Shared with the MCP server's `run_with_secrets` tool ([`crate::mcp`]), which
 /// injects secrets exactly the way `run` does.
+///
+/// Uses the dedicated `GetEnvSet` request rather than `GetRawPayload` so the
+/// daemon records the disclosure as a whole-item secret read — the same audit
+/// entry [`load_env_set`] writes on the direct route. A raw-payload fetch is the
+/// `item edit` support call and is deliberately unaudited, so reusing it here
+/// would have made proxied injection invisible in the audit log while direct
+/// injection was visible.
 pub(crate) fn load_env_set_proxied(
     profile: &str,
     client: &mut Client,
@@ -120,30 +127,21 @@ pub(crate) fn load_env_set_proxied(
 ) -> Result<Vec<(String, String)>> {
     let resp = daemonctl::call(
         client,
-        &Request::GetRawPayload {
+        &Request::GetEnvSet {
             profile: profile.to_string(),
             vault: vault_ref.to_string(),
-            target: set_ref.to_string(),
+            item: set_ref.to_string(),
         },
     )?;
     daemonctl::check_error(&resp)?;
-    let Response::RawPayload { payload, .. } = resp else {
+    let Response::EnvEntries { entries } = resp else {
         return Err(CliError::internal(anyhow::anyhow!(
             "unexpected daemon response: {}",
             resp.kind()
         ))
         .into());
     };
-    let payload: lp_vault::ItemPayload = serde_json::from_value(payload)
-        .map_err(|e| CliError::internal(anyhow::anyhow!("parsing env-set: {e}")))?;
-    match payload.type_data {
-        TypeData::EnvSet { entries } => Ok(entries.into_iter().map(|e| (e.key, e.value)).collect()),
-        other => Err(CliError::usage(format!(
-            "--env-set {set_ref:?} is a {} item, not an env-set",
-            other.type_str()
-        ))
-        .into()),
-    }
+    Ok(entries)
 }
 
 /// Resolve a `localpass://`/`op://` reference through the daemon
@@ -220,6 +218,13 @@ fn compose_resolved(session: &Session, args: &RunArgs) -> Result<OrderedEnv> {
 /// Load all entries of an env-set item as `(key, value)` pairs.
 ///
 /// Shared with the MCP server's `run_with_secrets` tool ([`crate::mcp`]).
+///
+/// # Audit (PRD §4.9)
+///
+/// Every value of the set leaves the vault here, so this records a **whole-item
+/// secret read** — the same entry the daemon writes for the proxied route's
+/// `GetEnvSet`, so injection is auditable regardless of which route ran it.
+/// Best-effort: a logging hiccup never fails the injection.
 pub(crate) fn load_env_set(
     session: &Session,
     vault_ref: &str,
@@ -228,10 +233,13 @@ pub(crate) fn load_env_set(
     let vault = resolve::open_vault(session, vault_ref)?;
     let item = resolve::find_item(&vault, set_ref)?;
     match &item.payload.type_data {
-        TypeData::EnvSet { entries } => Ok(entries
-            .iter()
-            .map(|e| (e.key.clone(), e.value.clone()))
-            .collect()),
+        TypeData::EnvSet { entries } => {
+            vault.record_secret_read(&item.item_id, None).ok();
+            Ok(entries
+                .iter()
+                .map(|e| (e.key.clone(), e.value.clone()))
+                .collect())
+        }
         other => Err(CliError::usage(format!(
             "--env-set {set_ref:?} is a {} item, not an env-set",
             other.type_str()

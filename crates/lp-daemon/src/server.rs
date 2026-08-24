@@ -240,20 +240,29 @@ fn serve_connection(shared: &Arc<Shared>, mut conn: transport::Connection) -> Re
     loop {
         // 1) Read the full request off the wire — NO lock held here, so a slow
         //    client cannot block the mutex.
-        let request = match frame::read_request(&mut conn)? {
+        let incoming = match frame::read_request(&mut conn)? {
             Some(req) => req,
             None => return Ok(()), // client closed cleanly between messages
         };
+        let frame::IncomingRequest { request, origin } = incoming;
         let kind = request.kind();
         let started = std::time::Instant::now();
 
-        // 2) Handle under the lock (brief; no client IO inside).
+        // 2) Handle under the lock (brief; no client IO inside), with the
+        //    client's self-reported attribution in force on THIS thread — so an
+        //    audit record written deep inside a vault operation names the CLI /
+        //    GUI / MCP caller that asked for it, not the daemon. The scope is
+        //    thread-local and restored on the way out, so concurrent connections
+        //    never see each other's attribution.
         let handled = {
             let mut state = shared
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            engine::handle(&mut state, request)
+            match origin {
+                Some(o) => lp_vault::audit::with_origin(o, || engine::handle(&mut state, request)),
+                None => engine::handle(&mut state, request),
+            }
         };
 
         if shared.verbose {

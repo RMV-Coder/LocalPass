@@ -57,6 +57,15 @@ serde_json = "1"
 # --- No key material or master password is ever held here beyond the single
 # --- unlock() call that forwards the password straight to the daemon. ---
 lp-daemon = { path = "../../../crates/lp-daemon" }
+# --- Caller attribution ONLY (PRD §4.9). `setup()` calls
+# --- `lp_vault::audit::set_process_origin(AuditOrigin::for_current_process(
+# --- AuditSource::Gui))` once at startup, so every audit record this app causes
+# --- — directly on the mobile in-process route, or via the request envelope on
+# --- the desktop daemon route — says `gui` instead of `unknown`. This crate is
+# --- already in the dependency graph transitively through lp-daemon; the direct
+# --- edge exists only so we can NAME the enum. No session, key material, or
+# --- vault operation is reached through it. ---
+lp-vault = { path = "../../../crates/lp-vault" }
 # --- The sync engine's device-identity parsing (public keys only). Used ONLY by
 # --- the `preview_fingerprint` command, which parses a pasted LPDEV1 string and
 # --- returns its fingerprint for the user to compare — a PUBLIC value, no

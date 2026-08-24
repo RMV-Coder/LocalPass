@@ -101,7 +101,7 @@ pub mod vault;
 
 pub use account::{AccountStore, DeviceIdentityInfo, PeerDevice, Session};
 pub use attachment::{AttachAddPayload, AttachDeletePayload, AttachmentInfo, MAX_ATTACHMENT_BYTES};
-pub use audit::{AuditKind, AuditRecord};
+pub use audit::{AuditKind, AuditOrigin, AuditRecord, AuditSource, DenyReason};
 pub use error::{Error, Result};
 pub use foreign::{
     AttachmentMaterialization, ItemMaterialization, Materialization, StoredOp,

@@ -17,6 +17,19 @@ const SECRET_PW: &str = "sup3r-s3cr3t-audit-pw";
 const USERNAME: &str = "svc_audit_user";
 const TITLE: &str = "AuditTargetItem";
 
+/// A trivially-succeeding child process, for testing injection without caring
+/// what the child does.
+fn true_command() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        vec!["cmd".into(), "/c".into(), "exit".into(), "0".into()]
+    }
+    #[cfg(not(windows))]
+    {
+        vec!["sh".into(), "-c".into(), "exit 0".into()]
+    }
+}
+
 /// Add a login item with a secret password + username to the `personal` vault.
 fn add_login(profile: &TestProfile) {
     profile
@@ -225,4 +238,87 @@ fn export_is_audited() {
         .expect("an export record");
     assert_eq!(export_rec["export_format"], "json");
     assert_eq!(export_rec["item_count"], 1);
+}
+
+/// Every record the CLI writes is attributed to the `cli` surface, with the
+/// binary's own process name and pid — and never a command line, even when the
+/// secret was passed as one (`item add --password <SECRET>` above).
+#[test]
+fn records_are_attributed_to_the_cli_surface() {
+    let profile = TestProfile::initialized();
+    add_login(&profile);
+
+    let arr = audit_json(&profile);
+    let items = arr.as_array().expect("json array");
+    assert!(!items.is_empty());
+    for r in items {
+        assert_eq!(
+            r["source"], "cli",
+            "every record a CLI run writes says so: {r}"
+        );
+        let proc = r["process"].as_str().expect("a process name");
+        assert!(
+            proc.starts_with("localpass"),
+            "the process name is the executable's base name: {proc:?}"
+        );
+        assert!(r["pid"].as_u64().is_some(), "a pid is recorded: {r}");
+    }
+
+    // THE sanitization property: the secret was on this process's command line,
+    // so if a command line were ever recorded it would show up here.
+    let dumped = arr.to_string();
+    assert!(!dumped.contains(SECRET_PW), "a command line was recorded");
+}
+
+/// `run --env-set` hands every value of a set to a child process — a bulk
+/// secret disclosure that must be audited (and audited without naming the set).
+#[test]
+fn env_set_injection_is_audited_as_a_secret_read() {
+    let profile = TestProfile::initialized();
+    profile
+        .cmd()
+        .args([
+            "--no-daemon",
+            "item",
+            "add",
+            "--type",
+            "env-set",
+            "--title",
+            "CI Secrets",
+            "--env",
+            &format!("TOKEN={SECRET_PW}"),
+        ])
+        .assert()
+        .success();
+
+    let before = audit_json(&profile)
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["kind"] == "item_secret_read")
+        .count();
+
+    profile
+        .cmd()
+        .args(["--no-daemon", "run", "--env-set", "CI Secrets", "--"])
+        .args(true_command())
+        .assert()
+        .success();
+
+    let arr = audit_json(&profile);
+    let after = arr
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["kind"] == "item_secret_read")
+        .count();
+    assert_eq!(
+        after,
+        before + 1,
+        "injecting an env-set records exactly one whole-item secret read"
+    );
+    // Still no secret and no title in the log.
+    let dumped = arr.to_string();
+    assert!(!dumped.contains(SECRET_PW), "secret leaked: {dumped}");
+    assert!(!dumped.contains("CI Secrets"), "title leaked: {dumped}");
 }

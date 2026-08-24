@@ -293,7 +293,9 @@ fn hex_bytes(hex: &str) -> Result<Vec<u8>> {
     }
     let mut out = Vec::with_capacity(hex.len() / 2);
     let b = hex.as_bytes();
-    for pair in b.chunks_exact(2) {
+    // `.0` is every whole pair; the length was checked even above, so the
+    // remainder is always empty.
+    for pair in b.as_chunks::<2>().0 {
         let hi =
             (pair[0] as char)
                 .to_digit(16)

@@ -10,9 +10,11 @@
 //!
 //! Records print **oldest-first** (chronological — the natural reading order for
 //! "what happened, in order", and the order the hash chain is built in). Each row
-//! is `timestamp  kind  ids  detail`; a `--json` array carries the same fields in
-//! a stable shape. The log holds only non-secret metadata (ids, kinds,
-//! timestamps) — this command can never print a secret because there are none in
+//! is `timestamp  kind  ids  detail`, where the detail includes the caller
+//! attribution as `by=<surface>/<process>(<pid>)`; a `--json` array carries the
+//! same fields in a stable shape. The log holds only non-secret metadata (ids,
+//! kinds, timestamps, a surface label and process *name*) — this command can
+//! never print a secret, a title, or a command line, because there are none in
 //! the log ([`lp_vault::audit`]).
 //!
 //! # `--verify`
@@ -159,7 +161,21 @@ fn detail_string(record: &AuditRecord) -> String {
             bits.push(format!("format={format}"));
             bits.push(format!("items={item_count}"));
         }
+        AuditKind::AccessDenied { reason } => bits.push(format!("reason={}", reason.label())),
         _ => {}
+    }
+    // Who did it (PRD §4.9 caller attribution) — a surface label plus, when
+    // known, the caller's process name and pid. Never a command line.
+    if let Some(o) = &record.origin {
+        let mut by = format!("by={}", o.source.label());
+        if let Some(p) = &o.process {
+            by.push('/');
+            by.push_str(p);
+        }
+        if let Some(pid) = o.pid {
+            by.push_str(&format!("({pid})"));
+        }
+        bits.push(by);
     }
     if let Some(d) = &record.detail {
         bits.push(d.clone());
@@ -214,6 +230,12 @@ fn record_to_json(r: &AuditRecord) -> serde_json::Value {
         "field": audit_field(&r.kind),
         "export_format": audit_export_format(&r.kind),
         "item_count": audit_item_count(&r.kind),
+        "deny_reason": r.kind.deny_reason().map(lp_vault::DenyReason::label),
+        // Caller attribution: which surface acted, and (when known) its process
+        // name and pid. A command line is never stored, so none can print.
+        "source": r.origin.as_ref().map(|o| o.source.label()),
+        "process": r.origin.as_ref().and_then(|o| o.process.clone()),
+        "pid": r.origin.as_ref().and_then(|o| o.pid),
         "detail": r.detail,
     })
 }
