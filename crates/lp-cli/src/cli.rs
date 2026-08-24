@@ -207,6 +207,27 @@ entropy estimate, and issue flags — never a secret value.")]
         command: PairingCommand,
     },
 
+    /// Arm or disarm **agent fill** — the time-boxed, per-item window that lets
+    /// an AI agent trigger a browser autofill (`agent-fill.md` §7).
+    #[command(name = "agent-fill")]
+    #[command(long_about = "Arm or disarm agent fill (agent-fill.md §7).\n\n\
+Agent fill is a per-device, time-boxed (3-minute), PER-ITEM window that lets an \
+AI agent log you into a site through the LocalPass browser extension without the \
+password ever entering the agent's transcript. It is what replaces the click you \
+would otherwise make in the extension popup, so it is deliberately narrow: \
+arming names the items it covers, an item outside that set is refused even while \
+the window is open, every fill raises a notification and an audit record, and \
+the window lapses on its own.\n\n\
+The human popup flow is unaffected: it keeps its user-click gate whether agent \
+fill is armed or not.\n\n\
+This lives in the running daemon's unlocked session, so these commands talk to \
+the daemon. With no unlocked daemon there is nothing to arm — and the extension \
+could not reach the vault anyway.")]
+    AgentFill {
+        #[command(subcommand)]
+        command: AgentFillCommand,
+    },
+
     /// Manage vault-backed SSH keys and the SSH agent (PRD §4.8).
     Ssh {
         #[command(subcommand)]
@@ -582,6 +603,30 @@ pub enum PairingCommand {
     /// Close the pairing-mode window now.
     Disable,
     /// Show whether pairing mode is on, and the seconds remaining if so.
+    Status {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// `localpass agent-fill ...`
+#[derive(Debug, Subcommand)]
+pub enum AgentFillCommand {
+    /// Arm agent fill for the named items (3 minutes).
+    Arm {
+        /// An item to arm (title or id). Repeat for several. At least one is
+        /// required — there is deliberately no "arm the whole vault".
+        #[arg(long = "item", value_name = "ITEM", required = true)]
+        item: Vec<String>,
+        /// Resolve the items in this vault only (default: search every vault,
+        /// as browser autofill does).
+        #[arg(long)]
+        vault: Option<String>,
+    },
+    /// Close the agent-fill window now, dropping any pending fill.
+    Disable,
+    /// Show whether agent fill is armed, and the seconds remaining if so.
     Status {
         /// Emit machine-readable JSON.
         #[arg(long)]

@@ -1023,17 +1023,28 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
         Request::SetPairingMode { enabled, .. } => handle_set_pairing_mode(state, enabled),
 
         // --- Agent-triggered autofill (`agent-fill.md`) -------------------
-        Request::SetAgentFillMode { on, item_ids, .. } => {
-            handle_set_agent_fill_mode(state, on, &item_ids)
-        }
+        Request::SetAgentFillMode {
+            on,
+            item_ids,
+            vault,
+            ..
+        } => handle_set_agent_fill_mode(state, on, &item_ids, vault.as_deref()),
 
         Request::ArmFillIntent {
             item_id,
             tab_id,
             origin,
             overwrite,
+            vault,
             ..
-        } => handle_arm_fill_intent(state, &item_id, tab_id, &origin, overwrite),
+        } => handle_arm_fill_intent(
+            state,
+            &item_id,
+            tab_id,
+            &origin,
+            overwrite,
+            vault.as_deref(),
+        ),
 
         Request::TakeFillIntent { .. } => handle_take_fill_intent(state),
 
@@ -1519,8 +1530,17 @@ enum Located {
 /// The human fill path ([`fill_login`]) takes the first title match it finds and
 /// is deliberately left alone; the agent path must be able to answer
 /// `ambiguous_item` (`agent-fill.md` §10), so it scans every vault and counts.
-fn locate_item(session: &Session, item_ref: &str) -> Result<Located, Response> {
-    let vaults = session.list_vaults().map_err(vault_err)?;
+fn locate_item(
+    session: &Session,
+    item_ref: &str,
+    vault_ref: Option<&str>,
+) -> Result<Located, Response> {
+    // `None` searches every vault — the way the browser fill path has always
+    // resolved an item. A named vault narrows the search to that one.
+    let vaults = match vault_ref {
+        Some(name) => vec![(resolve_vault_id(session, name)?, String::new())],
+        None => session.list_vaults().map_err(vault_err)?,
+    };
     let mut matches: Vec<lp_vault::Item> = Vec::new();
     for (vault_id, _name) in &vaults {
         let v = session.open_vault(*vault_id).map_err(vault_err)?;
@@ -1550,8 +1570,9 @@ fn locate_item(session: &Session, item_ref: &str) -> Result<Located, Response> {
 fn resolve_login_item(
     session: &Session,
     item_ref: &str,
+    vault_ref: Option<&str>,
 ) -> Result<Result<lp_vault::Item, FillRefusal>, Response> {
-    Ok(match locate_item(session, item_ref)? {
+    Ok(match locate_item(session, item_ref, vault_ref)? {
         Located::None => Err(FillRefusal::ItemNotFound),
         Located::Ambiguous => Err(FillRefusal::AmbiguousItem),
         // A non-login item is "there is no login item by that name", not a
@@ -1578,7 +1599,12 @@ fn resolve_login_item(
 ///
 /// Same shape as [`handle_set_pairing_mode`]: resolve and audit through the
 /// `&Session` inside a block, then mutate `state` once the borrow has ended.
-fn handle_set_agent_fill_mode(state: &mut State, on: bool, item_ids: &[String]) -> Handled {
+fn handle_set_agent_fill_mode(
+    state: &mut State,
+    on: bool,
+    item_ids: &[String],
+    vault_ref: Option<&str>,
+) -> Handled {
     let resolved: BTreeSet<String> = {
         let Some(session) = state.session_ref() else {
             return Handled::reply(Response::Locked);
@@ -1592,7 +1618,7 @@ fn handle_set_agent_fill_mode(state: &mut State, on: bool, item_ids: &[String]) 
                 ));
             }
             for reference in item_ids {
-                match resolve_login_item(session, reference) {
+                match resolve_login_item(session, reference, vault_ref) {
                     Err(resp) => return Handled::reply(resp),
                     Ok(Err(reason)) => return Handled::reply(refuse_fill(session, reason)),
                     Ok(Ok(item)) => {
@@ -1633,6 +1659,7 @@ fn handle_arm_fill_intent(
     tab_id: Option<u64>,
     origin: &str,
     overwrite: bool,
+    vault_ref: Option<&str>,
 ) -> Handled {
     let armed: String = {
         let Some(session) = state.session_ref() else {
@@ -1641,7 +1668,7 @@ fn handle_arm_fill_intent(
         if !state.agent_fill_active() {
             return Handled::reply(refuse_fill(session, FillRefusal::AgentFillNotArmed));
         }
-        let item = match resolve_login_item(session, item_ref) {
+        let item = match resolve_login_item(session, item_ref, vault_ref) {
             Err(resp) => return Handled::reply(resp),
             Ok(Err(reason)) => return Handled::reply(refuse_fill(session, reason)),
             Ok(Ok(item)) => item,

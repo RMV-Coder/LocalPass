@@ -419,6 +419,11 @@ pub enum Request {
         /// set with `on: true` is refused: arming must name what it covers.
         #[serde(default)]
         item_ids: Vec<String>,
+        /// Resolve `item_ids` inside this vault only (name or id). `None` — the
+        /// default — searches every vault, which is how the browser fill path
+        /// has always resolved an item.
+        #[serde(default)]
+        vault: Option<String>,
     },
     /// **Agent fill:** arm the single, single-use **fill intent** an armed
     /// extension will pull (`agent-fill.md` §5/§7). Carries only ids, a tab id,
@@ -446,6 +451,10 @@ pub enum Request {
         /// (`agent-fill.md` §8). Defaults to `false`.
         #[serde(default)]
         overwrite: bool,
+        /// Resolve `item_id` inside this vault only (name or id). `None` — the
+        /// default — searches every vault, as the browser fill path does.
+        #[serde(default)]
+        vault: Option<String>,
     },
     /// **Agent fill:** take the pending fill intent, if any (`agent-fill.md`
     /// §5.1). Sent by the browser extension through the native host while the
@@ -1835,6 +1844,7 @@ mod tests {
                 tab_id: Some(42),
                 origin: "https://github.com".into(),
                 overwrite: true,
+                vault: None,
             },
         };
         let bytes = serde_json::to_vec(&env).expect("serialize");

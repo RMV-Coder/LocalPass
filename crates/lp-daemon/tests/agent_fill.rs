@@ -101,6 +101,7 @@ fn set_mode(state: &mut State, profile: &std::path::Path, on: bool, items: &[&st
             profile: profile_str(profile),
             on,
             item_ids: items.iter().map(|s| (*s).to_string()).collect(),
+            vault: None,
         },
     )
     .response
@@ -120,6 +121,7 @@ fn arm_on(state: &mut State, profile: &std::path::Path, item: &str, origin: &str
             tab_id: Some(42),
             origin: origin.into(),
             overwrite: false,
+            vault: None,
         },
     )
     .response

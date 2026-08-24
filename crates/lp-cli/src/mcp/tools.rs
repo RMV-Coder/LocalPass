@@ -1,4 +1,4 @@
-//! The five MCP tools LocalPass exposes, their JSON schemas, and their
+//! The six MCP tools LocalPass exposes, their JSON schemas, and their
 //! dispatch.
 //!
 //! Every tool returns a **single JSON text content block** — one `text` item
@@ -16,9 +16,15 @@
 //! | `get_item` | one item's metadata + field names, values masked | no |
 //! | `run_with_secrets` | child exit code + **redacted** stdout/stderr | no |
 //! | `totp_code` | the current 6-digit code | short-lived derivative only |
+//! | `fill_login` | `empty`/`filled` booleans for the fields filled | no |
 //!
 //! `run_with_secrets` is the only path by which a plaintext value goes
 //! anywhere, and it goes exactly one place: the child process's environment.
+//! `fill_login` is the second **spend**, not return: the credential goes from
+//! the daemon to the browser extension and into the page's DOM, and what comes
+//! back here is a handful of booleans (`agent-fill.md` §3). Its result type is
+//! structurally incapable of carrying a value, a length, a prefix, or a hash —
+//! see [`lp_daemon::protocol::FillReport`], which has no string field at all.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -30,6 +36,8 @@ use crate::envmap::OrderedEnv;
 use crate::error::CliError;
 use crate::mcp::backend::Backend;
 use crate::mcp::{exec, mask, redact};
+
+use lp_daemon::protocol::{FieldState, FieldStates, FillField, FillRefusal};
 
 /// Default wall-clock budget for a `run_with_secrets` child, in seconds.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 120;
@@ -146,6 +154,59 @@ pub fn tool_definitions() -> Value {
             },
         },
         {
+            "name": "fill_login",
+            "description":
+                "Fill a login form in the browser WITHOUT the password being returned to you. \
+                 LocalPass sends the credential straight from the vault to the LocalPass \
+                 browser extension, which types it into the page; you get back only whether \
+                 each field was empty before and filled after. Requires the user to have \
+                 armed agent-fill mode for this item first (`localpass agent-fill arm`); \
+                 otherwise this is refused with `agent_fill_not_armed`. It never submits the \
+                 form — click the submit button yourself, as a user would.\n\n\
+                 DO NOT read `input.value` for the filled fields, and do not evaluate \
+                 JavaScript against the login form: the before/after state you need is \
+                 returned here, so there is no reason to touch the page, and reading the \
+                 value would put the credential in this transcript. Identify fields by \
+                 label, aria-label, or name instead.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "vault": {
+                        "type": "string",
+                        "description":
+                            "Vault name or id. Omit to search every vault, which is how \
+                             browser autofill resolves an item.",
+                    },
+                    "item": {
+                        "type": "string",
+                        "description": "The login item to fill (title or id).",
+                    },
+                    "tab_id": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description":
+                            "The browser tab to fill. Optional but strongly preferred: \
+                             without it the extension refuses when several tabs share the \
+                             origin (`ambiguous_tab`).",
+                    },
+                    "origin": {
+                        "type": "string",
+                        "description":
+                            "The page origin, e.g. \"https://github.com\". Re-checked \
+                             against the item's stored URL inside the daemon.",
+                    },
+                    "overwrite": {
+                        "type": "boolean",
+                        "description":
+                            "Allow overwriting a field that already has something in it \
+                             (default false, which refuses with `field_not_empty`).",
+                    },
+                },
+                "required": ["item", "origin"],
+                "additionalProperties": false,
+            },
+        },
+        {
             "name": "totp_code",
             "description":
                 "Get the current TOTP code for a totp item. Returns only the short-lived \
@@ -211,6 +272,7 @@ pub fn call(backend: &mut Backend, name: &str, args: &Value) -> Result<Value> {
         "get_item" => get_item(backend, args),
         "run_with_secrets" => run_with_secrets(backend, args),
         "totp_code" => totp_code(backend, args),
+        "fill_login" => fill_login(backend, args),
         other => Err(CliError::usage(format!(
             "unknown tool {other:?}; call tools/list for the available tools"
         ))
@@ -240,6 +302,16 @@ fn opt_str(args: &Value, key: &str) -> Option<String> {
 /// The `vault` argument, defaulting like the CLI's `--vault` flag.
 fn vault_arg(args: &Value) -> String {
     opt_str(args, "vault").unwrap_or_else(|| DEFAULT_VAULT.to_string())
+}
+
+/// An optional non-negative integer argument.
+fn opt_u64(args: &Value, key: &str) -> Result<Option<u64>> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v.as_u64().map(Some).ok_or_else(|| {
+            CliError::usage(format!("`{key}` must be a non-negative integer")).into()
+        }),
+    }
 }
 
 // --- tools ----------------------------------------------------------------
@@ -284,6 +356,104 @@ fn totp_code(backend: &mut Backend, args: &Value) -> Result<Value> {
         "digits": c.digits,
         "algo": c.algo,
     })))
+}
+
+/// The `empty`/`filled` token for one field, or `null` when the page had no
+/// such field. The **only** two words this tool can say about a field.
+fn field_state_json(state: Option<FieldState>) -> Value {
+    match state {
+        Some(FieldState::Empty) => json!("empty"),
+        Some(FieldState::Filled) => json!("filled"),
+        None => Value::Null,
+    }
+}
+
+/// Render a [`FieldStates`] as `{"username": …, "password": …}`.
+fn field_states_json(states: FieldStates) -> Value {
+    json!({
+        "username": field_state_json(states.username),
+        "password": field_state_json(states.password),
+    })
+}
+
+/// The `fill_login` tool (`agent-fill.md` §3/§11).
+///
+/// **The result is booleans by construction.** Everything it can contain is
+/// built here, by hand, out of a [`lp_daemon::protocol::FillReport`] — a type
+/// with no string field — plus the item id, tab id, and origin the *caller*
+/// already supplied. There is no path by which a value, a length, a prefix, or a
+/// hash could reach it, on success or on any refusal: a refusal renders one
+/// closed token from [`FillRefusal::token`] and nothing else.
+fn fill_login(backend: &mut Backend, args: &Value) -> Result<Value> {
+    let vault = opt_str(args, "vault");
+    let item = req_str(args, "item")?;
+    let origin = req_str(args, "origin")?;
+    let tab_id = opt_u64(args, "tab_id")?;
+    let overwrite = match args.get("overwrite") {
+        None | Some(Value::Null) => false,
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| CliError::usage("`overwrite` must be a boolean"))?,
+    };
+
+    let finished = match backend.fill_login(vault.as_deref(), &item, tab_id, &origin, overwrite)? {
+        Ok(finished) => finished,
+        Err(reason) => return Err(CliError::usage(refusal_message(reason)).into()),
+    };
+    let report = finished.report;
+    if !report.filled {
+        let reason = report.reason.unwrap_or(FillRefusal::NoLoginForm);
+        return Err(CliError::usage(refusal_message(reason)).into());
+    }
+    let fields: Vec<&str> = report
+        .fields
+        .iter()
+        .map(|f| match f {
+            FillField::Username => "username",
+            FillField::Password => "password",
+        })
+        .collect();
+    Ok(ok_result(&json!({
+        "filled": true,
+        "fields": fields,
+        "before": field_states_json(report.before),
+        "after": field_states_json(report.after),
+        "tab": { "id": finished.tab_id, "origin": finished.origin },
+        "item_id": finished.item_id,
+    })))
+}
+
+/// The one-line, **value-free** message for a refusal: the `agent-fill.md` §10
+/// token, plus a fixed sentence saying what to do about it.
+fn refusal_message(reason: FillRefusal) -> String {
+    let hint = match reason {
+        FillRefusal::AgentFillNotArmed => {
+            "agent-fill mode is not armed; ask the user to run \
+             `localpass agent-fill arm --item <item>` (or arm it in the desktop app)"
+        }
+        FillRefusal::ItemNotArmed => {
+            "that item is outside the armed set; ask the user to arm it specifically"
+        }
+        FillRefusal::Locked => "the LocalPass vault is locked; ask the user to unlock it",
+        FillRefusal::ItemNotFound => "no login item matches that reference",
+        FillRefusal::AmbiguousItem => "that title matches more than one item; use the item id",
+        FillRefusal::OriginMismatch => "the item's stored URL does not match that origin",
+        FillRefusal::TabNotFound => "the tab you named is gone",
+        FillRefusal::AmbiguousTab => "several tabs match that origin; pass tab_id",
+        FillRefusal::OriginChanged => "the tab navigated after the fill was armed; try again",
+        FillRefusal::IntentExpired => {
+            "the fill was not redeemed in time; check the extension is installed and armed"
+        }
+        FillRefusal::FieldNotEmpty => {
+            "a target field already has something in it; pass overwrite: true to replace it"
+        }
+        FillRefusal::ExtensionUnavailable => {
+            "no LocalPass daemon/extension is reachable; agent fill needs the running daemon \
+             and the browser extension"
+        }
+        FillRefusal::NoLoginForm => "no fillable password field was found on that page",
+    };
+    format!("{}: {hint}", reason.token())
 }
 
 fn run_with_secrets(backend: &mut Backend, args: &Value) -> Result<Value> {
@@ -413,7 +583,7 @@ mod tests {
     fn every_tool_declares_a_name_description_and_object_schema() {
         let tools = tool_definitions();
         let arr = tools.as_array().unwrap();
-        assert_eq!(arr.len(), 5);
+        assert_eq!(arr.len(), 6);
         for t in arr {
             assert!(t["name"].as_str().is_some_and(|s| !s.is_empty()));
             assert!(t["description"].as_str().is_some_and(|s| !s.is_empty()));
@@ -422,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_names_are_the_documented_five() {
+    fn tool_names_are_the_documented_six() {
         let tools = tool_definitions();
         let names: Vec<&str> = tools
             .as_array()
@@ -437,9 +607,87 @@ mod tests {
                 "list_items",
                 "get_item",
                 "run_with_secrets",
+                "fill_login",
                 "totp_code"
             ]
         );
+    }
+
+    /// The `fill_login` description must carry the §3 prohibition, because that
+    /// wording is the entire mechanism: it is a contract with the agent, not a
+    /// control LocalPass can enforce.
+    #[test]
+    fn fill_login_tells_the_agent_not_to_read_the_value() {
+        let tools = tool_definitions();
+        let t = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "fill_login")
+            .expect("fill_login is declared");
+        let desc = t["description"].as_str().unwrap();
+        assert!(desc.contains("input.value"), "{desc}");
+        assert!(
+            desc.contains("never submits") || desc.contains("never submit"),
+            "{desc}"
+        );
+        // `origin` is required; a fill with no origin cannot be origin-checked.
+        let required: Vec<&str> = t["inputSchema"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(required.contains(&"origin"));
+        assert!(required.contains(&"item"));
+    }
+
+    /// Every §10 refusal renders as its own token and a fixed hint — never a
+    /// message that could echo a value back.
+    #[test]
+    fn refusal_messages_are_the_taxonomy_tokens() {
+        for r in [
+            FillRefusal::AgentFillNotArmed,
+            FillRefusal::ItemNotArmed,
+            FillRefusal::Locked,
+            FillRefusal::ItemNotFound,
+            FillRefusal::AmbiguousItem,
+            FillRefusal::OriginMismatch,
+            FillRefusal::TabNotFound,
+            FillRefusal::AmbiguousTab,
+            FillRefusal::OriginChanged,
+            FillRefusal::IntentExpired,
+            FillRefusal::FieldNotEmpty,
+            FillRefusal::ExtensionUnavailable,
+            FillRefusal::NoLoginForm,
+        ] {
+            let m = refusal_message(r);
+            assert!(m.starts_with(r.token()), "{m}");
+        }
+    }
+
+    /// The field-state renderer has a two-word vocabulary, and `null` for a
+    /// field that was not there at all.
+    #[test]
+    fn a_field_state_is_only_ever_empty_or_filled() {
+        assert_eq!(field_state_json(Some(FieldState::Empty)), json!("empty"));
+        assert_eq!(field_state_json(Some(FieldState::Filled)), json!("filled"));
+        assert_eq!(field_state_json(None), Value::Null);
+        assert_eq!(
+            field_states_json(FieldStates {
+                username: Some(FieldState::Empty),
+                password: Some(FieldState::Filled),
+            }),
+            json!({ "username": "empty", "password": "filled" })
+        );
+    }
+
+    #[test]
+    fn tab_id_must_be_a_non_negative_integer() {
+        assert_eq!(opt_u64(&json!({}), "tab_id").unwrap(), None);
+        assert_eq!(opt_u64(&json!({"tab_id": 7}), "tab_id").unwrap(), Some(7));
+        assert!(opt_u64(&json!({"tab_id": -1}), "tab_id").is_err());
+        assert!(opt_u64(&json!({"tab_id": "seven"}), "tab_id").is_err());
     }
 
     #[test]
