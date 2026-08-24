@@ -124,8 +124,12 @@ jobs:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
         if: steps.secrets.outputs.have == 'true'
-        with:
-          targets: aarch64-linux-android
+      # The target must be added to the toolchain cargo will actually use — the
+      # one rust-toolchain.toml pins — not to whatever `@stable` installed. Run
+      # inside the repo so rustup applies the directory override.
+      - name: Add the Android target to the pinned toolchain
+        if: steps.secrets.outputs.have == 'true'
+        run: rustup target add aarch64-linux-android
       - uses: Swatinem/rust-cache@v2
         if: steps.secrets.outputs.have == 'true'
         with:
