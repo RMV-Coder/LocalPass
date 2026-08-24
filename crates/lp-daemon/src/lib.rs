@@ -5,6 +5,14 @@
 // block there documents its safety contract inline.
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
+// The engine's internal helpers return `Result<Response, Response>` on purpose:
+// a refusal IS a response, so both arms are collapsed by one `match { Ok(r) |
+// Err(r) => r }` at the top of `with_session`. `clippy::result_large_err` exists
+// to catch an `Err` that is expensively large *relative to the `Ok` path* — here
+// the two arms are the same type, so its premise does not apply and boxing one
+// side would only add an allocation. Scoped to this crate, where the pattern is
+// deliberate, rather than raising the workspace threshold for everybody.
+#![allow(clippy::result_large_err)]
 //! # LocalPass daemon (`lp-daemon`)
 //!
 //! A per-user background process that holds one **unlocked** vault session in
