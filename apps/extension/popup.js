@@ -22,6 +22,8 @@ const stateEl = document.getElementById("lp-state");
 const listEl = document.getElementById("lp-list");
 const originEl = document.getElementById("lp-origin");
 const refreshBtn = document.getElementById("lp-refresh");
+const permEl = document.getElementById("lp-perm");
+const permBtn = document.getElementById("lp-perm-grant");
 
 // --- Active-tab context ----------------------------------------------------
 
@@ -348,6 +350,10 @@ async function loadForActiveTab() {
     return;
   }
 
+  // Independent of the fill flow below: surface the agent-autofill permission
+  // prompt if — and only if — a window is armed and the grant is missing.
+  void updateAgentFillPrompt(status);
+
   if (!status || status.type !== "status" || status.available === false) {
     showMessage("LocalPass isn't running. Start the desktop app.", {
       lead: "Not running",
@@ -403,6 +409,44 @@ async function loadCandidates() {
   }
 
   renderCandidates(reply.candidates);
+}
+
+// --- Agent-autofill permission (see agentfill.js) ---------------------------
+//
+// The human flow needs no host permission: it injects on your click, under
+// `activeTab`. An agent-triggered fill has no click to ride on, so it needs an
+// explicit page-access grant — and `chrome.permissions.request` needs a user
+// gesture, which only the popup has. Hence this button. None of it touches the
+// click-gated flow above.
+
+const FILL_ORIGINS = ["http://*/*", "https://*/*"];
+
+async function updateAgentFillPrompt(status) {
+  if (!permEl) return;
+  const armed =
+    status && status.type === "status" && typeof status.agent_fill_secs === "number";
+  if (!armed) {
+    permEl.hidden = true;
+    return;
+  }
+  let granted = false;
+  try {
+    granted = await chrome.permissions.contains({ origins: FILL_ORIGINS });
+  } catch (e) {
+    granted = false;
+  }
+  permEl.hidden = granted;
+}
+
+if (permBtn) {
+  permBtn.addEventListener("click", async () => {
+    try {
+      const granted = await chrome.permissions.request({ origins: FILL_ORIGINS });
+      permEl.hidden = !!granted;
+    } catch (e) {
+      /* the browser declined to show the prompt; leave the bar up */
+    }
+  });
 }
 
 // --- Wire up ---------------------------------------------------------------

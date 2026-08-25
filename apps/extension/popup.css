@@ -247,3 +247,50 @@ body {
     color: var(--lp-teal);
   }
 }
+
+/* Agent-autofill permission prompt (hidden unless the grant is missing). */
+.lp-perm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--lp-border);
+  background: var(--lp-tag-bg);
+}
+
+.lp-perm[hidden] {
+  display: none;
+}
+
+.lp-perm-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--lp-tag-fg);
+}
+
+.lp-perm-btn {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border: 1px solid var(--lp-teal);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--lp-teal-dark);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.lp-perm-btn:hover,
+.lp-perm-btn:focus-visible {
+  background: var(--lp-teal);
+  color: #ffffff;
+  outline: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  .lp-perm-btn {
+    color: var(--lp-teal);
+  }
+}
