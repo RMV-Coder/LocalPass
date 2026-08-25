@@ -3,7 +3,15 @@
   "name": "LocalPass",
   "version": "0.1.0",
   "description": "Autofill logins from your local, offline LocalPass vault. No keys or passwords ever leave your machine.",
-  "permissions": ["nativeMessaging", "activeTab", "scripting", "tabs"],
+  "permissions": [
+    "nativeMessaging",
+    "activeTab",
+    "scripting",
+    "tabs",
+    "notifications",
+    "alarms"
+  ],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
   "background": {
     "service_worker": "background.js"
   },
