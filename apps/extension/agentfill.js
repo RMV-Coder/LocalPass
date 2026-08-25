@@ -57,8 +57,9 @@
 
   const ALARM_NAME = "lp-agent-fill-heartbeat";
 
-  /** Host permissions required to inject into a tab we were not clicked on. */
-  const FILL_ORIGINS = ["http://*/*", "https://*/*"];
+  // Host permission to inject into a tab we were not clicked on is checked —
+  // and granted — per origin, never as the broad pattern the manifest merely
+  // declares as requestable. See originPattern().
 
   // --- Injected dependencies ----------------------------------------------
 
@@ -286,9 +287,9 @@
    * Two modes, so the same field-finding heuristic serves both:
    *   * PROBE (password === null): report the fields' `empty`/`filled` state and
    *     change nothing.
-   *   * FILL: refuse if a target field is already non-empty and `overwrite` is
-   *     not set (§8), otherwise set the values, dispatch input+change, and
-   *     report the after state.
+   *   * FILL: refuse if the PASSWORD field is already non-empty and `overwrite`
+   *     is not set (§8), otherwise set the values, dispatch input+change, and
+   *     report the after state. A non-empty username does not block.
    *
    * NEVER submits the form, and NEVER returns a value, a length, a prefix or a
    * hash — `empty` / `filled` is the entire vocabulary (§3, §8).
@@ -386,10 +387,11 @@
     // Refuse rather than clobber (§8). Re-checked here, in the page, so a value
     // the user typed after the probe is still protected.
     if (overwrite !== true) {
-      // A username field that already holds something is a target field too, so
-      // it refuses whether or not this item has a username to put there. Same
-      // rule the caller's probe applied, so the two cannot disagree.
-      if (before.password === "filled" || before.username === "filled") {
+      // The PASSWORD field governs. A username already in the box does not
+      // block the fill — it is not a secret, and the item's username is the
+      // account the user chose — so it is overwritten as normal. Same rule the
+      // caller's probe applied, so the two cannot disagree.
+      if (before.password === "filled") {
         return {
           ok: false,
           reason: "field_not_empty",
@@ -431,10 +433,22 @@
     return injection && injection[0] ? injection[0].result : null;
   }
 
-  /** Whether we may inject into a tab we were never clicked on. */
-  async function hasFillPermission() {
+  /** The match pattern for exactly one origin: `https://github.com/*`. */
+  function originPattern(origin) {
+    return origin + "/*";
+  }
+
+  /**
+   * Whether we may inject into a tab we were never clicked on, **for this one
+   * origin**. Checked per origin, never as `http(s)://*` — the manifest declares
+   * the broad pattern as *requestable*, but a grant covering all web traffic is
+   * never what gets asked for or relied on.
+   */
+  async function hasFillPermission(origin) {
     try {
-      return await chrome.permissions.contains({ origins: FILL_ORIGINS });
+      return await chrome.permissions.contains({
+        origins: [originPattern(origin)],
+      });
     } catch (e) {
       return false;
     }
@@ -465,14 +479,12 @@
     }
     const tabId = target.tabId;
 
-    if (!(await hasFillPermission())) {
-      // No §10 code covers this — see the README. Report a plain "did not
-      // land" and say why in the notification, which the user does see.
+    if (!(await hasFillPermission(origin))) {
       await finish(
         itemId,
         origin,
-        { filled: false, fields: [], before: {}, after: {} },
-        "needs page access — enable it from the LocalPass popup"
+        refused("page_access_denied", {}),
+        "grant page access for " + origin + " from the LocalPass popup"
       );
       return;
     }
@@ -480,7 +492,7 @@
     // 2. Probe the page before asking for anything secret.
     const probe = await injectFill(tabId, null, null, overwrite);
     if (!probe) {
-      await finish(itemId, origin, refused("no_login_form", {}));
+      await finish(itemId, origin, refused("injection_failed", {}));
       return;
     }
     if (probe.ok === false) {
@@ -488,9 +500,13 @@
       return;
     }
     if (!overwrite) {
-      const b = probe.before || {};
-      if (b.password === "filled" || b.username === "filled") {
-        await finish(itemId, origin, refused("field_not_empty", b));
+      // The PASSWORD field governs (§8, as decided): it is the credential worth
+      // protecting from a clobber. A username already in the box does not block
+      // — it is not a secret, and the item's username is the account the user
+      // chose to log in as, so it is overwritten as normal. Both fields' states
+      // are still reported honestly.
+      if ((probe.before || {}).password === "filled") {
+        await finish(itemId, origin, refused("field_not_empty", probe.before));
         return;
       }
     }
@@ -539,7 +555,9 @@
     // `fill` goes out of scope here; nothing retains it, logs it, or reports it.
 
     if (!result) {
-      await finish(itemId, origin, refused("no_login_form", probe.before));
+      // The tab was torn down or became unscriptable between the probe and now.
+      // Not "there was no form" — say so.
+      await finish(itemId, origin, refused("injection_failed", probe.before));
       return;
     }
     if (result.ok === false) {

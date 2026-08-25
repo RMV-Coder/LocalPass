@@ -77,9 +77,12 @@ How the extension participates:
 3. When an intent arrives it is redeemed **only** against the tab the agent
    named, and only if that tab's *current* origin still matches. With no tab id,
    exactly one tab must match the origin — several is a refusal, never a guess.
-4. The target fields must be **empty**. A field that already holds something is
+4. The **password field must be empty**. A password already in the box is
    refused (`field_not_empty`) rather than clobbered, unless the agent explicitly
-   asked to overwrite.
+   asked to overwrite. A username already in the box does not block the fill — it
+   is not a secret, and the item's username is the account you chose to log in
+   as — so it is overwritten as normal. Both fields' before/after states are
+   reported either way.
 5. The credential comes from the same `fill` request the popup uses, is injected,
    and is gone. The form is **not** submitted.
 6. **Every agent fill raises a notification** naming the item and the origin —
@@ -92,11 +95,18 @@ prefix, or hash of a credential is ever reported, logged, or returned — the
 report type on the LocalPass side has no free-form string at all, so such a body
 would fail to parse rather than be filtered.
 
-**Page access.** The click-gated popup flow injects under `activeTab`. An agent
-fill has no click to ride on, so it needs a page-access grant, declared as an
-*optional* host permission and requested from a button that appears in the popup
-while a window is armed. Until you grant it, agent fills are refused (and say so
-in the notification); the popup flow is unaffected either way.
+**Page access, one site at a time.** The click-gated popup flow injects under
+`activeTab`. An agent fill has no click to ride on, so it needs a page-access
+grant, declared as an *optional* host permission and requested from a button that
+appears in the popup while a window is armed.
+
+What is actually requested is the **single origin in front of you** —
+`https://github.com/*` — never the broad `http(s)://*` pattern the manifest
+merely declares as requestable. The browser prompt therefore reads "read and
+change your data on github.com", not "on all websites", and an agent fill checks
+that same per-origin grant before it touches a page. Until you grant it for a
+site, agent fills there are refused (`page_access_denied`, and the notification
+says so); the popup flow is unaffected either way.
 
 ## How it works / security
 
@@ -114,8 +124,8 @@ in the notification); the popup flow is unaffected either way.
 - **Nothing is auto-submitted, ever** — not by the popup, not by an agent fill.
   There are still no always-on content scripts, and no host permission is granted
   at install: the popup fill injects on your click under `activeTab`, and the
-  only broader grant is the *optional* one above, which you grant deliberately
-  and which is used solely to redeem an intent you armed.
+  only other grant is the *optional*, **per-site** one above, which you grant
+  deliberately and which is used solely to redeem an intent you armed.
 - **No data leaves your machine.** No network requests, no CDNs, fonts,
   analytics, or telemetry of any kind. Everything is self-contained.
 
@@ -132,7 +142,7 @@ in the notification); the popup flow is unaffected either way.
 
 | Optional permission         | Why                                                  |
 | --------------------------- | ---------------------------------------------------- |
-| `http://*/*`, `https://*/*` | **Agent fill only** — inject into a tab you did not click on. Requested from the popup, never at install, and not needed for the popup's own fill. |
+| `http://*/*`, `https://*/*` | **Declared, not requested.** The sites cannot be enumerated at build time, so this says what *may* be asked for. What is actually requested — and checked before an agent fill — is one origin at a time (`https://github.com/*`), from the popup, never at install, and never needed for the popup's own fill. |
 
 ## Files
 
