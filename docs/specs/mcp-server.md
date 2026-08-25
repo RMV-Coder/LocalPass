@@ -92,7 +92,7 @@ transitive tree (the KDBX decision, `LESSONS.md`).
 | `initialize` | Version negotiation + `{ tools: { listChanged: false } }` capability + `serverInfo` + human-readable `instructions`. |
 | `notifications/initialized` | Accepted; **never answered** (a JSON-RPC notification has no `id`). |
 | `ping` | `{}`. |
-| `tools/list` | The five tools of §5 with their JSON Schemas. |
+| `tools/list` | The six tools of §5 with their JSON Schemas. |
 | `tools/call` | Dispatch; see §4. |
 | anything else | JSON-RPC error `-32601`. |
 
@@ -282,6 +282,43 @@ stdout/stderr, and a wall-clock budget. Past `timeout_secs` it is killed and
 
 A non-`totp` item is a tool error. See §1.2 for why a code — and only a code —
 may cross this boundary.
+
+### 5.6 `fill_login`
+
+| Argument | Type | Required | Default |
+|----------|------|----------|---------|
+| `vault` | string | no | every vault |
+| `item` | string | **yes** | — |
+| `tab_id` | integer | no | — |
+| `origin` | string | **yes** | — |
+| `overwrite` | boolean | no | `false` |
+
+```json
+{ "filled": true, "fields": ["username", "password"],
+  "before": { "username": "empty",  "password": "empty" },
+  "after":  { "username": "filled", "password": "filled" },
+  "tab": { "id": 42, "origin": "https://github.com" },
+  "item_id": "…" }
+```
+
+The **second spend** (`agent-fill.md`). The credential goes from the daemon to
+the browser extension and into the page's DOM; what comes back here is the
+`empty`/`filled` state of each field, and nothing else — no value, no length, no
+prefix, no hash, on success or on any refusal. That is structural, not a
+convention: the result is built from `lp_daemon::protocol::FillReport`, which has
+no string field at all.
+
+It requires the user to have armed agent fill for that item first
+(`localpass agent-fill arm --item …`, or the desktop app); otherwise it is
+refused with `agent_fill_not_armed`. Every refusal is one closed token from the
+`agent-fill.md` §10 taxonomy, so an agent can tell "you may not" from "it did not
+work". It never submits the form.
+
+Two things this tool does **not** promise. The description tells the agent not to
+read `input.value` — that is a contract, not a control: a browser-automation
+tool in the same session can evaluate arbitrary JavaScript and LocalPass cannot
+police it. And a `--no-daemon` MCP server answers `extension_unavailable`,
+because agent fill is a daemon-mediated exchange with a browser.
 
 ---
 

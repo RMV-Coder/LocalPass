@@ -255,8 +255,11 @@ Items come back with field NAMES and MASKED values; the only way a value leaves 
 the vault is `run_with_secrets`, which injects it into a child process's \
 environment and then REDACTS every occurrence of it out of the captured \
 stdout/stderr before answering.\n\n\
-TOOLS: list_vaults, list_items, get_item, run_with_secrets, totp_code. There is \
-no tool to create, edit, delete, or export anything.\n\n\
+TOOLS: list_vaults, list_items, get_item, run_with_secrets, totp_code, \
+fill_login. There is no tool to create, edit, delete, or export anything.\n\n\
+fill_login is the second spend: it fills a login form in your browser through \
+the LocalPass extension and answers with empty/filled booleans, never the \
+password. It needs the user to arm it first (`localpass agent-fill arm`).\n\n\
 TRANSPORT: newline-delimited JSON-RPC 2.0 on stdin/stdout (MCP stdio). stdout \
 carries protocol frames only; all logging goes to stderr and never contains a \
 secret. stdin EOF shuts the server down.\n\n\
