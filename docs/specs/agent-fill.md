@@ -186,12 +186,26 @@ tab than the one the agent reasoned about.
 origin — never the value. A fill is never silent, which is the compensating
 control for the missing user click (§4).
 
-**Every fill is an audit event.** Redeeming an intent writes the existing
-`AuditKind::ItemSecretRead` with `source = mcp`, attributed to the calling
-process (§4.9 caller attribution), so agent fills appear in the Dev tab
-alongside CLI and GUI activity. Arming and lapsing are recorded as their own
-kinds, mirroring `PairingModeEnabled` / `PairingModeDisabled`. Every refusal in
-§10 is an `AccessDenied` with its reason.
+**Every fill is an audit event**, and the chain records *two* records for one
+agent fill, each attributed to whoever actually acted:
+
+- **The arm**, attributed `source = mcp` — the agent asked.
+- **The disclosure**, written by the existing `FillLogin` path and attributed
+  `source = native_host` — the extension, through the host, is what the daemon
+  released the credential to.
+
+An earlier draft of this section claimed the disclosure would be attributed to
+`mcp`. That is not achievable and was wrong: `FillLogin`'s caller *is* the
+native host, and attribution reports who asked rather than who benefits (§4.9 is
+provenance, not authentication). Writing a second `ItemSecretRead` on take to
+"fix" the label would double-count a single disclosure, which is worse than a
+label that is merely indirect. The arm record is the mcp-attributed link; follow
+it to the disclosure beside it.
+
+Arming and lapsing are recorded as their own kinds, mirroring
+`PairingModeEnabled` / `PairingModeDisabled`; a window that lapses is recorded
+once, when the lapse is next observed. Every refusal in §10 is an
+`AccessDenied` with its reason.
 
 An agent that arms an intent it never redeems still leaves the arm record.
 
@@ -225,6 +239,7 @@ these are separate codes rather than one generic failure.
 | `TakeFillIntent { profile }` | `FillIntent { item_id, tab_id, origin, expires_in_secs }` or `NoFillIntent` | no |
 | `SetAgentFillMode { profile, on, item_ids }` | `Ok` | no |
 | `ReportFillOutcome { profile, item_id, outcome }` | `Ok` | no |
+| `PollFillOutcome { profile }` | `FillOutcome { status, report }` | no |
 | `FillLogin { profile, item_id, origin }` | **existing, unchanged** | yes, to the extension only |
 
 `Status` gains `agent_fill_secs: Option<u64>` (remaining window, `None` = off),
@@ -247,6 +262,20 @@ Two request types, both non-secret: `take_fill_intent` and `fill_outcome`.
 
 Result: the booleans in §3. On refusal, an MCP tool error (`isError: true`)
 naming the reason from §10 — never a value, never a partial credential.
+
+**How the agent learns the outcome.** The first draft of this spec defined
+`ReportFillOutcome` (extension → daemon) but nothing letting `fill_login` read
+it back, so the tool had no way to answer. `PollFillOutcome` closes that gap.
+The wait lives in the MCP **client**, which issues separate short-interval polls
+— the daemon must never block while holding its state mutex, or the auto-lock
+reaper blocks with it (§5). Both polls are activity-neutral: an armed browser
+tab polling once a second must not hold the vault unlocked.
+
+**The report shape is closed by construction.** `filled` is a bool, the field
+names and states are closed enums (`username`/`password`, `empty`/`filled`), and
+a refusal is a closed reason code. There is no free-form string anywhere in the
+outcome path, so an extension cannot smuggle a value, a length, or a prefix
+through it — such a body fails to parse rather than being filtered.
 
 ## 12. Non-goals
 
