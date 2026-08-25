@@ -3,8 +3,9 @@
   This file is part of the LocalPass desktop GUI. See ../../LICENSE.
 
   The "Dev" tab: how to drive this vault from a terminal (CLI) and from an AI
-  coding agent (MCP), plus a viewer for the local audit log so you can see what
-  those surfaces actually did.
+  coding agent (MCP), the arm control for agent-triggered browser autofill, plus
+  a viewer for the local audit log so you can see what those surfaces actually
+  did.
 
   SECRET BOUNDARY: nothing here reveals a value. The CLI/MCP sections are static
   reference text. The audit viewer shows METADATA ONLY — the daemon's audit
@@ -13,10 +14,27 @@
   ciphertext everywhere else). Item ids are resolved to titles HERE, at display
   time, against the unlocked session's own item lists; an unresolvable id falls
   back to a short id. No title is ever sent toward the log.
+
+  The agent-fill control is likewise value-free: it sends item IDS one way and
+  reads a remaining-seconds count back (agent-fill.md §7). The credential it
+  authorises never passes through this window — the daemon releases it to the
+  browser extension over the native-messaging path, and only there.
 -->
 <script lang="ts">
-  import { listItems, auditList, devEnv } from "../lib/api";
-  import type { AuditRecordView, VaultView } from "../lib/types";
+  import {
+    listItems,
+    auditList,
+    devEnv,
+    setAgentFillMode,
+    agentFillSecs,
+  } from "../lib/api";
+  import type { AgentFillTargetView, AuditRecordView, VaultView } from "../lib/types";
+  import {
+    formatArmCountdown,
+    loginTargets,
+    pruneSelection,
+    scopeSummary,
+  } from "../lib/agentfill";
   import {
     sourceLabel,
     isAlarming,
@@ -106,6 +124,7 @@
         /* Paths are a nicety; the guides still read correctly without them. */
       });
     refresh();
+    void refreshArm();
   });
 
   // --- Copy-able snippets ---
@@ -154,6 +173,129 @@
         "A six-digit code — a short-lived derivative, never the seed. The one value that may cross.",
     },
   ];
+
+  // --- Agent-fill arm window (agent-fill.md §7) ---
+  // A time-boxed (3-minute) window that must be ON before an AI agent can have
+  // the browser extension fill a login WITHOUT the user's click, scoped to the
+  // items picked below and no others. Modelled on pairing mode (Devices.svelte):
+  // the daemon owns the deadline and the scope and enforces both server-side; we
+  // fetch the remaining seconds on mount and after each toggle, then tick them
+  // down locally so the control flips to OFF exactly when the window lapses —
+  // with no click from the user.
+
+  /** The vault the picker lists logins from, and that ids are resolved in.
+   *  Falls back to the first visible vault when no row is selected. */
+  const fillVaultId = $derived(selectedVault || vaults[0]?.id || "");
+  const fillVaultName = $derived(
+    vaults.find((v) => v.id === fillVaultId)?.name ?? "",
+  );
+
+  /** The logins on offer — titles and ids only, never a value. */
+  let targets = $state<AgentFillTargetView[]>([]);
+  let targetsError = $state("");
+  /** The checked ids (raw checkbox state; see `scope` for the usable form). */
+  let selected = $state<string[]>([]);
+  /** The checked ids that still exist in the current list — what we actually
+   *  arm with. Derived rather than written back, so switching vaults can never
+   *  arm an item the user cannot see. */
+  const scope = $derived(pruneSelection(selected, targets));
+
+  let armSecs = $state<number | null>(null);
+  let armBusy = $state(false);
+  let armError = $state("");
+  const armed = $derived(armSecs !== null && armSecs > 0);
+  /** What the OPEN window covers, snapshotted when this window armed it. The
+   *  daemon reports the remaining time but not the scope, so a window armed
+   *  elsewhere (or before this tab mounted) shows the countdown with no list —
+   *  better than inventing one. */
+  let armedScope = $state("");
+
+  /** One announcement per state change for screen readers. The visible
+   *  countdown is deliberately NOT a live region: it would speak every second. */
+  const armAnnouncement = $derived(
+    armed
+      ? `Agent fill armed${armedScope ? `, covering ${armedScope}` : ""}.`
+      : "Agent fill is off.",
+  );
+
+  /** Reload the pickable logins whenever the vault in play changes. */
+  $effect(() => {
+    const vid = fillVaultId;
+    if (!vid) {
+      targets = [];
+      return;
+    }
+    listItems(vid)
+      .then((list) => {
+        targets = loginTargets(list);
+        targetsError = "";
+      })
+      .catch(() => {
+        targets = [];
+        targetsError = "Could not read this vault's logins.";
+      });
+  });
+
+  async function refreshArm() {
+    try {
+      armSecs = await agentFillSecs();
+      if (armSecs === null) armedScope = "";
+    } catch (err) {
+      armError = typeof err === "string" ? err : "Could not read the agent-fill window.";
+    }
+  }
+
+  async function arm() {
+    if (armBusy || scope.length === 0) return;
+    armBusy = true;
+    armError = "";
+    const covering = scopeSummary(scope, targets);
+    try {
+      await setAgentFillMode(true, scope, fillVaultId || null);
+      armedScope = covering;
+      await refreshArm();
+      // The arm is an audit record; show it without making the user hit Refresh.
+      await refresh();
+    } catch (err) {
+      armedScope = "";
+      armError = typeof err === "string" ? err : "Could not arm agent fill.";
+    } finally {
+      armBusy = false;
+    }
+  }
+
+  async function disarm() {
+    if (armBusy) return;
+    armBusy = true;
+    armError = "";
+    try {
+      await setAgentFillMode(false, [], null);
+      armedScope = "";
+      await refreshArm();
+      await refresh();
+    } catch (err) {
+      armError = typeof err === "string" ? err : "Could not turn off agent fill.";
+    } finally {
+      armBusy = false;
+    }
+  }
+
+  // Local 1-second countdown. At zero it re-syncs with the daemon (the authority
+  // on expiry), so a window that lapses on its own flips this control to OFF
+  // with no interaction at all.
+  $effect(() => {
+    const id = setInterval(() => {
+      if (armSecs === null) return;
+      if (armSecs <= 1) {
+        armSecs = null;
+        armedScope = "";
+        void refreshArm();
+      } else {
+        armSecs -= 1;
+      }
+    }, 1000);
+    return () => clearInterval(id);
+  });
 </script>
 
 <div class="detail dev">
@@ -326,6 +468,130 @@
     </p>
   </section>
 
+  <!-- ================= Agent fill (agent-fill.md) ================= -->
+  <section class="field-group dev-section" aria-labelledby="dev-fill-h">
+    <div class="field-name" id="dev-fill-h">Agent autofill in the browser</div>
+    <p class="hint" style="margin-top:0.35rem">
+      The browser extension normally fills a login only when you click
+      <strong>Fill</strong> in its popup. Arming removes that click: for three
+      minutes, an AI agent using this vault can have the extension fill the
+      logins you tick below, without asking you again.
+    </p>
+
+    <!-- The consent text. This control is the entire security delta of the
+         feature (agent-fill.md §4), so the trade is stated here rather than
+         implied — including the part LocalPass cannot enforce (§3). -->
+    <div class="dev-consent" role="note">
+      <p style="margin:0 0 0.3rem"><strong>What you are agreeing to</strong></p>
+      <ul class="dev-list" style="margin:0">
+        <li>
+          <strong>These logins, for three minutes.</strong> Nothing else in the
+          vault is in scope, and the window closes itself — you do not have to
+          remember to.
+        </li>
+        <li>
+          <strong>Matching sites only.</strong> A credential is released only to
+          a page whose site matches that item's saved URL. The service re-checks
+          that itself, so the agent cannot ask its way past it.
+        </li>
+        <li>
+          <strong>The agent fills by reference, but the value does land in the
+          page.</strong>
+          It names the item and the tab and is told only whether the field was
+          empty and whether the fill landed — the tools never hand it the
+          password. An agent that runs its own JavaScript in that page can still
+          read what was typed there. LocalPass cannot prevent that and does not
+          claim to. Arm this for an agent you would trust with the account
+          itself.
+        </li>
+        <li>
+          <strong>Nothing is silent.</strong> Every fill raises a notification
+          and is recorded in the activity log below.
+        </li>
+      </ul>
+    </div>
+
+    <div class="dev-sub" id="dev-fill-pick-h">
+      Logins the agent may fill{fillVaultName ? ` — ${fillVaultName}` : ""}
+    </div>
+    <p class="hint" style="margin-top:0.2rem">
+      Only login items can be armed: a fill needs a username, a password, and a
+      saved URL to check the page against.
+    </p>
+
+    {#if targetsError}
+      <div class="error" role="alert">{targetsError}</div>
+    {:else if targets.length === 0}
+      <p class="empty">No logins in this vault yet.</p>
+    {:else}
+      <div class="dev-picker" role="group" aria-labelledby="dev-fill-pick-h">
+        {#each targets as t (t.id)}
+          <label class="dev-pick">
+            <input
+              type="checkbox"
+              value={t.id}
+              bind:group={selected}
+              disabled={armed || armBusy}
+            />
+            <span>{t.title}</span>
+          </label>
+        {/each}
+      </div>
+    {/if}
+
+    <div class="dev-arm-row">
+      <span class="label" style="margin-bottom:0">Agent fill</span>
+      {#if armed}
+        <span class="dev-arm-badge on">
+          ARMED · <span class="mono">{formatArmCountdown(armSecs)}</span> left
+          {#if armedScope}· {armedScope}{/if}
+        </span>
+        <button class="btn btn-small" type="button" onclick={disarm} disabled={armBusy}>
+          {armBusy ? "…" : "Turn off"}
+        </button>
+      {:else}
+        <span class="dev-arm-badge off">OFF</span>
+        <button
+          class="btn btn-small"
+          type="button"
+          onclick={arm}
+          disabled={armBusy || scope.length === 0}
+        >
+          {armBusy ? "…" : "Arm for 3 minutes"}
+        </button>
+      {/if}
+      <!-- Speaks once per state change (including the window lapsing on its
+           own); the countdown above is not a live region on purpose. -->
+      <span class="sr-only" role="status">{armAnnouncement}</span>
+    </div>
+
+    {#if armError}
+      <div class="error" role="alert">{armError}</div>
+    {/if}
+
+    {#if armed}
+      <p class="hint">
+        To change what the window covers, turn it off and arm again. It also
+        closes on its own at 0:00, and locking this vault ends it immediately.
+      </p>
+    {:else if scope.length === 0}
+      <p class="hint">
+        Tick at least one login to arm — a window has to name what it covers.
+      </p>
+    {:else}
+      <p class="hint">
+        Arms for <strong>{scopeSummary(scope, targets)}</strong>
+        ({scope.length} login{scope.length === 1 ? "" : "s"}).
+      </p>
+    {/if}
+
+    <p class="hint">
+      This needs the LocalPass browser extension installed and this vault
+      unlocked. Turning it off never affects the extension's ordinary
+      click-to-fill, which keeps its click.
+    </p>
+  </section>
+
   <!-- ================= Audit log ================= -->
   <section class="field-group dev-section" aria-labelledby="dev-audit-h">
     <div class="dev-audit-head">
@@ -481,6 +747,67 @@
   .dev-tool-name {
     font-weight: 600;
     min-width: 9.5rem;
+  }
+
+  /* --- Agent fill (agent-fill.md §7) --- */
+  /* The consent box. Deliberately NOT `.dev-guarantee`'s accent rule: that box
+     states something LocalPass enforces, this one states a trade the user is
+     accepting, part of which LocalPass cannot enforce (§3). Neutral rather than
+     alarming — this is a capability, not a mistake. */
+  .dev-consent {
+    margin: 0.75rem 0;
+    padding: 0.8rem 0.9rem;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--text-muted);
+    border-radius: 6px;
+    background: var(--bg-panel);
+  }
+  .dev-picker {
+    margin-top: 0.5rem;
+    padding: 0.35rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    /* A long vault scrolls inside its own box rather than pushing the arm
+       control off-screen. */
+    max-height: 12rem;
+    overflow-y: auto;
+  }
+  .dev-pick {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.25rem 0;
+    font-weight: 400;
+    margin: 0;
+    cursor: pointer;
+  }
+  .dev-pick span {
+    overflow-wrap: anywhere;
+    min-width: 0;
+  }
+  .dev-pick input:disabled {
+    cursor: not-allowed;
+  }
+  .dev-arm-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+    margin: 0.9rem 0 0.3rem;
+  }
+  .dev-arm-badge {
+    font-weight: 700;
+    font-size: 0.85rem;
+    padding: 0.1rem 0.5rem;
+    border-radius: 6px;
+  }
+  .dev-arm-badge.on {
+    color: var(--ok);
+    background: color-mix(in srgb, var(--ok) 12%, transparent);
+  }
+  .dev-arm-badge.off {
+    color: var(--text-muted);
+    background: var(--bg-hover);
   }
 
   /* --- Audit log table --- */
