@@ -62,6 +62,42 @@ If the popup says:
   native-messaging host isn't registered for this extension ID; re-run the
   `localpass browser register` step above with the correct ID.
 
+## Agent-triggered autofill
+
+An AI agent can ask LocalPass to fill a login **without ever receiving the
+password** (see `docs/specs/agent-fill.md`). The agent works by reference — "fill
+the GitHub login in this tab" — and gets back booleans, never a value.
+
+How the extension participates:
+
+1. You **arm** a 3-minute, per-item agent-fill window in the desktop app. Until
+   you do, the extension does not poll for intents at all.
+2. While the window is open, the extension asks the host for a pending intent
+   about once a second. Almost every poll gets "nothing".
+3. When an intent arrives it is redeemed **only** against the tab the agent
+   named, and only if that tab's *current* origin still matches. With no tab id,
+   exactly one tab must match the origin — several is a refusal, never a guess.
+4. The target fields must be **empty**. A field that already holds something is
+   refused (`field_not_empty`) rather than clobbered, unless the agent explicitly
+   asked to overwrite.
+5. The credential comes from the same `fill` request the popup uses, is injected,
+   and is gone. The form is **not** submitted.
+6. **Every agent fill raises a notification** naming the item and the origin —
+   never the value. That is the compensating control for the missing click, so it
+   is not skippable; if the notification API fails, the toolbar badge is used
+   instead.
+
+The extension reports back only `empty` / `filled` per field. No value, length,
+prefix, or hash of a credential is ever reported, logged, or returned — the
+report type on the LocalPass side has no free-form string at all, so such a body
+would fail to parse rather than be filtered.
+
+**Page access.** The click-gated popup flow injects under `activeTab`. An agent
+fill has no click to ride on, so it needs a page-access grant, declared as an
+*optional* host permission and requested from a button that appears in the popup
+while a window is armed. Until you grant it, agent fills are refused (and say so
+in the notification); the popup flow is unaffected either way.
+
 ## How it works / security
 
 - **The extension holds no keys and stores no secrets.** There is no
@@ -75,10 +111,11 @@ If the popup says:
 - **The password is used transiently.** It is passed straight into the page's
   fields via the native value setter (dispatching `input`/`change` so web apps
   notice) and is never logged or kept.
-- **Nothing is auto-filled and nothing is auto-submitted.** Filling happens only
-  on your explicit click, injected via `chrome.scripting.executeScript` on the
-  `activeTab` — there are no always-on content scripts and no `<all_urls>` host
-  permission.
+- **Nothing is auto-submitted, ever** — not by the popup, not by an agent fill.
+  There are still no always-on content scripts, and no host permission is granted
+  at install: the popup fill injects on your click under `activeTab`, and the
+  only broader grant is the *optional* one above, which you grant deliberately
+  and which is used solely to redeem an intent you armed.
 - **No data leaves your machine.** No network requests, no CDNs, fonts,
   analytics, or telemetry of any kind. Everything is self-contained.
 
@@ -90,10 +127,18 @@ If the popup says:
 | `activeTab`      | Read the current tab's URL and inject the fill on your click.  |
 | `scripting`      | Inject the one-shot fill function into the active tab.         |
 | `tabs`           | Read the active tab's URL to derive its origin.                |
+| `notifications`  | The "LocalPass filled a login" notice on every agent fill.     |
+| `alarms`         | Wake the MV3 worker to notice an armed agent-fill window.      |
+
+| Optional permission         | Why                                                  |
+| --------------------------- | ---------------------------------------------------- |
+| `http://*/*`, `https://*/*` | **Agent fill only** — inject into a tab you did not click on. Requested from the popup, never at install, and not needed for the popup's own fill. |
 
 ## Files
 
 - `manifest.json` — MV3 manifest (minimal permissions, no broad content scripts).
 - `background.js` — service worker; owns the persistent native-messaging port.
+- `agentfill.js` — agent-fill controller: polls for intents while armed, does the
+  before/after emptiness checks, reports the outcome, notifies.
 - `popup.html` / `popup.css` / `popup.js` — the popup UI and fill logic.
 - `icons/` — toolbar/action icons (16/32/48/128 px).

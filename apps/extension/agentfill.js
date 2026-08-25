@@ -386,10 +386,10 @@
     // Refuse rather than clobber (§8). Re-checked here, in the page, so a value
     // the user typed after the probe is still protected.
     if (overwrite !== true) {
-      if (
-        before.password === "filled" ||
-        (willFillUser && before.username === "filled")
-      ) {
+      // A username field that already holds something is a target field too, so
+      // it refuses whether or not this item has a username to put there. Same
+      // rule the caller's probe applied, so the two cannot disagree.
+      if (before.password === "filled" || before.username === "filled") {
         return {
           ok: false,
           reason: "field_not_empty",
@@ -529,7 +529,13 @@
       return;
     }
 
-    const result = await injectFill(tabId, fill.username, fill.password, overwrite);
+    // An item with no username has nothing to put in the username field; pass
+    // null so the fill leaves it alone rather than blanking it.
+    const user =
+      typeof fill.username === "string" && fill.username.length > 0
+        ? fill.username
+        : null;
+    const result = await injectFill(tabId, user, fill.password, overwrite);
     // `fill` goes out of scope here; nothing retains it, logs it, or reports it.
 
     if (!result) {
