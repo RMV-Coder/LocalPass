@@ -147,7 +147,21 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   hostRequest(payload)
-    .then((reply) => sendResponse({ ok: true, reply }))
+    .then((reply) => {
+      // Free ride: the popup asks for `status` every time it opens, and that
+      // reply carries `agent_fill_secs`. Feeding it to the agent-fill
+      // controller lets an open arm window be noticed immediately, with no
+      // extra traffic. Purely observational — the popup's own flow is
+      // untouched.
+      if (self.lpAgentFill) {
+        try {
+          self.lpAgentFill.noteStatus(reply);
+        } catch (e) {
+          /* never let this affect the popup */
+        }
+      }
+      sendResponse({ ok: true, reply });
+    })
     .catch((err) =>
       sendResponse({
         ok: false,
@@ -157,3 +171,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   return true; // keep the message channel open for the async sendResponse
 });
+
+// --- Agent-triggered autofill ----------------------------------------------
+//
+// Loaded last so `hostRequest` is defined before it is handed over. The
+// controller owns its own polling and never touches the popup bridge above; its
+// requests go through the same hostRequest(), so the FIFO correlation is the one
+// already implemented here — a poll reply cannot resolve a popup's pending
+// request, because ids are queued in postMessage order and the host answers one
+// request at a time in that same order.
+importScripts("agentfill.js");
+self.lpAgentFill.init({ hostRequest });
