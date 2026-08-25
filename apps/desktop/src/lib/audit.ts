@@ -63,6 +63,10 @@ export function kindLabel(kind: string): string {
       return "Pairing opened";
     case "pairing_mode_disabled":
       return "Pairing closed";
+    case "agent_fill_mode_enabled":
+      return "Agent fill armed";
+    case "agent_fill_mode_disabled":
+      return "Agent fill closed";
     case "access_denied":
       return "Refused";
     default:

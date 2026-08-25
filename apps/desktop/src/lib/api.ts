@@ -249,6 +249,32 @@ export function pairingModeSecs(): Promise<number | null> {
   return invoke<number | null>("pairing_mode_secs");
 }
 
+/** Open or close the agent-fill arm window — the time-boxed (3-minute) window
+ *  that must be on for an AI agent to have the browser extension fill a login
+ *  WITHOUT the user's click (agent-fill.md §7).
+ *
+ *  `itemIds` is the per-item scope: the window covers those items and no
+ *  others, and the daemon REFUSES to open a window that names none. It is
+ *  ignored when `on` is false. `vault` narrows id resolution to one vault.
+ *
+ *  Secret-free — ids only, in one direction. The daemon audits the toggle and
+ *  enforces both the window and the scope server-side. */
+export function setAgentFillMode(
+  on: boolean,
+  itemIds: string[],
+  vault: string | null,
+): Promise<void> {
+  return invoke<void>("set_agent_fill_mode", { on, itemIds, vault });
+}
+
+/** Seconds remaining in the open agent-fill arm window, or null when
+ *  off/expired (agent-fill.md §7). The UI fetches this on mount and after each
+ *  toggle, then ticks it down locally so the control flips to OFF when the
+ *  window lapses on its own. Secret-free (reads the daemon status). */
+export function agentFillSecs(): Promise<number | null> {
+  return invoke<number | null>("agent_fill_secs");
+}
+
 /** Whether this platform offers a native folder picker for the sync root
  *  (Android only — scoped storage makes a picker the ONLY way to reach a shared
  *  folder there). Desktop returns false; the user types a path instead. */

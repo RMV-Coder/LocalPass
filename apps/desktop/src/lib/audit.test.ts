@@ -60,6 +60,8 @@ describe("kindLabel", () => {
     expect(kindLabel("item_secret_read")).toBe("Secret revealed");
     expect(kindLabel("access_denied")).toBe("Refused");
     expect(kindLabel("pairing_mode_enabled")).toBe("Pairing opened");
+    expect(kindLabel("agent_fill_mode_enabled")).toBe("Agent fill armed");
+    expect(kindLabel("agent_fill_mode_disabled")).toBe("Agent fill closed");
   });
   it("degrades an unknown kind to a readable token rather than hiding it", () => {
     expect(kindLabel("brand_new_kind")).toBe("brand new kind");

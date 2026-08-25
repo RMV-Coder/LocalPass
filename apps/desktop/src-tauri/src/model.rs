@@ -662,6 +662,7 @@ mod tests {
             ssh_agent_endpoint: None,
             ssh_identity_count: 0,
             pairing_mode_secs: None,
+            agent_fill_secs: None,
         };
         let st = session_state_from_status(&resp);
         assert_eq!(
@@ -685,6 +686,7 @@ mod tests {
             ssh_agent_endpoint: None,
             ssh_identity_count: 0,
             pairing_mode_secs: None,
+            agent_fill_secs: None,
         };
         assert_eq!(
             session_state_from_status(&resp),
