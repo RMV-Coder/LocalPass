@@ -452,6 +452,12 @@ fn refusal_message(reason: FillRefusal) -> String {
              and the browser extension"
         }
         FillRefusal::NoLoginForm => "no fillable password field was found on that page",
+        FillRefusal::PageAccessDenied => {
+            "the extension has no permission to touch that site; ask the user to grant it              from the LocalPass popup on that page"
+        }
+        FillRefusal::InjectionFailed => {
+            "the page could not be scripted (a restricted page, or the tab closed mid-fill)"
+        }
     };
     format!("{}: {hint}", reason.token())
 }

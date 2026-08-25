@@ -1147,6 +1147,13 @@ pub enum FillRefusal {
     ExtensionUnavailable,
     /// The page has no fillable password field.
     NoLoginForm,
+    /// The extension has no host permission for this origin. Distinct from
+    /// [`NoLoginForm`](FillRefusal::NoLoginForm): the page was never inspected,
+    /// so reporting "no login form" would have been a guess dressed as a fact.
+    PageAccessDenied,
+    /// `chrome.scripting` could not inject — a restricted page, or a tab torn
+    /// down mid-fill. The "it did not work" bucket the taxonomy first lacked.
+    InjectionFailed,
 }
 
 impl FillRefusal {
@@ -1167,6 +1174,8 @@ impl FillRefusal {
             FillRefusal::FieldNotEmpty => "field_not_empty",
             FillRefusal::ExtensionUnavailable => "extension_unavailable",
             FillRefusal::NoLoginForm => "no_login_form",
+            FillRefusal::PageAccessDenied => "page_access_denied",
+            FillRefusal::InjectionFailed => "injection_failed",
         }
     }
 
@@ -1190,6 +1199,8 @@ impl FillRefusal {
             FillRefusal::IntentExpired => Some(D::IntentExpired),
             FillRefusal::FieldNotEmpty => Some(D::FieldNotEmpty),
             FillRefusal::NoLoginForm => Some(D::NoLoginForm),
+            FillRefusal::PageAccessDenied => Some(D::PageAccessDenied),
+            FillRefusal::InjectionFailed => Some(D::InjectionFailed),
             FillRefusal::ItemNotFound
             | FillRefusal::AmbiguousItem
             | FillRefusal::ExtensionUnavailable => None,

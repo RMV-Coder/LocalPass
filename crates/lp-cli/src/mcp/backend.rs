@@ -337,6 +337,16 @@ impl Backend {
     /// deliberately activity-neutral daemon-side, so waiting does not postpone
     /// the auto-lock either.
     ///
+    /// # The one re-arm
+    ///
+    /// The extension only polls for intents while the arm window is open, and it
+    /// learns the window opened on a heartbeat that can lag the intent's 30s
+    /// TTL. So an intent armed moments after the user arms the window can lapse
+    /// before the extension ever looks. This re-arms **once** in exactly that
+    /// case — the intent lapsed and was *never taken* — by which point the
+    /// extension is polling. It never re-arms after a take: the extension may
+    /// already have filled, and a second intent could fill twice.
+    ///
     /// # Errors
     ///
     /// Transport failures only; every *refusal* comes back as `Ok(Err(reason))`.
@@ -352,70 +362,90 @@ impl Backend {
             Backend::Proxy { client, profile } => (client, profile.clone()),
             Backend::Direct(_) => return Ok(Err(FillRefusal::ExtensionUnavailable)),
         };
-        let resp = daemonctl::call(
-            client,
-            &Request::ArmFillIntent {
-                profile: profile.clone(),
-                item_id: item.to_string(),
-                tab_id,
-                origin: origin.to_string(),
-                overwrite,
-                vault: vault.map(ToString::to_string),
-            },
-        )?;
-        let ttl = match resp {
-            Response::FillIntentArmed {
-                expires_in_secs, ..
-            } => Duration::from_secs(expires_in_secs),
-            Response::FillRefused { reason } => return Ok(Err(reason)),
-            Response::Locked => return Ok(Err(FillRefusal::Locked)),
-            other => {
-                daemonctl::check_error(&other)?;
-                bail!(unexpected(&other));
-            }
-        };
-
-        let deadline = Instant::now() + ttl + FILL_POLL_GRACE;
-        loop {
+        // At most two attempts; see "The one re-arm" above.
+        for attempt in 0..2u8 {
             let resp = daemonctl::call(
                 client,
-                &Request::PollFillOutcome {
+                &Request::ArmFillIntent {
                     profile: profile.clone(),
+                    item_id: item.to_string(),
+                    tab_id,
+                    origin: origin.to_string(),
+                    overwrite,
+                    vault: vault.map(ToString::to_string),
                 },
             )?;
-            match resp {
-                Response::FillOutcome {
-                    status: FillStatus::Reported,
-                    item_id,
-                    tab_id,
-                    origin,
-                    report: Some(report),
-                } => {
-                    return Ok(Ok(FinishedFill {
-                        item_id: item_id.unwrap_or_default(),
-                        tab_id,
-                        origin: origin.unwrap_or_default(),
-                        report,
-                    }));
-                }
-                // The window was disarmed or the intent replaced underneath us:
-                // there is nothing left to wait for.
-                Response::FillOutcome {
-                    status: FillStatus::None | FillStatus::Expired,
-                    ..
-                } => return Ok(Err(FillRefusal::IntentExpired)),
-                Response::FillOutcome { .. } => {}
+            let ttl = match resp {
+                Response::FillIntentArmed {
+                    expires_in_secs, ..
+                } => Duration::from_secs(expires_in_secs),
+                Response::FillRefused { reason } => return Ok(Err(reason)),
                 Response::Locked => return Ok(Err(FillRefusal::Locked)),
                 other => {
                     daemonctl::check_error(&other)?;
                     bail!(unexpected(&other));
                 }
+            };
+
+            let deadline = Instant::now() + ttl + FILL_POLL_GRACE;
+            // Whether the extension ever picked this intent up. A lapse *after* a
+            // take may mean the fill happened and the report was lost, so it must
+            // never be retried.
+            let mut saw_taken = false;
+            loop {
+                let resp = daemonctl::call(
+                    client,
+                    &Request::PollFillOutcome {
+                        profile: profile.clone(),
+                    },
+                )?;
+                match resp {
+                    Response::FillOutcome {
+                        status: FillStatus::Reported,
+                        item_id,
+                        tab_id,
+                        origin,
+                        report: Some(report),
+                    } => {
+                        return Ok(Ok(FinishedFill {
+                            item_id: item_id.unwrap_or_default(),
+                            tab_id,
+                            origin: origin.unwrap_or_default(),
+                            report,
+                        }));
+                    }
+                    // The window was disarmed or the intent replaced underneath us:
+                    // there is nothing left to wait for.
+                    Response::FillOutcome {
+                        status: FillStatus::None | FillStatus::Expired,
+                        ..
+                    } => {
+                        if !saw_taken && attempt == 0 {
+                            break; // re-arm once; the extension was not yet polling
+                        }
+                        return Ok(Err(FillRefusal::IntentExpired));
+                    }
+                    Response::FillOutcome {
+                        status: FillStatus::Taken,
+                        ..
+                    } => saw_taken = true,
+                    Response::FillOutcome { .. } => {}
+                    Response::Locked => return Ok(Err(FillRefusal::Locked)),
+                    other => {
+                        daemonctl::check_error(&other)?;
+                        bail!(unexpected(&other));
+                    }
+                }
+                if Instant::now() >= deadline {
+                    if !saw_taken && attempt == 0 {
+                        break; // re-arm once, as above
+                    }
+                    return Ok(Err(FillRefusal::IntentExpired));
+                }
+                std::thread::sleep(FILL_POLL_INTERVAL);
             }
-            if Instant::now() >= deadline {
-                return Ok(Err(FillRefusal::IntentExpired));
-            }
-            std::thread::sleep(FILL_POLL_INTERVAL);
         }
+        Ok(Err(FillRefusal::IntentExpired))
     }
 
     /// The current TOTP code for a `totp` item.

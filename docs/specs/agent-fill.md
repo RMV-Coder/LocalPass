@@ -90,6 +90,20 @@ delta of this feature and it is paid for, not waived, by three things:
    vault (§7).
 3. A **notification on every fill** (§9), so a fill is never silent.
 
+**A permission the first draft of this spec missed.** The popup's human fill
+rides on `activeTab`, which Chrome grants only because the user *clicked the
+extension*. An agent fill has no click, so `chrome.scripting` refuses without a
+real host permission. Agent fill therefore needs an **optional** host
+permission, requested at runtime and **narrowed to the origin being filled**
+(`https://github.com/*`), never the broad `https://*/*` the manifest must
+declare as merely requestable. The user grants a site, not the web. Until it is
+granted the fill refuses with `page_access_denied`; nothing silently escalates.
+
+Known rough edge: the popup can only offer to grant the origin of the tab in
+front of the user, because nothing relays the *armed* items' origins to the
+extension. Usually the same thing; when it is not, the refusal names the origin
+to grant. Relaying the armed origins in `status` would close it.
+
 ## 5. Architecture
 
 Native messaging is **browser-initiated**: the extension opens a port to the
@@ -225,6 +239,8 @@ An agent that arms an intent it never redeems still leaves the arm record.
 | Target field already non-empty | `field_not_empty` |
 | No extension connected / no host | `extension_unavailable` |
 | No fillable password field found | `no_login_form` |
+| Extension lacks host permission for the origin | `page_access_denied` |
+| Injection failed (restricted page, tab torn down) | `injection_failed` |
 
 The agent must be able to distinguish "you may not" from "it did not work", so
 these are separate codes rather than one generic failure.

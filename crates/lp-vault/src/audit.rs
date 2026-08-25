@@ -221,6 +221,12 @@ pub enum DenyReason {
     /// **Agent fill:** the page had no fillable password field
     /// (`agent-fill.md` §10 `no_login_form`).
     NoLoginForm,
+    /// The extension holds no host permission for the page's origin, so it
+    /// could not inject at all.
+    PageAccessDenied,
+    /// Injection failed for a mechanical reason — a restricted page, or a tab
+    /// torn down mid-fill.
+    InjectionFailed,
 }
 
 impl DenyReason {
@@ -240,6 +246,8 @@ impl DenyReason {
             DenyReason::OriginChanged => 10,
             DenyReason::FieldNotEmpty => 11,
             DenyReason::NoLoginForm => 12,
+            DenyReason::PageAccessDenied => 13,
+            DenyReason::InjectionFailed => 14,
         }
     }
 
@@ -259,6 +267,8 @@ impl DenyReason {
             DenyReason::OriginChanged => "origin_changed",
             DenyReason::FieldNotEmpty => "field_not_empty",
             DenyReason::NoLoginForm => "no_login_form",
+            DenyReason::PageAccessDenied => "page_access_denied",
+            DenyReason::InjectionFailed => "injection_failed",
         }
     }
 
@@ -278,6 +288,8 @@ impl DenyReason {
             10 => Some(DenyReason::OriginChanged),
             11 => Some(DenyReason::FieldNotEmpty),
             12 => Some(DenyReason::NoLoginForm),
+            13 => Some(DenyReason::PageAccessDenied),
+            14 => Some(DenyReason::InjectionFailed),
             _ => None,
         }
     }
@@ -1072,7 +1084,7 @@ mod tests {
     }
 
     /// Every [`DenyReason`], including the `agent-fill.md` §10 additions.
-    const ALL_DENY_REASONS: [DenyReason; 12] = [
+    const ALL_DENY_REASONS: [DenyReason; 14] = [
         DenyReason::Locked,
         DenyReason::WrongProfile,
         DenyReason::NotAuthorized,
@@ -1085,6 +1097,8 @@ mod tests {
         DenyReason::OriginChanged,
         DenyReason::FieldNotEmpty,
         DenyReason::NoLoginForm,
+        DenyReason::PageAccessDenied,
+        DenyReason::InjectionFailed,
     ];
 
     /// The agent-fill kinds are unit variants, exactly like the pairing-mode
