@@ -26,6 +26,12 @@ const pending = new Map();
 
 // Queue of pending ids in send order, so an incoming reply (which carries no id)
 // maps to the oldest outstanding request.
+//
+// A request that times out is deleted from `pending` but deliberately LEFT in
+// this queue as a tombstone: the host may still answer it later, and removing
+// the id would shift every subsequent reply onto the wrong request. The reply
+// listener treats an id with no `pending` entry as "already given up on" and
+// drops that one reply, which keeps the FIFO alignment exact.
 const inflight = [];
 
 // How long to wait for a host reply before giving up (ms).
@@ -51,7 +57,7 @@ function ensurePort() {
     const id = inflight.shift();
     if (id === undefined) return; // unsolicited message; ignore
     const entry = pending.get(id);
-    if (!entry) return;
+    if (!entry) return; // tombstone: this request already timed out. Drop the reply.
     pending.delete(id);
     clearTimeout(entry.timer);
     entry.resolve(msg);
@@ -102,9 +108,8 @@ function hostRequest(payload) {
     const id = nextId++;
     const timer = setTimeout(() => {
       if (pending.has(id)) {
+        // Leave the id in `inflight` as a tombstone — see the comment there.
         pending.delete(id);
-        const idx = inflight.indexOf(id);
-        if (idx !== -1) inflight.splice(idx, 1);
         reject(new Error("native host timed out"));
       }
     }, REQUEST_TIMEOUT_MS);
@@ -116,6 +121,8 @@ function hostRequest(payload) {
       activePort.postMessage(payload);
     } catch (e) {
       // postMessage throws if the port died between ensurePort() and here.
+      // This one really can be removed from the queue rather than tombstoned:
+      // it was never sent, so no reply for it will ever arrive.
       pending.delete(id);
       const idx = inflight.indexOf(id);
       if (idx !== -1) inflight.splice(idx, 1);
