@@ -69,6 +69,44 @@ jobs:
           rustc --version
           cargo check --workspace --all-features --locked
 
+  # The desktop app is its own cargo workspace, excluded from the core's
+  # `--workspace` gates, and until now built by nothing except the release
+  # workflow. That gap let a core protocol change pass every check and then
+  # break the release build — twice. This closes it: the app compiles and its
+  # tests run on every PR, on the same OS the release is built for.
+  desktop:
+    name: Desktop app (Tauri + Svelte)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install JS deps
+        working-directory: apps/desktop
+        run: npm ci
+      - name: svelte-check
+        working-directory: apps/desktop
+        run: npm run check
+      - name: Frontend tests
+        working-directory: apps/desktop
+        run: npm test
+      # tauri.conf.json declares the daemon as an externalBin sidecar, so the
+      # Rust build refuses to configure until it is staged.
+      - name: Stage the daemon sidecar
+        working-directory: apps/desktop
+        run: node scripts/prepare-sidecar.mjs
+      - name: Clippy
+        working-directory: apps/desktop/src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        working-directory: apps/desktop/src-tauri
+        run: cargo test
+
   deny:
     name: cargo-deny (advisories, licenses, sources)
     runs-on: ubuntu-latest
