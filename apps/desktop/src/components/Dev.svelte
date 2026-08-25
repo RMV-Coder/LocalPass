@@ -506,7 +506,9 @@
         </li>
         <li>
           <strong>Nothing is silent.</strong> Every fill raises a notification
-          and is recorded in the activity log below.
+          and lands in the activity log below — as two rows: the agent's request,
+          sourced <span class="badge">MCP</span>, and the credential going to the
+          extension, sourced <span class="badge">Browser</span>.
         </li>
       </ul>
     </div>
