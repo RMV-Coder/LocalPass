@@ -7,6 +7,7 @@
 //! under cargo's default parallelism, every test holds [`ENV_LOCK`] for its
 //! whole body, serializing the two tests in this binary.
 
+use std::io::Write;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -181,4 +182,80 @@ fn join_timeout(handle: std::thread::JoinHandle<lp_daemon::Result<()>>, timeout:
         std::thread::sleep(Duration::from_millis(25));
     }
     false
+}
+
+/// A request this daemon cannot parse must NOT kill the connection.
+///
+/// This is version skew, and it is the common case during an upgrade: a newer
+/// client naming a request an older daemon has never heard of. Dropping the
+/// connection there is quietly brutal — a client that holds one connection for
+/// its whole session (the MCP server does) then fails *every* later call,
+/// including ones this daemon understands perfectly, reporting only "the pipe
+/// is being closed". Observed in the field before this was fixed.
+#[test]
+fn an_unparseable_request_is_answered_and_the_connection_survives() {
+    let _env = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let username = unique_user("skew");
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = Config {
+        profile: tmp.path().to_path_buf(),
+        autolock: Duration::from_secs(600),
+        username: username.clone(),
+        verbose: false,
+        no_ssh_agent: true,
+    };
+    let handle = std::thread::spawn(move || server::run(cfg));
+    assert!(
+        wait_ready(&username, Duration::from_secs(5)),
+        "server did not come up"
+    );
+
+    {
+        let mut raw = lp_daemon::transport::connect(&username).expect("raw connect");
+
+        // A frame that is well-formed on the wire but names a request this
+        // build does not know — exactly what an older daemon sees from a newer
+        // client. Framing is a u32-LE length prefix plus the JSON body.
+        let body = br#"{"v":1,"kind":"NoSuchRequestFromTheFuture"}"#;
+        let len = u32::try_from(body.len()).unwrap();
+        raw.write_all(&len.to_le_bytes()).expect("write len");
+        raw.write_all(body).expect("write body");
+        raw.flush().expect("flush");
+
+        // It is answered, not dropped...
+        match lp_daemon::frame::read_response(&mut raw).expect("still connected") {
+            Response::Error { auth, message } => {
+                assert!(!auth, "not an auth failure");
+                assert!(
+                    message.contains("older"),
+                    "the message should point at version skew: {message}"
+                );
+            }
+            other => panic!("expected Error, got {}", other.kind()),
+        }
+
+        // ...and the SAME connection still serves a request it does understand.
+        lp_daemon::frame::write_request(&mut raw, &Request::Ping).expect("ping after skew");
+        assert!(
+            matches!(
+                lp_daemon::frame::read_response(&mut raw).expect("pong"),
+                Response::Pong
+            ),
+            "the connection must survive an unparseable request"
+        );
+    }
+
+    {
+        let mut c = connect(&username);
+        assert!(matches!(
+            c.call(&Request::Shutdown).unwrap(),
+            Response::Ok { .. }
+        ));
+    }
+    assert!(
+        join_timeout(handle, Duration::from_secs(5)),
+        "server did not terminate"
+    );
 }
