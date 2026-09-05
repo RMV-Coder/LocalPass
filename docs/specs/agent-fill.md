@@ -1,6 +1,6 @@
 # Agent-triggered autofill (`fill_login`)
 
-**Status:** specification — not implemented
+**Status:** implemented (PR #37, v0.1.4) — this document is the contract it was built to
 **Audience:** implementers of the MCP server, the native-messaging host, and the browser extension
 **Related:** [mcp-server.md](mcp-server.md), PRD §4.7 (browser autofill), §4.9 (audit), §8 T7 (phishing)
 
