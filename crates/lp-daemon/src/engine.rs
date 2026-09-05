@@ -20,6 +20,7 @@
 //! auto-lock, or another client (PRD requirement: "locking must be immune to a
 //! hung client").
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,7 +29,9 @@ use lp_crypto::SecretKey;
 use lp_sync::store::{FsStoreFactory, StoreFactory};
 use lp_vault::{AccountStore, Item, Session, Vault, VaultId};
 
-use crate::protocol::{LockState, Request, Response, WireItem};
+use crate::protocol::{
+    FillRefusal, FillReport, FillStatus, LockState, Request, Response, WireItem,
+};
 use crate::render;
 
 /// How long **pairing mode** stays open once enabled (`device-pairing.md` §4):
@@ -37,6 +40,48 @@ use crate::render;
 /// toggle cannot linger. Off by default, and turning it off never affects an
 /// already-pinned peer (§4 "Does not gate").
 const PAIRING_WINDOW: Duration = Duration::from_secs(180);
+
+/// How long the **agent-fill arm window** stays open (`agent-fill.md` §7): a
+/// deliberate, time-boxed **3 minutes**, matching pairing mode's precedent. It
+/// lapses on its own, and it gates only *new* agent-triggered fills — the human
+/// popup path keeps its user-click gate and is untouched by this window.
+const AGENT_FILL_WINDOW: Duration = Duration::from_secs(180);
+
+/// How long a single **fill intent** stays redeemable (`agent-fill.md` §7): 30
+/// seconds, nested inside the arm window. Long enough for a page to settle,
+/// short enough that a forgotten intent is not redeemable later.
+const FILL_INTENT_TTL: Duration = Duration::from_secs(30);
+
+/// The open agent-fill arm window and the per-item scope it covers.
+///
+/// In memory only, exactly like [`State::pairing_mode_until`] — never persisted,
+/// and dropped whenever the session is dropped.
+struct AgentFillWindow {
+    /// When the window lapses.
+    until: Instant,
+    /// The canonical hyphenated item ids the window covers. An item outside this
+    /// set is refused (`item_not_armed`) even inside an open window.
+    items: BTreeSet<String>,
+}
+
+/// The single pending fill intent (`agent-fill.md` §7: one at a time, no queue).
+struct PendingFill {
+    /// The canonical hyphenated item id the intent names.
+    item_id: String,
+    /// The tab the intent targets, or `None` for origin-only targeting.
+    tab_id: Option<u64>,
+    /// The origin the intent is bound to.
+    origin: String,
+    /// Whether a non-empty field may be overwritten (`agent-fill.md` §8).
+    overwrite: bool,
+    /// When the intent lapses, independent of the arm window.
+    expires_at: Instant,
+    /// Whether the extension has already taken it (single use — taking it twice
+    /// must fail).
+    taken: bool,
+    /// The extension's non-secret outcome report, once it has arrived.
+    report: Option<FillReport>,
+}
 
 /// The daemon's unlocked-or-locked state, guarded by a mutex in the server.
 pub struct State {
@@ -65,6 +110,23 @@ pub struct State {
     /// anything an already-pinned peer needs (push/pull, op acceptance, key
     /// shares, `Status`, `ExportIdentity`, `ListPeers`).
     pairing_mode_until: Option<Instant>,
+    /// The open **agent-fill arm window** and its per-item scope, or `None` when
+    /// agent fill is off (the default). In memory only, like
+    /// [`pairing_mode_until`](Self::pairing_mode_until) — see `agent-fill.md`
+    /// §7.
+    agent_fill: Option<AgentFillWindow>,
+    /// The single pending fill intent, or `None`. Replaced (never queued) by a
+    /// new arm, removed by the take that redeems it, and dropped whenever the
+    /// arm window closes or the session is locked.
+    pending_fill: Option<PendingFill>,
+    /// How long a fresh agent-fill window stays open. [`AGENT_FILL_WINDOW`] in
+    /// production; a test shortens it with
+    /// [`set_agent_fill_timings`](Self::set_agent_fill_timings) so lapsing can
+    /// be observed without a three-minute wait.
+    agent_fill_window: Duration,
+    /// How long a fresh fill intent stays redeemable. [`FILL_INTENT_TTL`] in
+    /// production; see [`agent_fill_window`](Self::agent_fill_window).
+    fill_intent_ttl: Duration,
 }
 
 impl State {
@@ -98,6 +160,10 @@ impl State {
             ssh_agent_endpoint: None,
             store_factory,
             pairing_mode_until: None,
+            agent_fill: None,
+            pending_fill: None,
+            agent_fill_window: AGENT_FILL_WINDOW,
+            fill_intent_ttl: FILL_INTENT_TTL,
         }
     }
 
@@ -168,11 +234,18 @@ impl State {
     }
 
     /// Drop the session now (zeroizing key material). Idempotent.
+    ///
+    /// Also drops the agent-fill window and any pending intent: `agent-fill.md`
+    /// §7 says a locked daemon refuses, and the cheapest way to guarantee that
+    /// is for the arm state not to survive the lock at all. (Pairing mode is
+    /// left alone — it gates a ceremony that itself requires an unlock.)
     pub fn lock(&mut self) {
         // Taking the Option and dropping it runs Session::Drop, which zeroizes.
         if let Some(session) = self.session.take() {
             session.lock();
         }
+        self.agent_fill = None;
+        self.pending_fill = None;
     }
 
     /// If unlocked, auto-lock has a non-zero timeout, and the idle time has
@@ -239,6 +312,160 @@ impl State {
             }
             None => None,
         }
+    }
+
+    /// Open or close the **agent-fill arm window** (`agent-fill.md` §7).
+    ///
+    /// `on = true` opens a fresh [`AGENT_FILL_WINDOW`] covering exactly `items`
+    /// (canonical hyphenated item ids); `on = false` closes it now. Either way
+    /// any unredeemed intent is dropped: re-arming replaces the scope, so an
+    /// intent armed under the old scope must not survive it.
+    fn set_agent_fill_mode(&mut self, on: bool, items: BTreeSet<String>) {
+        let window = self.agent_fill_window;
+        self.agent_fill = on.then(|| AgentFillWindow {
+            until: Instant::now() + window,
+            items,
+        });
+        self.pending_fill = None;
+    }
+
+    /// Whether the agent-fill window is currently open. Expiry is lazy, exactly
+    /// like [`pairing_mode_active`](Self::pairing_mode_active).
+    #[must_use]
+    pub fn agent_fill_active(&self) -> bool {
+        matches!(&self.agent_fill, Some(w) if Instant::now() < w.until)
+    }
+
+    /// Whole seconds remaining in the open agent-fill window, or `None` when it
+    /// is off or has lapsed. Reported by [`Response::Status`] as
+    /// `agent_fill_secs`; the extension polls for intents only while it is
+    /// `Some`.
+    #[must_use]
+    pub fn agent_fill_remaining_secs(&self) -> Option<u64> {
+        let w = self.agent_fill.as_ref()?;
+        let now = Instant::now();
+        (now < w.until).then(|| w.until.saturating_duration_since(now).as_secs())
+    }
+
+    /// Whether an **open** window covers `item_id` (a canonical hyphenated id).
+    #[must_use]
+    fn agent_fill_covers(&self, item_id: &str) -> bool {
+        match &self.agent_fill {
+            Some(w) if Instant::now() < w.until => w.items.contains(item_id),
+            _ => false,
+        }
+    }
+
+    /// Whether a window was set but has now lapsed — the one transition worth an
+    /// audit record, swept by [`sweep_agent_fill`] on the next request.
+    #[must_use]
+    fn agent_fill_lapsed(&self) -> bool {
+        matches!(&self.agent_fill, Some(w) if Instant::now() >= w.until)
+    }
+
+    /// Forget the window and any pending intent (used by the lapse sweep).
+    fn clear_agent_fill(&mut self) {
+        self.agent_fill = None;
+        self.pending_fill = None;
+    }
+
+    /// Replace the pending intent with a fresh one for `item_id` (canonical id),
+    /// and report its TTL in whole seconds.
+    fn arm_fill_intent(
+        &mut self,
+        item_id: String,
+        tab_id: Option<u64>,
+        origin: String,
+        overwrite: bool,
+    ) -> u64 {
+        self.pending_fill = Some(PendingFill {
+            item_id,
+            tab_id,
+            origin,
+            overwrite,
+            expires_at: Instant::now() + self.fill_intent_ttl,
+            taken: false,
+            report: None,
+        });
+        self.fill_intent_ttl.as_secs()
+    }
+
+    /// Shorten (or lengthen) the agent-fill deadlines on this state.
+    ///
+    /// The production values are [`AGENT_FILL_WINDOW`] and [`FILL_INTENT_TTL`];
+    /// nothing in the daemon calls this. It exists so a test can watch a window
+    /// or an intent actually lapse — the alternative, fabricating an expired
+    /// deadline directly, would test a state the daemon can never reach.
+    #[doc(hidden)]
+    pub fn set_agent_fill_timings(&mut self, window: Duration, intent_ttl: Duration) {
+        self.agent_fill_window = window;
+        self.fill_intent_ttl = intent_ttl;
+    }
+
+    /// Take the pending intent exactly once. Returns `None` when there is none,
+    /// when it has already been taken, or when it has lapsed.
+    ///
+    /// The intent is **not** removed on take — the daemon keeps it so the
+    /// extension's later outcome report has something to attach to, and so a
+    /// waiting caller can observe the state. `taken` is what makes it single
+    /// use: a second take sees `true` and gets nothing.
+    fn take_fill_intent(&mut self) -> Option<(String, Option<u64>, String, u64, bool)> {
+        let now = Instant::now();
+        let intent = self.pending_fill.as_mut()?;
+        if intent.taken || now >= intent.expires_at {
+            return None;
+        }
+        intent.taken = true;
+        Some((
+            intent.item_id.clone(),
+            intent.tab_id,
+            intent.origin.clone(),
+            intent.expires_at.saturating_duration_since(now).as_secs(),
+            intent.overwrite,
+        ))
+    }
+
+    /// Attach the extension's outcome report to the taken intent for `item_id`.
+    /// Returns `false` when no taken intent matches (a stale or forged report).
+    fn record_fill_report(&mut self, item_id: &str, report: FillReport) -> bool {
+        match self.pending_fill.as_mut() {
+            Some(intent) if intent.taken && intent.item_id == item_id => {
+                intent.report = Some(report);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The current state of the pending intent, for a caller waiting on it.
+    fn fill_outcome(
+        &self,
+    ) -> (
+        FillStatus,
+        Option<String>,
+        Option<u64>,
+        Option<String>,
+        Option<FillReport>,
+    ) {
+        let Some(intent) = self.pending_fill.as_ref() else {
+            return (FillStatus::None, None, None, None, None);
+        };
+        let status = if intent.report.is_some() {
+            FillStatus::Reported
+        } else if Instant::now() >= intent.expires_at {
+            FillStatus::Expired
+        } else if intent.taken {
+            FillStatus::Taken
+        } else {
+            FillStatus::Pending
+        };
+        (
+            status,
+            Some(intent.item_id.clone()),
+            intent.tab_id,
+            Some(intent.origin.clone()),
+            intent.report.clone(),
+        )
     }
 
     /// Reset the idle timer (called after every handled request that
@@ -470,6 +697,10 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
         });
     }
 
+    // Sweep a lapsed agent-fill window before answering, so the arm record has a
+    // matching disarm record and a lapsed window can never gate anything.
+    sweep_agent_fill(state);
+
     // Whether the REQUEST is an active one at all (see `counts_as_activity`);
     // the response gets a veto further down.
     let is_activity = counts_as_activity(&request);
@@ -500,6 +731,7 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
                 ssh_agent_endpoint: state.ssh_agent_endpoint.clone(),
                 ssh_identity_count,
                 pairing_mode_secs: state.pairing_mode_remaining_secs(),
+                agent_fill_secs: state.agent_fill_remaining_secs(),
             })
         }
 
@@ -790,6 +1022,38 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
         // closure produces (see the match below).
         Request::SetPairingMode { enabled, .. } => handle_set_pairing_mode(state, enabled),
 
+        // --- Agent-triggered autofill (`agent-fill.md`) -------------------
+        Request::SetAgentFillMode {
+            on,
+            item_ids,
+            vault,
+            ..
+        } => handle_set_agent_fill_mode(state, on, &item_ids, vault.as_deref()),
+
+        Request::ArmFillIntent {
+            item_id,
+            tab_id,
+            origin,
+            overwrite,
+            vault,
+            ..
+        } => handle_arm_fill_intent(
+            state,
+            &item_id,
+            tab_id,
+            &origin,
+            overwrite,
+            vault.as_deref(),
+        ),
+
+        Request::TakeFillIntent { .. } => handle_take_fill_intent(state),
+
+        Request::ReportFillOutcome {
+            item_id, outcome, ..
+        } => handle_report_fill_outcome(state, &item_id, outcome),
+
+        Request::PollFillOutcome { .. } => handle_poll_fill_outcome(state),
+
         Request::TrustDevice {
             identity_string,
             expected_fingerprint,
@@ -1021,6 +1285,14 @@ fn audits_denial(request: &Request) -> bool {
             | Request::Status { .. }
             | Request::Lock
             | Request::Unlock { .. }
+            // The two agent-fill polls are the `Status` argument again: the
+            // extension polls `TakeFillIntent` about once a second while armed
+            // and the MCP client polls `PollFillOutcome` while it waits, so
+            // auditing their refusals would bury the real ones under poll noise
+            // and grow the log without bound. The ArmFillIntent that starts the
+            // whole exchange IS audited, which is the record that matters.
+            | Request::TakeFillIntent { .. }
+            | Request::PollFillOutcome { .. }
     )
 }
 
@@ -1069,6 +1341,14 @@ fn record_denied_reason(state: &State, reason: lp_vault::DenyReason) {
 fn counts_as_activity(request: &Request) -> bool {
     match request {
         Request::Status { keepalive, .. } => *keepalive,
+        // The agent-fill polls are observations, not work: the extension polls
+        // `TakeFillIntent` roughly once a second for the whole arm window and
+        // the MCP client polls `PollFillOutcome` while it waits for the
+        // extension. Letting either reset the idle timer would mean an armed
+        // browser tab kept the vault unlocked indefinitely — the same mistake a
+        // keep-alive `Status` would be. The `ArmFillIntent` and
+        // `ReportFillOutcome` around them are real work and do count.
+        Request::TakeFillIntent { .. } | Request::PollFillOutcome { .. } => false,
         _ => true,
     }
 }
@@ -1123,6 +1403,11 @@ fn request_profile(request: &Request) -> Option<&str> {
         | Request::ListPeers { profile }
         | Request::TrustDevice { profile, .. }
         | Request::SetPairingMode { profile, .. }
+        | Request::SetAgentFillMode { profile, .. }
+        | Request::ArmFillIntent { profile, .. }
+        | Request::TakeFillIntent { profile }
+        | Request::ReportFillOutcome { profile, .. }
+        | Request::PollFillOutcome { profile }
         | Request::SyncSetup { profile, .. }
         | Request::SyncPush { profile, .. }
         | Request::SyncPull { profile, .. }
@@ -1187,6 +1472,310 @@ fn handle_set_pairing_mode(state: &mut State, enabled: bool) -> Handled {
     // The `&Session` borrow has ended — now flip the pairing-mode window.
     state.set_pairing_mode(enabled);
     Handled::reply(Response::Ok { message: None })
+}
+
+// --- Agent-triggered autofill (`agent-fill.md`) ---------------------------
+
+/// Close a lapsed agent-fill window, recording the disarm exactly once.
+///
+/// Expiry elsewhere in the daemon is lazy (a passed window simply reads as
+/// closed). Agent fill wants one thing more: `agent-fill.md` §9 asks for the
+/// lapse to be *recorded*, so the audit log shows a window closing as well as
+/// opening. This runs at the top of every handled request — the cheapest place
+/// that is guaranteed to be reached soon after the window passes — and clears
+/// the state so it can only fire once.
+///
+/// Best-effort: a locked daemon has no session to write through, and it has
+/// already dropped the window in [`State::lock`], so there is nothing to sweep.
+fn sweep_agent_fill(state: &mut State) {
+    if !state.agent_fill_lapsed() {
+        return;
+    }
+    if let Some(session) = state.session_ref() {
+        session
+            .record_audit(lp_vault::AuditKind::AgentFillModeDisabled, None)
+            .ok();
+    }
+    state.clear_agent_fill();
+}
+
+/// Build a [`Response::FillRefused`], auditing it where the refusal is a "you
+/// may not" with a [`lp_vault::DenyReason`] behind it.
+///
+/// The audit write is best-effort and goes through the held session; a locked
+/// daemon never reaches here (it answers [`Response::Locked`], which the
+/// existing denial machinery already audits).
+fn refuse_fill(session: &Session, reason: FillRefusal) -> Response {
+    if let Some(deny) = reason.deny_reason() {
+        session
+            .record_audit(lp_vault::AuditKind::AccessDenied { reason: deny }, None)
+            .ok();
+    }
+    Response::FillRefused { reason }
+}
+
+/// The result of looking one item reference up across every vault.
+enum Located {
+    /// Exactly one live item matched.
+    One(Box<lp_vault::Item>),
+    /// Nothing matched.
+    None,
+    /// A title matched more than one item, across one or more vaults.
+    Ambiguous,
+}
+
+/// Resolve an item reference (hyphenated id, or title) across **all** vaults,
+/// distinguishing "no match" from "several matches".
+///
+/// The human fill path ([`fill_login`]) takes the first title match it finds and
+/// is deliberately left alone; the agent path must be able to answer
+/// `ambiguous_item` (`agent-fill.md` §10), so it scans every vault and counts.
+fn locate_item(
+    session: &Session,
+    item_ref: &str,
+    vault_ref: Option<&str>,
+) -> Result<Located, Response> {
+    // `None` searches every vault — the way the browser fill path has always
+    // resolved an item. A named vault narrows the search to that one.
+    let vaults = match vault_ref {
+        Some(name) => vec![(resolve_vault_id(session, name)?, String::new())],
+        None => session.list_vaults().map_err(vault_err)?,
+    };
+    let mut matches: Vec<lp_vault::Item> = Vec::new();
+    for (vault_id, _name) in &vaults {
+        let v = session.open_vault(*vault_id).map_err(vault_err)?;
+        if let Some(id) = parse_id(item_ref) {
+            match v.get_item(id) {
+                // An id is unique by construction: found is found.
+                Ok(item) => return Ok(Located::One(Box::new(item))),
+                Err(lp_vault::Error::NotFound(_)) => {}
+                Err(e) => return Err(vault_err(e)),
+            }
+        }
+        for it in v.list_items().map_err(vault_err)? {
+            if it.payload.title == item_ref {
+                matches.push(v.get_item(it.item_id).map_err(vault_err)?);
+            }
+        }
+    }
+    match matches.len() {
+        0 => Ok(Located::None),
+        1 => Ok(Located::One(Box::new(matches.remove(0)))),
+        _ => Ok(Located::Ambiguous),
+    }
+}
+
+/// Resolve a reference to the canonical hyphenated id of the one **login** item
+/// it names, or the §10 refusal that explains why not.
+fn resolve_login_item(
+    session: &Session,
+    item_ref: &str,
+    vault_ref: Option<&str>,
+) -> Result<Result<lp_vault::Item, FillRefusal>, Response> {
+    Ok(match locate_item(session, item_ref, vault_ref)? {
+        Located::None => Err(FillRefusal::ItemNotFound),
+        Located::Ambiguous => Err(FillRefusal::AmbiguousItem),
+        // A non-login item is "there is no login item by that name", not a
+        // separate code — §10 has no variant for a type mismatch.
+        Located::One(item) => {
+            if matches!(item.payload.type_data, lp_vault::TypeData::Login { .. }) {
+                Ok(*item)
+            } else {
+                Err(FillRefusal::ItemNotFound)
+            }
+        }
+    })
+}
+
+/// Handle [`Request::SetAgentFillMode`]: open or close the agent-fill arm window
+/// and set the per-item scope (`agent-fill.md` §7).
+///
+/// Requires an unlocked session, like [`handle_set_pairing_mode`]: the toggle is
+/// audited, and that is what makes arming a deliberate act. Opening the window
+/// with an empty item list is refused — arming must name what it covers, or the
+/// per-item scope would be a no-op.
+///
+/// # Borrow discipline
+///
+/// Same shape as [`handle_set_pairing_mode`]: resolve and audit through the
+/// `&Session` inside a block, then mutate `state` once the borrow has ended.
+fn handle_set_agent_fill_mode(
+    state: &mut State,
+    on: bool,
+    item_ids: &[String],
+    vault_ref: Option<&str>,
+) -> Handled {
+    let resolved: BTreeSet<String> = {
+        let Some(session) = state.session_ref() else {
+            return Handled::reply(Response::Locked);
+        };
+        let mut set = BTreeSet::new();
+        if on {
+            if item_ids.is_empty() {
+                return Handled::reply(usage(
+                    "arming agent fill needs at least one item; it is scoped per item, \
+                     never to the whole vault",
+                ));
+            }
+            for reference in item_ids {
+                match resolve_login_item(session, reference, vault_ref) {
+                    Err(resp) => return Handled::reply(resp),
+                    Ok(Err(reason)) => return Handled::reply(refuse_fill(session, reason)),
+                    Ok(Ok(item)) => {
+                        set.insert(item.item_id.to_hyphenated());
+                    }
+                }
+            }
+        }
+        let kind = if on {
+            lp_vault::AuditKind::AgentFillModeEnabled
+        } else {
+            lp_vault::AuditKind::AgentFillModeDisabled
+        };
+        // Best-effort: a failed audit write never blocks the toggle.
+        session.record_audit(kind, None).ok();
+        set
+    };
+    // The `&Session` borrow has ended — now flip the window.
+    state.set_agent_fill_mode(on, resolved);
+    Handled::reply(Response::Ok { message: None })
+}
+
+/// Handle [`Request::ArmFillIntent`]: arm the single, single-use fill intent
+/// (`agent-fill.md` §5/§7), after every gate in §10 the daemon can check.
+///
+/// The gates, in order: the daemon is unlocked; the arm window is open; the item
+/// resolves to exactly one login item; that item is inside the armed set; and
+/// the item's stored URL matches the requested origin by registrable domain
+/// ([`crate::origin`]) — the same authoritative predicate the human fill path
+/// re-checks, so a caller cannot lie its way past it.
+///
+/// **No secret is touched here.** The intent carries ids, a tab id, and an
+/// origin; the credential itself only ever leaves through the existing
+/// [`Request::FillLogin`], answering the extension exactly as it does today.
+fn handle_arm_fill_intent(
+    state: &mut State,
+    item_ref: &str,
+    tab_id: Option<u64>,
+    origin: &str,
+    overwrite: bool,
+    vault_ref: Option<&str>,
+) -> Handled {
+    let armed: String = {
+        let Some(session) = state.session_ref() else {
+            return Handled::reply(Response::Locked);
+        };
+        if !state.agent_fill_active() {
+            return Handled::reply(refuse_fill(session, FillRefusal::AgentFillNotArmed));
+        }
+        let item = match resolve_login_item(session, item_ref, vault_ref) {
+            Err(resp) => return Handled::reply(resp),
+            Ok(Err(reason)) => return Handled::reply(refuse_fill(session, reason)),
+            Ok(Ok(item)) => item,
+        };
+        let item_id = item.item_id.to_hyphenated();
+        if !state.agent_fill_covers(&item_id) {
+            return Handled::reply(refuse_fill(session, FillRefusal::ItemNotArmed));
+        }
+        // The origin must have a registrable domain at all, and the item's URL
+        // must match it (PRD §8 T7). Both are `origin_mismatch` to the agent.
+        if crate::origin::registrable_domain(origin).is_none()
+            || !payload_matches_origin(&item.payload, origin)
+        {
+            return Handled::reply(refuse_fill(session, FillRefusal::OriginMismatch));
+        }
+        item_id
+    };
+    let expires_in_secs =
+        state.arm_fill_intent(armed.clone(), tab_id, origin.to_string(), overwrite);
+    Handled::reply(Response::FillIntentArmed {
+        expires_in_secs,
+        item_id: armed,
+    })
+}
+
+/// Handle [`Request::TakeFillIntent`]: hand the pending intent to the extension
+/// **exactly once** (`agent-fill.md` §7 "single use").
+///
+/// A second take, a take after the 30-second TTL, or a take with nothing armed
+/// all answer [`Response::NoFillIntent`] — the extension's poll loop sees that
+/// for almost every poll and must treat it as unremarkable.
+fn handle_take_fill_intent(state: &mut State) -> Handled {
+    if !state.is_unlocked() {
+        return Handled::reply(Response::Locked);
+    }
+    match state.take_fill_intent() {
+        Some((item_id, tab_id, origin, expires_in_secs, overwrite)) => {
+            Handled::reply(Response::FillIntent {
+                item_id,
+                tab_id,
+                origin,
+                expires_in_secs,
+                overwrite,
+            })
+        }
+        None => Handled::reply(Response::NoFillIntent),
+    }
+}
+
+/// Handle [`Request::ReportFillOutcome`]: attach the extension's non-secret
+/// report to the intent it took (`agent-fill.md` §9).
+///
+/// A report that names an item with no *taken* intent behind it is a usage
+/// error, not a refusal: it is a stale or forged message, and nothing about the
+/// vault was attempted. A report of a *failed* fill whose reason maps to a
+/// [`lp_vault::DenyReason`] is audited as an `AccessDenied`, which is how the
+/// extension-side halves of the §10 taxonomy (`field_not_empty`,
+/// `origin_changed`, …) reach the log at all — the daemon cannot observe them
+/// itself.
+///
+/// A *successful* fill is already in the log: the [`Request::FillLogin`] that
+/// released the credential wrote the `ItemSecretRead`, so recording another one
+/// here would double-count the same disclosure.
+fn handle_report_fill_outcome(state: &mut State, item_id: &str, outcome: FillReport) -> Handled {
+    {
+        let Some(session) = state.session_ref() else {
+            return Handled::reply(Response::Locked);
+        };
+        if !outcome.filled
+            && let Some(deny) = outcome.reason.and_then(FillRefusal::deny_reason)
+        {
+            session
+                .record_audit(lp_vault::AuditKind::AccessDenied { reason: deny }, None)
+                .ok();
+        }
+    }
+    if state.record_fill_report(item_id, outcome) {
+        Handled::reply(Response::Ok { message: None })
+    } else {
+        Handled::reply(usage(
+            "no taken fill intent matches this outcome report; ignoring it",
+        ))
+    }
+}
+
+/// Handle [`Request::PollFillOutcome`]: report where the pending intent is, so a
+/// waiting caller can learn the outcome **without the daemon ever blocking**.
+///
+/// This is the whole answer to the concurrency problem the feature poses. Every
+/// request runs under the one state mutex (see the module docs), so a `fill_login`
+/// that waited *inside* the daemon for the extension would hold that mutex for
+/// seconds and freeze everything behind it — including the auto-lock reaper. So
+/// nothing waits in here: this handler reads three fields and returns. The
+/// waiting happens in the MCP client, between separate requests, with the mutex
+/// released the whole time.
+fn handle_poll_fill_outcome(state: &mut State) -> Handled {
+    if !state.is_unlocked() {
+        return Handled::reply(Response::Locked);
+    }
+    let (status, item_id, tab_id, origin, report) = state.fill_outcome();
+    Handled::reply(Response::FillOutcome {
+        status,
+        item_id,
+        tab_id,
+        origin,
+        report,
+    })
 }
 
 /// Perform an unlock: derive keys and stash the session, or report the failure.

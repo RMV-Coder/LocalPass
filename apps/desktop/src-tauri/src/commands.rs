@@ -845,6 +845,61 @@ pub fn pairing_mode_secs() -> Result<Option<u64>, String> {
     }
 }
 
+// --- Agent-triggered autofill (`docs/specs/agent-fill.md`) ----------------
+
+/// Open or close the **agent-fill arm window** — the time-boxed (3-minute)
+/// window that must be on for an AI agent to have the browser extension fill a
+/// login without the user's click (`agent-fill.md` §7).
+///
+/// `item_ids` is the **per-item scope** (§7): the window covers those items and
+/// no others, and the daemon refuses to open a window that names none. It is
+/// ignored when `on` is `false`. `vault` narrows id resolution to one vault.
+///
+/// Nothing here is a secret — ids only, in one direction. The daemon audits the
+/// toggle and enforces both the window and the scope server-side; this command
+/// only flips it. An unlocked session is required.
+#[tauri::command]
+pub fn set_agent_fill_mode(
+    on: bool,
+    item_ids: Vec<String>,
+    vault: Option<String>,
+) -> Result<(), String> {
+    let profile = daemon::profile_string()?;
+    let resp = daemon::call(&Request::SetAgentFillMode {
+        profile,
+        on,
+        item_ids,
+        vault,
+    })
+    .map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    Ok(())
+}
+
+/// The whole seconds remaining in the open agent-fill arm window, or `None`
+/// when it is off/expired (`agent-fill.md` §7). The UI fetches this on mount
+/// and after each toggle, then ticks it down locally, so the control flips to
+/// OFF when the window lapses on its own. Reads the daemon `Status`; nothing
+/// secret crosses.
+#[tauri::command]
+pub fn agent_fill_secs() -> Result<Option<u64>, String> {
+    let profile = daemon::profile_string()?;
+    // A passive read, like `pairing_mode_secs` above — never a keep-alive, so
+    // a window left open does not hold the vault unlocked.
+    let resp = daemon::call(&Request::Status {
+        profile,
+        keepalive: false,
+    })
+    .map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    match resp {
+        Response::Status {
+            agent_fill_secs, ..
+        } => Ok(agent_fill_secs),
+        other => Err(format!("unexpected daemon response: {}", other.kind())),
+    }
+}
+
 /// Whether this platform can show a native folder picker for the sync root
 /// (Android only — see [`pick_sync_dir`]). The UI uses this to decide between a
 /// "Choose folder" button and a plain path text box; desktop users type or paste

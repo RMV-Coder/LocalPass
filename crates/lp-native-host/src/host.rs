@@ -117,6 +117,14 @@ fn dispatch(body: &[u8], bridge: &Bridge, log: &mut impl FnMut(&str)) -> HostRes
             }
             resp
         }
+        HostRequest::TakeFillIntent => {
+            log("recv: take_fill_intent");
+            bridge.take_fill_intent()
+        }
+        HostRequest::FillOutcome { item_id, outcome } => {
+            log("recv: fill_outcome");
+            bridge.fill_outcome(&item_id, &outcome)
+        }
         HostRequest::Unknown => {
             log("recv: <unknown type>");
             HostResponse::unsupported()
@@ -160,6 +168,29 @@ mod tests {
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0]["type"], "pong");
         assert_eq!(responses[0]["v"], 1);
+    }
+
+    /// Whether any framed response body mentions `needle`.
+    fn writer_contains(writer: &[u8], needle: &str) -> bool {
+        read_all(writer)
+            .iter()
+            .any(|v| v.to_string().contains(needle))
+    }
+
+    /// With no daemon reachable, the intent poll degrades to "nothing right
+    /// now" — never a hang, and never something the extension has to
+    /// special-case. Whatever comes back, it is not a credential.
+    #[test]
+    fn take_fill_intent_without_a_daemon_reports_no_intent() {
+        let mut reader = Cursor::new(framed(r#"{"v":1,"type":"take_fill_intent"}"#));
+        let mut writer = Vec::new();
+        run(&mut reader, &mut writer, &Bridge::new(""), |_| {}).unwrap();
+        let responses = read_all(&writer);
+        assert!(matches!(
+            responses[0]["type"].as_str(),
+            Some("no_fill_intent") | Some("fill_intent") | Some("locked")
+        ));
+        assert!(!writer_contains(&writer, "password"));
     }
 
     #[test]

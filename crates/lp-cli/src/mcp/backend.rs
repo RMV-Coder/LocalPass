@@ -50,7 +50,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
 use lp_daemon::client::Client;
-use lp_daemon::protocol::{Request, Response, WireItem};
+use lp_daemon::protocol::{FillRefusal, FillReport, FillStatus, Request, Response, WireItem};
 use lp_vault::Session;
 
 use crate::commands::{run as run_cmd, totp as totp_cmd};
@@ -311,6 +311,143 @@ impl Backend {
         }
     }
 
+    /// Arm an agent fill and **wait for the extension to report back**
+    /// (`agent-fill.md` §3/§5.1).
+    ///
+    /// Returns `Ok(Ok(finished))` when the extension reported an outcome, and
+    /// `Ok(Err(reason))` for any §10 refusal — including the two this layer
+    /// decides itself:
+    ///
+    /// - `extension_unavailable` on the **Direct** route. Agent fill is a
+    ///   daemon-mediated exchange with a browser: the extension pulls the intent
+    ///   through the native host, which is a daemon client. With no daemon there
+    ///   is nobody to pull it, so the honest answer is that no extension is
+    ///   reachable — not a hang and not a bare error.
+    /// - `intent_expired` when the intent's TTL lapses with nothing reported.
+    ///
+    /// # The wait, and why it is a client-side poll
+    ///
+    /// The daemon serializes **every** request behind one state mutex
+    /// (`lp_daemon::engine`), so a wait that happened inside the daemon would
+    /// hold that mutex for seconds and freeze everything behind it — including
+    /// the idle auto-lock, which is a security control, not a convenience. So
+    /// the wait lives here: separate `PollFillOutcome` requests every
+    /// [`FILL_POLL_INTERVAL`], with the mutex released between them and the
+    /// daemon answering everyone else normally the whole time. Each poll is
+    /// deliberately activity-neutral daemon-side, so waiting does not postpone
+    /// the auto-lock either.
+    ///
+    /// # The one re-arm
+    ///
+    /// The extension only polls for intents while the arm window is open, and it
+    /// learns the window opened on a heartbeat that can lag the intent's 30s
+    /// TTL. So an intent armed moments after the user arms the window can lapse
+    /// before the extension ever looks. This re-arms **once** in exactly that
+    /// case — the intent lapsed and was *never taken* — by which point the
+    /// extension is polling. It never re-arms after a take: the extension may
+    /// already have filled, and a second intent could fill twice.
+    ///
+    /// # Errors
+    ///
+    /// Transport failures only; every *refusal* comes back as `Ok(Err(reason))`.
+    pub fn fill_login(
+        &mut self,
+        vault: Option<&str>,
+        item: &str,
+        tab_id: Option<u64>,
+        origin: &str,
+        overwrite: bool,
+    ) -> Result<std::result::Result<FinishedFill, FillRefusal>> {
+        let (client, profile) = match self {
+            Backend::Proxy { client, profile } => (client, profile.clone()),
+            Backend::Direct(_) => return Ok(Err(FillRefusal::ExtensionUnavailable)),
+        };
+        // At most two attempts; see "The one re-arm" above.
+        for attempt in 0..2u8 {
+            let resp = daemonctl::call(
+                client,
+                &Request::ArmFillIntent {
+                    profile: profile.clone(),
+                    item_id: item.to_string(),
+                    tab_id,
+                    origin: origin.to_string(),
+                    overwrite,
+                    vault: vault.map(ToString::to_string),
+                },
+            )?;
+            let ttl = match resp {
+                Response::FillIntentArmed {
+                    expires_in_secs, ..
+                } => Duration::from_secs(expires_in_secs),
+                Response::FillRefused { reason } => return Ok(Err(reason)),
+                Response::Locked => return Ok(Err(FillRefusal::Locked)),
+                other => {
+                    daemonctl::check_error(&other)?;
+                    bail!(unexpected(&other));
+                }
+            };
+
+            let deadline = Instant::now() + ttl + FILL_POLL_GRACE;
+            // Whether the extension ever picked this intent up. A lapse *after* a
+            // take may mean the fill happened and the report was lost, so it must
+            // never be retried.
+            let mut saw_taken = false;
+            loop {
+                let resp = daemonctl::call(
+                    client,
+                    &Request::PollFillOutcome {
+                        profile: profile.clone(),
+                    },
+                )?;
+                match resp {
+                    Response::FillOutcome {
+                        status: FillStatus::Reported,
+                        item_id,
+                        tab_id,
+                        origin,
+                        report: Some(report),
+                    } => {
+                        return Ok(Ok(FinishedFill {
+                            item_id: item_id.unwrap_or_default(),
+                            tab_id,
+                            origin: origin.unwrap_or_default(),
+                            report,
+                        }));
+                    }
+                    // The window was disarmed or the intent replaced underneath us:
+                    // there is nothing left to wait for.
+                    Response::FillOutcome {
+                        status: FillStatus::None | FillStatus::Expired,
+                        ..
+                    } => {
+                        if !saw_taken && attempt == 0 {
+                            break; // re-arm once; the extension was not yet polling
+                        }
+                        return Ok(Err(FillRefusal::IntentExpired));
+                    }
+                    Response::FillOutcome {
+                        status: FillStatus::Taken,
+                        ..
+                    } => saw_taken = true,
+                    Response::FillOutcome { .. } => {}
+                    Response::Locked => return Ok(Err(FillRefusal::Locked)),
+                    other => {
+                        daemonctl::check_error(&other)?;
+                        bail!(unexpected(&other));
+                    }
+                }
+                if Instant::now() >= deadline {
+                    if !saw_taken && attempt == 0 {
+                        break; // re-arm once, as above
+                    }
+                    return Ok(Err(FillRefusal::IntentExpired));
+                }
+                std::thread::sleep(FILL_POLL_INTERVAL);
+            }
+        }
+        Ok(Err(FillRefusal::IntentExpired))
+    }
+
     /// The current TOTP code for a `totp` item.
     ///
     /// A code is a short-lived value derived from the seed, not the seed: it is
@@ -402,6 +539,29 @@ fn view_from_wire(w: &WireItem) -> ItemView {
             })
             .collect(),
     }
+}
+
+/// How often the `fill_login` wait re-asks the daemon for the outcome.
+///
+/// Short enough that a fill that lands in half a second is reported promptly,
+/// long enough that a 30-second wait is ~120 tiny requests rather than a spin.
+const FILL_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Extra grace on top of the intent's own TTL before the wait gives up, so a
+/// report that arrives just as the intent lapses is still collected.
+const FILL_POLL_GRACE: Duration = Duration::from_secs(3);
+
+/// A finished agent fill: the extension's non-secret report, plus the tab and
+/// origin the daemon armed the intent against.
+pub struct FinishedFill {
+    /// The item the intent named (canonical hyphenated id).
+    pub item_id: String,
+    /// The tab the fill targeted, when the agent named one.
+    pub tab_id: Option<u64>,
+    /// The origin the intent was bound to.
+    pub origin: String,
+    /// What the extension did — booleans and closed tokens only.
+    pub report: FillReport,
 }
 
 /// A uniform "the daemon answered something else" internal error.

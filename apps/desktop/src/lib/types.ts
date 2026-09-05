@@ -80,6 +80,14 @@ export interface ItemSummaryView {
   tags: string[];
 }
 
+// One login the agent-fill arm window can be scoped to (agent-fill.md §7 — the
+// per-item scope). Id and title only: the picker names what a window covers, it
+// never asks the backend for a value.
+export interface AgentFillTargetView {
+  id: string;
+  title: string;
+}
+
 // One trashed-item row (the item pane's Trash section). Metadata + title only.
 export interface TrashEntryView {
   id: string;

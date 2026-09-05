@@ -372,6 +372,73 @@ fn audit_table_holds_ids_but_never_titles_usernames_or_secrets() {
     assert!(!dump.contains("another secret title"), "no edited title");
 }
 
+/// The agent-fill kinds and the §10 deny reasons chain and read back like any
+/// other record — and, being unit variants, they add nothing to the table that
+/// could carry a name or a value.
+#[test]
+fn agent_fill_events_chain_and_carry_no_content() {
+    let dir = TempDir::new().unwrap();
+    let (session, _sk) = AccountStore::create(dir.path(), PW).unwrap();
+    let vault_id: VaultId = session.create_vault("v").unwrap();
+    let vault = session.open_vault(vault_id).unwrap();
+    let id = vault.create_item(&secret_login()).unwrap();
+
+    // Arm, refuse a few ways, fill, then disarm — the shape of one agent fill.
+    session
+        .record_audit(AuditKind::AgentFillModeEnabled, None)
+        .unwrap();
+    for reason in [
+        lp_vault::DenyReason::AgentFillNotArmed,
+        lp_vault::DenyReason::ItemNotArmed,
+        lp_vault::DenyReason::OriginMismatch,
+        lp_vault::DenyReason::IntentExpired,
+        lp_vault::DenyReason::FieldNotEmpty,
+    ] {
+        session
+            .record_audit(AuditKind::AccessDenied { reason }, None)
+            .unwrap();
+    }
+    vault.record_secret_read(&id, Some("password")).unwrap();
+    session
+        .record_audit(AuditKind::AgentFillModeDisabled, None)
+        .unwrap();
+
+    // The chain still verifies with the new kinds in it, and seq stays gapless.
+    session.verify_audit_chain().unwrap();
+    let recs = records(&session);
+    for (i, r) in recs.iter().enumerate() {
+        assert_eq!(r.seq, (i as u64) + 1);
+    }
+
+    // The kinds round-trip out of the table.
+    let labels: Vec<&str> = recs.iter().map(|r| r.kind.label()).collect();
+    assert!(labels.contains(&"agent_fill_mode_enabled"));
+    assert!(labels.contains(&"agent_fill_mode_disabled"));
+    let reasons: Vec<&str> = recs
+        .iter()
+        .filter_map(|r| r.kind.deny_reason())
+        .map(lp_vault::DenyReason::label)
+        .collect();
+    for expected in [
+        "agent_fill_not_armed",
+        "item_not_armed",
+        "origin_mismatch",
+        "intent_expired",
+        "field_not_empty",
+    ] {
+        assert!(
+            reasons.contains(&expected),
+            "missing {expected}: {reasons:?}"
+        );
+    }
+
+    // And the raw table still holds no name and no value.
+    let dump = dump_audit_table(dir.path());
+    assert!(!dump.contains(SECRET_PW), "no password value");
+    assert!(!dump.contains(USERNAME), "no username");
+    assert!(!dump.contains(TITLE), "no title");
+}
+
 // --- Atomicity ------------------------------------------------------------
 
 #[test]

@@ -18,6 +18,15 @@
 //!   list of **non-secret** candidate descriptors `{item_id, title, username,
 //!   vault}` whose stored login URLs match `origin`'s registrable domain.
 //!   **Never contains a password.**
+//! - `take_fill_intent` → [`HostResponse::FillIntent`] or
+//!   [`HostResponse::NoFillIntent`] — the pending agent-fill intent
+//!   (`agent-fill.md` §5.1), pulled by the extension while armed. **Non-secret:**
+//!   ids, a tab id, and an origin. The extension then makes the ordinary `fill`
+//!   request for the credential itself.
+//! - `fill_outcome {item_id, outcome}` → [`HostResponse::Ok`] — what the
+//!   extension did with a taken intent (`agent-fill.md` §9). **Non-secret by
+//!   construction:** the outcome type has no string field at all, only booleans,
+//!   `empty`/`filled` tokens, and closed refusal codes.
 //! - `fill {item_id, origin}` → [`HostResponse::Fill`] `{username, password}` for
 //!   exactly that item, **re-checked server-side** (in the daemon) that the
 //!   item's URL matches `origin`'s registrable domain. The only response carrying
@@ -34,6 +43,7 @@
 //! is derived, but the host never logs a full message body — see the host loop
 //! ([`crate::host`]), which logs message *types* only to stderr.
 
+use lp_daemon::protocol::FillReport;
 use serde::{Deserialize, Serialize};
 
 /// The extension↔host protocol version carried in every message (`"v"`).
@@ -68,6 +78,18 @@ pub enum HostRequest {
         item_id: String,
         /// The page origin the fill is for (re-validated by the daemon).
         origin: String,
+    },
+    /// **Agent fill:** take the pending fill intent, if any (`agent-fill.md`
+    /// §5.1). Polled about once a second **only while the arm window is open**
+    /// (`status.agent_fill_secs`), and not at all otherwise. Non-secret.
+    TakeFillIntent,
+    /// **Agent fill:** report what happened to a taken intent (`agent-fill.md`
+    /// §9). Non-secret: [`FillReport`] cannot express a value.
+    FillOutcome {
+        /// The item the intent named, as handed out by `take_fill_intent`.
+        item_id: String,
+        /// The non-secret outcome.
+        outcome: FillReport,
     },
     /// Any unrecognized `type` — answered with `unsupported`.
     #[serde(other)]
@@ -117,6 +139,11 @@ pub enum HostResponse {
         available: bool,
         /// Vault count when unlocked; `0` when locked/unavailable.
         vaults: usize,
+        /// Whole seconds left in the **agent-fill arm window**
+        /// (`agent-fill.md` §7), or `None` when it is off. The extension polls
+        /// `take_fill_intent` only while this is `Some`, which is what bounds
+        /// the polling to a deliberate, time-boxed window.
+        agent_fill_secs: Option<u64>,
     },
     /// Answer to `credentials_for`: the non-secret candidates (may be empty).
     Credentials {
@@ -132,6 +159,28 @@ pub enum HostResponse {
         /// The login password (the secret).
         password: String,
     },
+    /// **Agent fill:** the pending intent, handed over exactly once (answer to
+    /// `take_fill_intent`). Ids, a tab id, and an origin — **never a secret**.
+    FillIntent {
+        /// The item to fill (canonical hyphenated id).
+        item_id: String,
+        /// The tab the intent targets, or `null` for origin-only targeting —
+        /// which the extension must refuse when several tabs match
+        /// (`ambiguous_tab`).
+        tab_id: Option<u64>,
+        /// The origin the intent is bound to. The tab's *current* origin must
+        /// still equal this, or the extension refuses (`origin_changed`).
+        origin: String,
+        /// Whole seconds left before the intent lapses.
+        expires_in_secs: u64,
+        /// Whether an already non-empty field may be overwritten
+        /// (`agent-fill.md` §8). `false` unless the agent asked for it.
+        overwrite: bool,
+    },
+    /// **Agent fill:** there is no intent to take. What almost every poll gets.
+    NoFillIntent,
+    /// A bare acknowledgement (answer to `fill_outcome`).
+    Ok,
     /// The daemon is locked (or has no session): the extension should prompt the
     /// user to unlock via the CLI/daemon. Returned for `credentials_for`/`fill`
     /// when locked. The host cannot unlock.
@@ -230,6 +279,57 @@ mod tests {
             }
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_take_fill_intent_and_fill_outcome() {
+        let env = parse(r#"{"v":1,"type":"take_fill_intent"}"#).unwrap();
+        assert!(matches!(env.request, HostRequest::TakeFillIntent));
+
+        let env = parse(
+            r#"{"v":1,"type":"fill_outcome","item_id":"abc","outcome":{"filled":true,
+                "fields":["username","password"],
+                "before":{"username":"empty","password":"empty"},
+                "after":{"username":"filled","password":"filled"}}}"#,
+        )
+        .unwrap();
+        match env.request {
+            HostRequest::FillOutcome { item_id, outcome } => {
+                assert_eq!(item_id, "abc");
+                assert!(outcome.filled);
+                assert_eq!(outcome.fields.len(), 2);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    /// The outcome type has no free-form string, so an extension trying to
+    /// smuggle a value through it fails to parse rather than passing it on.
+    #[test]
+    fn an_outcome_carrying_a_value_does_not_parse() {
+        assert!(
+            parse(
+                r#"{"v":1,"type":"fill_outcome","item_id":"abc",
+                    "outcome":{"filled":true,"before":{"password":"hunter2"}}}"#
+            )
+            .is_err()
+        );
+    }
+
+    /// The intent handed to the extension carries no password field at all.
+    #[test]
+    fn a_fill_intent_response_has_no_secret() {
+        let json = serde_json::to_string(&ResponseEnvelope::new(HostResponse::FillIntent {
+            item_id: "id".into(),
+            tab_id: Some(42),
+            origin: "https://example.com".into(),
+            expires_in_secs: 30,
+            overwrite: false,
+        }))
+        .unwrap();
+        assert!(!json.contains("password"));
+        assert!(!json.contains("username"));
+        assert!(json.contains("\"type\":\"fill_intent\""));
     }
 
     #[test]

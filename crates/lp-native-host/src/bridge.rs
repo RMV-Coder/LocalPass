@@ -6,8 +6,10 @@
 //! # Fill-scoped by construction
 //!
 //! The host is a daemon **client**, exactly like the CLI, but it issues **only**
-//! three request kinds — [`Request::Status`], [`Request::MatchLogins`], and
-//! [`Request::FillLogin`]. It never sends `Unlock`, `GetItem`, `ResolveField`,
+//! five request kinds — [`Request::Status`], [`Request::MatchLogins`],
+//! [`Request::FillLogin`], and the two **non-secret** agent-fill relays
+//! [`Request::TakeFillIntent`] and [`Request::ReportFillOutcome`]
+//! (`agent-fill.md` §11). It never sends `Unlock`, `GetItem`, `ResolveField`,
 //! `Export`, or any mutation: the browser side literally cannot ask for anything
 //! beyond "which logins match this origin" and "fill this one item". The daemon
 //! enforces the same-user-only channel and does the vault access; the host holds
@@ -33,7 +35,7 @@
 use std::sync::Mutex;
 
 use lp_daemon::client::Client;
-use lp_daemon::protocol::{LockState, Request, Response};
+use lp_daemon::protocol::{FillReport, LockState, Request, Response};
 
 use crate::protocol::{Candidate, HostResponse};
 
@@ -105,15 +107,22 @@ impl Bridge {
                 locked: true,
                 available: false,
                 vaults: 0,
+                agent_fill_secs: None,
             };
         };
         match resp {
             Response::Status {
-                state, vault_count, ..
+                state,
+                vault_count,
+                agent_fill_secs,
+                ..
             } => HostResponse::Status {
                 locked: state == LockState::Locked,
                 available: true,
                 vaults: vault_count.unwrap_or(0),
+                // Relayed straight through: it is what tells the extension
+                // whether to poll for intents at all (`agent-fill.md` §5.1).
+                agent_fill_secs,
             },
             // Any other reply (shouldn't happen for Status) is treated as
             // reachable-but-locked, never a hang.
@@ -121,7 +130,64 @@ impl Bridge {
                 locked: true,
                 available: true,
                 vaults: 0,
+                agent_fill_secs: None,
             },
+        }
+    }
+
+    /// Handle `take_fill_intent`: pull the pending agent-fill intent, if any
+    /// (`agent-fill.md` §5.1). **Carries no secret** — the credential still only
+    /// ever comes back through [`fill`](Self::fill), unchanged.
+    ///
+    /// A locked or unreachable daemon yields [`HostResponse::NoFillIntent`]
+    /// rather than an error: this is a poll the extension runs about once a
+    /// second while armed, and "nothing right now" is its normal answer.
+    #[must_use]
+    pub fn take_fill_intent(&self) -> HostResponse {
+        let Some(resp) = self.call(|profile| Request::TakeFillIntent { profile }) else {
+            return HostResponse::NoFillIntent;
+        };
+        match resp {
+            Response::FillIntent {
+                item_id,
+                tab_id,
+                origin,
+                expires_in_secs,
+                overwrite,
+            } => HostResponse::FillIntent {
+                item_id,
+                tab_id,
+                origin,
+                expires_in_secs,
+                overwrite,
+            },
+            Response::Locked => HostResponse::Locked,
+            _ => HostResponse::NoFillIntent,
+        }
+    }
+
+    /// Handle `fill_outcome`: relay the extension's non-secret report of what it
+    /// did with a taken intent (`agent-fill.md` §9), so the daemon can audit it
+    /// and a waiting agent can be answered.
+    #[must_use]
+    pub fn fill_outcome(&self, item_id: &str, outcome: &FillReport) -> HostResponse {
+        let item_id = item_id.to_string();
+        let outcome = outcome.clone();
+        let Some(resp) = self.call(move |profile| Request::ReportFillOutcome {
+            profile,
+            item_id: item_id.clone(),
+            outcome: outcome.clone(),
+        }) else {
+            return HostResponse::Locked;
+        };
+        match resp {
+            Response::Ok { .. } => HostResponse::Ok,
+            Response::Locked => HostResponse::Locked,
+            Response::Error { message, .. } => HostResponse::Error {
+                error: "daemon_error".into(),
+                message,
+            },
+            _ => HostResponse::Locked,
         }
     }
 

@@ -26,6 +26,19 @@
       <ul id="lp-list" class="lp-list" hidden></ul>
     </main>
 
+    <!--
+      Agent autofill only. The human flow above needs no host permission — it
+      injects on your click via activeTab — but an agent-triggered fill has no
+      click to ride on, so it needs page access granted here, deliberately, by
+      you. Hidden entirely once granted.
+    -->
+    <div id="lp-perm" class="lp-perm" hidden>
+      <span class="lp-perm-text">
+        Agent autofill needs permission to fill pages on your behalf.
+      </span>
+      <button id="lp-perm-grant" class="lp-perm-btn" type="button">Enable</button>
+    </div>
+
     <footer class="lp-footer">
       <span id="lp-origin" class="lp-origin" title="">—</span>
       <button id="lp-refresh" class="lp-refresh" type="button" title="Refresh">

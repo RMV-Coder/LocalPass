@@ -250,10 +250,27 @@ fn mcp_server_serves_tools_without_ever_returning_a_secret() {
         "list_items",
         "get_item",
         "run_with_secrets",
+        "fill_login",
         "totp_code",
     ] {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
     }
+
+    // `fill_login`'s description carries the §3 prohibition, which is the whole
+    // mechanism — a contract with the agent, since LocalPass cannot police a
+    // browser-automation tool it does not own.
+    let fill_tool = list["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == json!("fill_login"))
+        .expect("fill_login is declared");
+    let desc = fill_tool["description"].as_str().unwrap();
+    assert!(desc.contains("input.value"), "the prohibition: {desc}");
+    assert!(
+        desc.contains("armed") || desc.contains("arm"),
+        "it must say the user has to arm first: {desc}"
+    );
 
     // --- list_vaults -----------------------------------------------------
     let (_, vaults) = mcp.call_tool("list_vaults", json!({}));
@@ -387,6 +404,52 @@ fn mcp_server_serves_tools_without_ever_returning_a_secret() {
     // A non-totp item is a tool error, not a protocol error.
     let (wrong_type, _) = mcp.call_tool("totp_code", json!({ "item": "Prod DB" }));
     assert_eq!(wrong_type["isError"], json!(true));
+
+    // --- fill_login: every path, and never a value ------------------------
+    // This server runs `--no-daemon`, so there is no daemon for the browser
+    // extension to reach: the honest answer is `extension_unavailable`. What
+    // matters here is that EVERY path through the tool — success, refusal, and
+    // argument error alike — is incapable of carrying a value.
+    for args in [
+        json!({ "item": "Prod DB", "origin": "https://example.com" }),
+        json!({ "item": "Prod DB", "origin": "https://example.com", "tab_id": 3 }),
+        json!({
+            "item": "Prod DB",
+            "origin": "https://example.com",
+            "overwrite": true,
+            "vault": "personal",
+        }),
+        // Argument errors.
+        json!({ "item": "Prod DB" }),
+        json!({ "origin": "https://example.com" }),
+        json!({ "item": "Prod DB", "origin": "https://example.com", "tab_id": "three" }),
+        // An item that does not exist, and one that is not a login.
+        json!({ "item": "no-such-item", "origin": "https://example.com" }),
+        json!({ "item": "ACME 2FA", "origin": "https://example.com" }),
+    ] {
+        let (result, _) = mcp.call_tool("fill_login", args.clone());
+        assert_eq!(
+            result["isError"],
+            json!(true),
+            "no daemon here, so every fill_login must refuse: {args} -> {result}"
+        );
+        let text = result.to_string();
+        assert_no_secret(&text, "fill_login");
+        // Not a value, not a length, not a prefix, not a hash: the reply may
+        // only ever contain the §10 token and its fixed hint.
+        assert!(
+            !text.contains("length") && !text.contains("hash") && !text.contains("prefix"),
+            "a fill_login refusal must not describe the value at all: {text}"
+        );
+        // …and it names a reason from the taxonomy rather than a bare failure.
+        assert!(
+            text.contains("extension_unavailable")
+                || text.contains("item_not_found")
+                || text.contains("missing required string argument")
+                || text.contains("must be a non-negative integer"),
+            "a fill_login refusal must name why: {text}"
+        );
+    }
 
     // --- clean shutdown on EOF -------------------------------------------
     mcp.shutdown();

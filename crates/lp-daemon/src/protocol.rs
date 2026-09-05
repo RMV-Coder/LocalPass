@@ -398,6 +398,100 @@ pub enum Request {
         /// `true` opens the window; `false` closes it immediately.
         enabled: bool,
     },
+
+    // --- Agent-triggered autofill (`agent-fill.md`) ------------------------
+    /// **Agent fill:** open or close the **agent-fill arm window**
+    /// (`agent-fill.md` §7) and set the per-item scope it covers.
+    ///
+    /// While the window is open, an agent may [`ArmFillIntent`](Request::ArmFillIntent)
+    /// for one of `item_ids` and no other item. The window is time-boxed to
+    /// three minutes and lives in memory only, exactly like
+    /// [`SetPairingMode`](Request::SetPairingMode). Requires an unlocked session
+    /// (the toggle is audited). Answered by [`Response::Ok`].
+    SetAgentFillMode {
+        /// The profile directory being operated on.
+        profile: String,
+        /// `true` opens a fresh window; `false` closes it (and drops any
+        /// unredeemed intent) immediately.
+        on: bool,
+        /// The items the window covers — titles or hyphenated ids, resolved to
+        /// canonical ids by the daemon. Ignored when `on` is `false`. An empty
+        /// set with `on: true` is refused: arming must name what it covers.
+        #[serde(default)]
+        item_ids: Vec<String>,
+        /// Resolve `item_ids` inside this vault only (name or id). `None` — the
+        /// default — searches every vault, which is how the browser fill path
+        /// has always resolved an item.
+        #[serde(default)]
+        vault: Option<String>,
+    },
+    /// **Agent fill:** arm the single, single-use **fill intent** an armed
+    /// extension will pull (`agent-fill.md` §5/§7). Carries only ids, a tab id,
+    /// and an origin — **never a secret**. Answered by
+    /// [`Response::FillIntentArmed`], or [`Response::FillRefused`] with the §10
+    /// reason.
+    ///
+    /// Arming replaces any unredeemed intent; there is no queue.
+    ArmFillIntent {
+        /// The profile directory being operated on.
+        profile: String,
+        /// The item to fill — a title or a hyphenated id. Resolved daemon-side
+        /// to a canonical id, which is what the intent then carries. (The spec
+        /// names this field `item_id`; it accepts either spelling of a
+        /// reference, exactly as [`FillLogin`](Request::FillLogin) does.)
+        item_id: String,
+        /// The browser tab the fill targets, when the agent knows it. `None`
+        /// falls back to origin-only targeting, which the extension refuses if
+        /// several tabs match (`ambiguous_tab`).
+        #[serde(default)]
+        tab_id: Option<u64>,
+        /// The page origin the fill is for, e.g. `https://github.com`.
+        origin: String,
+        /// Whether the extension may overwrite an already non-empty field
+        /// (`agent-fill.md` §8). Defaults to `false`.
+        #[serde(default)]
+        overwrite: bool,
+        /// Resolve `item_id` inside this vault only (name or id). `None` — the
+        /// default — searches every vault, as the browser fill path does.
+        #[serde(default)]
+        vault: Option<String>,
+    },
+    /// **Agent fill:** take the pending fill intent, if any (`agent-fill.md`
+    /// §5.1). Sent by the browser extension through the native host while the
+    /// arm window is open. **Single use** — taking removes it. Answered by
+    /// [`Response::FillIntent`] or [`Response::NoFillIntent`]. Non-secret.
+    TakeFillIntent {
+        /// The profile directory being operated on.
+        profile: String,
+    },
+    /// **Agent fill:** report what the extension did with a taken intent
+    /// (`agent-fill.md` §9). Non-secret by construction: [`FillReport`] can only
+    /// carry booleans, `empty`/`filled` tokens, and a closed refusal code.
+    /// Answered by [`Response::Ok`].
+    ReportFillOutcome {
+        /// The profile directory being operated on.
+        profile: String,
+        /// The item the outcome is about (hyphenated id, as handed out in the
+        /// intent). A report naming a different item is refused.
+        item_id: String,
+        /// The non-secret outcome.
+        outcome: FillReport,
+    },
+    /// **Agent fill:** read the state of the pending fill intent so a waiting
+    /// caller can learn the outcome **without the daemon ever blocking**
+    /// (`agent-fill.md` §5.1, and see [`crate::engine`] on the state mutex).
+    ///
+    /// This request is not in `agent-fill.md` §11: the spec defines how the
+    /// outcome is *reported* but not how the MCP tool, which must answer the
+    /// agent with the before/after booleans, *learns* it. Every daemon request
+    /// runs under one state mutex, so a blocking wait inside the daemon would
+    /// freeze the auto-lock; the MCP client therefore polls this cheap,
+    /// non-secret, activity-neutral read between short sleeps. Answered by
+    /// [`Response::FillOutcome`].
+    PollFillOutcome {
+        /// The profile directory being operated on.
+        profile: String,
+    },
     /// **Sync:** enroll a vault for file-based sync under a shared directory
     /// (`localpass sync setup`). Answered by [`Response::Ok`].
     SyncSetup {
@@ -627,6 +721,11 @@ impl Request {
             Request::ListPeers { .. } => "ListPeers",
             Request::TrustDevice { .. } => "TrustDevice",
             Request::SetPairingMode { .. } => "SetPairingMode",
+            Request::SetAgentFillMode { .. } => "SetAgentFillMode",
+            Request::ArmFillIntent { .. } => "ArmFillIntent",
+            Request::TakeFillIntent { .. } => "TakeFillIntent",
+            Request::ReportFillOutcome { .. } => "ReportFillOutcome",
+            Request::PollFillOutcome { .. } => "PollFillOutcome",
             Request::SyncSetup { .. } => "SyncSetup",
             Request::SyncPush { .. } => "SyncPush",
             Request::SyncPull { .. } => "SyncPull",
@@ -970,6 +1069,185 @@ impl WireOrigin {
     }
 }
 
+/// A login field an agent fill may target (`agent-fill.md` §3).
+///
+/// A **closed** set on purpose. The extension names the fields it touched, and
+/// this type makes it structurally impossible for that name to be anything but
+/// `username` or `password` — a free-form string here would be a channel a
+/// hostile extension could smuggle a value down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FillField {
+    /// The username / email field.
+    Username,
+    /// The password field.
+    Password,
+}
+
+/// Whether a field held anything, before or after a fill (`agent-fill.md` §3).
+///
+/// Derived from `value.length > 0` **inside the extension**. The length itself
+/// is not reported, and no substring, prefix, or hash of the value ever crosses:
+/// this two-valued type is the entire vocabulary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldState {
+    /// The field was empty.
+    Empty,
+    /// The field held something (what, nobody says).
+    Filled,
+}
+
+/// The `empty`/`filled` state of each field, before or after a fill.
+///
+/// A struct rather than a map so the key space is closed too — see
+/// [`FillField`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FieldStates {
+    /// The username field's state, or `None` if there was no such field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<FieldState>,
+    /// The password field's state, or `None` if there was no such field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<FieldState>,
+}
+
+/// A refusal reason from the `agent-fill.md` §10 taxonomy.
+///
+/// The agent must be able to tell "you may not" from "it did not work", so these
+/// are distinct closed tokens rather than one generic failure. Every variant is
+/// a fixed token: a refusal can never carry a message that might contain a
+/// value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FillRefusal {
+    /// The agent-fill window is not armed.
+    AgentFillNotArmed,
+    /// The item is outside the armed per-item set.
+    ItemNotArmed,
+    /// The daemon is locked.
+    Locked,
+    /// No item matches the reference.
+    ItemNotFound,
+    /// The title matches more than one item.
+    AmbiguousItem,
+    /// The item's stored URL does not match the origin.
+    OriginMismatch,
+    /// The tab the agent named is gone.
+    TabNotFound,
+    /// An origin-only arm matched several tabs.
+    AmbiguousTab,
+    /// The tab navigated after the intent was armed.
+    OriginChanged,
+    /// The intent lapsed before it was redeemed.
+    IntentExpired,
+    /// A target field was already non-empty and `overwrite` was not set.
+    FieldNotEmpty,
+    /// No extension is connected / no native host answered.
+    ExtensionUnavailable,
+    /// The page has no fillable password field.
+    NoLoginForm,
+    /// The extension has no host permission for this origin. Distinct from
+    /// [`NoLoginForm`](FillRefusal::NoLoginForm): the page was never inspected,
+    /// so reporting "no login form" would have been a guess dressed as a fact.
+    PageAccessDenied,
+    /// `chrome.scripting` could not inject — a restricted page, or a tab torn
+    /// down mid-fill. The "it did not work" bucket the taxonomy first lacked.
+    InjectionFailed,
+}
+
+impl FillRefusal {
+    /// The short, stable token an agent sees (`agent_fill_not_armed`, …).
+    #[must_use]
+    pub fn token(self) -> &'static str {
+        match self {
+            FillRefusal::AgentFillNotArmed => "agent_fill_not_armed",
+            FillRefusal::ItemNotArmed => "item_not_armed",
+            FillRefusal::Locked => "locked",
+            FillRefusal::ItemNotFound => "item_not_found",
+            FillRefusal::AmbiguousItem => "ambiguous_item",
+            FillRefusal::OriginMismatch => "origin_mismatch",
+            FillRefusal::TabNotFound => "tab_not_found",
+            FillRefusal::AmbiguousTab => "ambiguous_tab",
+            FillRefusal::OriginChanged => "origin_changed",
+            FillRefusal::IntentExpired => "intent_expired",
+            FillRefusal::FieldNotEmpty => "field_not_empty",
+            FillRefusal::ExtensionUnavailable => "extension_unavailable",
+            FillRefusal::NoLoginForm => "no_login_form",
+            FillRefusal::PageAccessDenied => "page_access_denied",
+            FillRefusal::InjectionFailed => "injection_failed",
+        }
+    }
+
+    /// The [`lp_vault::DenyReason`] this refusal is audited as, or `None` for
+    /// the ones that are "it did not work" rather than "you may not" (an
+    /// unmatched item reference was never resolved against the vault, so there
+    /// is nothing to attribute) and for the client-side
+    /// [`ExtensionUnavailable`](FillRefusal::ExtensionUnavailable), which the
+    /// daemon never produces.
+    #[must_use]
+    pub fn deny_reason(self) -> Option<lp_vault::DenyReason> {
+        use lp_vault::DenyReason as D;
+        match self {
+            FillRefusal::AgentFillNotArmed => Some(D::AgentFillNotArmed),
+            FillRefusal::ItemNotArmed => Some(D::ItemNotArmed),
+            FillRefusal::Locked => Some(D::Locked),
+            FillRefusal::OriginMismatch => Some(D::OriginMismatch),
+            FillRefusal::TabNotFound => Some(D::TabNotFound),
+            FillRefusal::AmbiguousTab => Some(D::AmbiguousTab),
+            FillRefusal::OriginChanged => Some(D::OriginChanged),
+            FillRefusal::IntentExpired => Some(D::IntentExpired),
+            FillRefusal::FieldNotEmpty => Some(D::FieldNotEmpty),
+            FillRefusal::NoLoginForm => Some(D::NoLoginForm),
+            FillRefusal::PageAccessDenied => Some(D::PageAccessDenied),
+            FillRefusal::InjectionFailed => Some(D::InjectionFailed),
+            FillRefusal::ItemNotFound
+            | FillRefusal::AmbiguousItem
+            | FillRefusal::ExtensionUnavailable => None,
+        }
+    }
+}
+
+/// What the extension did with a taken intent (`agent-fill.md` §3/§9).
+///
+/// **Structurally secret-free.** Every field is a boolean, a closed token, or a
+/// list of closed tokens; there is no `String` anywhere in this type, so the
+/// extension has no slot to put a value, a length, a prefix, or a hash in.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FillReport {
+    /// Whether the fill landed.
+    pub filled: bool,
+    /// Which fields were touched.
+    #[serde(default)]
+    pub fields: Vec<FillField>,
+    /// Each field's state before the fill.
+    #[serde(default)]
+    pub before: FieldStates,
+    /// Each field's state after the fill.
+    #[serde(default)]
+    pub after: FieldStates,
+    /// Why it did not land, when `filled` is `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<FillRefusal>,
+}
+
+/// Where a fill intent is in its short life (answer to
+/// [`Request::PollFillOutcome`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FillStatus {
+    /// There is no intent at all.
+    None,
+    /// An intent is armed and waiting for the extension to take it.
+    Pending,
+    /// The extension took the intent and has not reported back yet.
+    Taken,
+    /// The extension reported an outcome.
+    Reported,
+    /// The intent lapsed before it was taken or reported.
+    Expired,
+}
+
 /// The unlock/lock state reported by [`Response::Status`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1009,6 +1287,13 @@ pub enum Response {
         /// (`device-pairing.md` §4), or `None` when pairing mode is off/expired.
         /// The GUI/CLI render this as a live countdown; `None` means "off".
         pairing_mode_secs: Option<u64>,
+        /// Whole seconds remaining in the open **agent-fill arm window**
+        /// (`agent-fill.md` §7), or `None` when agent fill is off/expired.
+        /// The browser extension polls `take_fill_intent` **only** while this is
+        /// `Some`. `#[serde(default)]` so a `Status` frame from a peer that
+        /// predates agent fill still decodes — as `None`, i.e. "off".
+        #[serde(default)]
+        agent_fill_secs: Option<u64>,
     },
     /// A generic "did it" acknowledgement (Unlock, Lock, mutations).
     Ok {
@@ -1223,6 +1508,60 @@ pub enum Response {
         /// The records (may be empty), newest first.
         records: Vec<WireAuditRecord>,
     },
+    /// **Agent fill:** a fill intent was armed (answer to
+    /// [`Request::ArmFillIntent`]). Non-secret.
+    FillIntentArmed {
+        /// Whole seconds until the intent lapses (`agent-fill.md` §7: 30s).
+        expires_in_secs: u64,
+        /// The canonical hyphenated item id the intent was armed for (the
+        /// daemon resolved the caller's title/id reference).
+        item_id: String,
+    },
+    /// **Agent fill:** the pending intent, handed to the extension exactly once
+    /// (answer to [`Request::TakeFillIntent`]). Ids, a tab id, and an origin —
+    /// **never a secret**. The extension then makes the ordinary
+    /// [`Request::FillLogin`] call for the credential, unchanged.
+    FillIntent {
+        /// The item to fill (canonical hyphenated id).
+        item_id: String,
+        /// The tab the intent targets, or `None` for origin-only targeting.
+        tab_id: Option<u64>,
+        /// The origin the intent is bound to.
+        origin: String,
+        /// Whole seconds left before the intent lapses.
+        expires_in_secs: u64,
+        /// Whether a non-empty field may be overwritten (`agent-fill.md` §8).
+        overwrite: bool,
+    },
+    /// **Agent fill:** there is no intent to take (answer to
+    /// [`Request::TakeFillIntent`]). The extension's poll loop sees this for
+    /// almost every poll; it is deliberately empty and cheap.
+    NoFillIntent,
+    /// **Agent fill:** the current state of the pending intent (answer to
+    /// [`Request::PollFillOutcome`]).
+    FillOutcome {
+        /// Where the intent is in its short life.
+        status: FillStatus,
+        /// The item the intent named (canonical hyphenated id), when there is
+        /// one.
+        item_id: Option<String>,
+        /// The tab the intent targeted, echoed from the intent the daemon armed
+        /// — never from the extension's report.
+        tab_id: Option<u64>,
+        /// The origin the intent was bound to, echoed from the intent the daemon
+        /// armed — never from the extension's report.
+        origin: Option<String>,
+        /// The extension's non-secret report, once
+        /// [`Request::ReportFillOutcome`] has arrived.
+        report: Option<FillReport>,
+    },
+    /// **Agent fill:** the request was refused, with the closed `agent-fill.md`
+    /// §10 reason code. Separate from [`Response::Error`] so the agent can tell
+    /// "you may not" from "it did not work" without parsing a message.
+    FillRefused {
+        /// Why (a closed token, never a message that could carry a value).
+        reason: FillRefusal,
+    },
     /// The requested operation needs an unlocked session and none is held.
     Locked,
     /// This daemon serves a different profile than the request named.
@@ -1274,6 +1613,11 @@ impl Response {
             Response::AttachmentSaved { .. } => "AttachmentSaved",
             Response::EnvEntries { .. } => "EnvEntries",
             Response::AuditRecords { .. } => "AuditRecords",
+            Response::FillIntentArmed { .. } => "FillIntentArmed",
+            Response::FillIntent { .. } => "FillIntent",
+            Response::NoFillIntent => "NoFillIntent",
+            Response::FillOutcome { .. } => "FillOutcome",
+            Response::FillRefused { .. } => "FillRefused",
             Response::Locked => "Locked",
             Response::WrongProfile { .. } => "WrongProfile",
             Response::Error { .. } => "Error",
@@ -1488,6 +1832,155 @@ mod tests {
             }
             other => panic!("expected Status, got {other:?}"),
         }
+    }
+
+    /// The agent-fill requests add `origin` and `tab_id` as **request** fields,
+    /// which is fine; what must never happen is a new *envelope* field sharing a
+    /// name with any of them. This drives the exact shape through the wire so a
+    /// future envelope field called `origin`, `tab_id`, `item_id`, or `overwrite`
+    /// fails here instead of silently killing agent fill the way an envelope
+    /// field called `origin` once killed all browser autofill.
+    #[test]
+    fn the_agent_fill_requests_round_trip_through_the_envelope() {
+        let env = RequestEnvelope {
+            v: PROTOCOL_VERSION,
+            caller: Some(WireOrigin::from_origin(&lp_vault::AuditOrigin::sanitized(
+                lp_vault::AuditSource::Mcp,
+                Some("agent"),
+                Some(7),
+            ))),
+            request: Request::ArmFillIntent {
+                profile: "/p".into(),
+                item_id: "the-item".into(),
+                tab_id: Some(42),
+                origin: "https://github.com".into(),
+                overwrite: true,
+                vault: None,
+            },
+        };
+        let bytes = serde_json::to_vec(&env).expect("serialize");
+        let back: RequestEnvelope = serde_json::from_slice(&bytes)
+            .expect("an envelope field must never share a name with a request field");
+        assert!(back.caller.is_some(), "attribution survived");
+        match back.request {
+            Request::ArmFillIntent {
+                item_id,
+                tab_id,
+                origin,
+                overwrite,
+                ..
+            } => {
+                assert_eq!(item_id, "the-item");
+                assert_eq!(tab_id, Some(42));
+                assert_eq!(origin, "https://github.com");
+                assert!(overwrite);
+            }
+            other => panic!("wrong request back: {other:?}"),
+        }
+    }
+
+    /// The optional agent-fill request fields all default, so a frame from a
+    /// peer that predates them still decodes — and decodes to the SAFE reading
+    /// (no tab, no overwrite, an empty item scope).
+    #[test]
+    fn agent_fill_request_fields_default_for_an_older_peer() {
+        let body = br#"{"v":1,"kind":"ArmFillIntent","profile":"/p","item_id":"i","origin":"https://x.test"}"#;
+        let env: RequestEnvelope = serde_json::from_slice(body).unwrap();
+        match env.request {
+            Request::ArmFillIntent {
+                tab_id, overwrite, ..
+            } => {
+                assert_eq!(tab_id, None);
+                assert!(
+                    !overwrite,
+                    "overwriting a filled field is never the default"
+                );
+            }
+            other => panic!("expected ArmFillIntent, got {other:?}"),
+        }
+        let body = br#"{"v":1,"kind":"SetAgentFillMode","profile":"/p","on":true}"#;
+        let env: RequestEnvelope = serde_json::from_slice(body).unwrap();
+        match env.request {
+            Request::SetAgentFillMode { item_ids, .. } => assert!(item_ids.is_empty()),
+            other => panic!("expected SetAgentFillMode, got {other:?}"),
+        }
+    }
+
+    /// A [`FillReport`] is structurally incapable of carrying a value: every
+    /// field is a boolean or a closed token. This pins that the serialized form
+    /// really is just `empty`/`filled` tokens, and that a body trying to smuggle
+    /// a value down `before`/`fields` fails to decode rather than passing it on.
+    #[test]
+    fn a_fill_report_can_only_say_empty_or_filled() {
+        let report = FillReport {
+            filled: true,
+            fields: vec![FillField::Username, FillField::Password],
+            before: FieldStates {
+                username: Some(FieldState::Empty),
+                password: Some(FieldState::Empty),
+            },
+            after: FieldStates {
+                username: Some(FieldState::Filled),
+                password: Some(FieldState::Filled),
+            },
+            reason: None,
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        assert_eq!(
+            json,
+            r#"{"filled":true,"fields":["username","password"],"before":{"username":"empty","password":"empty"},"after":{"username":"filled","password":"filled"}}"#
+        );
+        // A smuggled value is not a `FieldState`, so it does not decode at all.
+        assert!(
+            serde_json::from_str::<FillReport>(
+                r#"{"filled":true,"before":{"password":"hunter2"}}"#
+            )
+            .is_err()
+        );
+        // …and neither is a smuggled field NAME.
+        assert!(
+            serde_json::from_str::<FillReport>(r#"{"filled":true,"fields":["hunter2"]}"#).is_err()
+        );
+    }
+
+    /// Every §10 refusal has a distinct token, and the ones the daemon can
+    /// produce map to a distinct [`lp_vault::DenyReason`] so the audit log can
+    /// tell them apart.
+    #[test]
+    fn every_fill_refusal_has_a_distinct_token() {
+        const ALL: [FillRefusal; 13] = [
+            FillRefusal::AgentFillNotArmed,
+            FillRefusal::ItemNotArmed,
+            FillRefusal::Locked,
+            FillRefusal::ItemNotFound,
+            FillRefusal::AmbiguousItem,
+            FillRefusal::OriginMismatch,
+            FillRefusal::TabNotFound,
+            FillRefusal::AmbiguousTab,
+            FillRefusal::OriginChanged,
+            FillRefusal::IntentExpired,
+            FillRefusal::FieldNotEmpty,
+            FillRefusal::ExtensionUnavailable,
+            FillRefusal::NoLoginForm,
+        ];
+        let mut tokens: Vec<&str> = ALL.iter().map(|r| r.token()).collect();
+        tokens.sort_unstable();
+        tokens.dedup();
+        assert_eq!(tokens.len(), ALL.len(), "tokens must be distinct");
+        // The serde token and the display token are the same string, so an
+        // agent reading either sees one vocabulary.
+        for r in ALL {
+            let json = serde_json::to_string(&r).unwrap();
+            assert_eq!(json, format!("\"{}\"", r.token()));
+        }
+        let mut reasons: Vec<u8> = ALL
+            .iter()
+            .filter_map(|r| r.deny_reason())
+            .map(lp_vault::DenyReason::code)
+            .collect();
+        reasons.sort_unstable();
+        reasons.dedup();
+        assert_eq!(reasons.len(), 10, "ten of the thirteen are audited");
     }
 
     #[test]

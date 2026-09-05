@@ -43,6 +43,7 @@ use std::time::Duration;
 use crate::engine::{self, State};
 use crate::error::{Error, Result};
 use crate::frame;
+use crate::protocol::Response;
 use crate::transport::{self, Listener};
 
 /// How often the reaper checks the idle timer.
@@ -240,9 +241,32 @@ fn serve_connection(shared: &Arc<Shared>, mut conn: transport::Connection) -> Re
     loop {
         // 1) Read the full request off the wire — NO lock held here, so a slow
         //    client cannot block the mutex.
-        let incoming = match frame::read_request(&mut conn)? {
-            Some(req) => req,
-            None => return Ok(()), // client closed cleanly between messages
+        // A frame that arrives intact but does not parse is almost always
+        // version skew — a client newer than this daemon naming a request it has
+        // never heard of. Propagating that error would drop the connection, and
+        // a client holding one connection for its lifetime (the MCP server does)
+        // is then dead for the rest of its session, reporting "the pipe is being
+        // closed" for every later call including ones this daemon understands
+        // perfectly. So answer it and keep serving; only a real transport
+        // failure ends the connection.
+        let incoming = match frame::read_request(&mut conn) {
+            Ok(Some(req)) => req,
+            Ok(None) => return Ok(()), // client closed cleanly between messages
+            Err(e @ (Error::Serde(_) | Error::UnsupportedVersion(_))) => {
+                if shared.verbose {
+                    log(&format!("unparseable request kept the connection: {e}"));
+                }
+                frame::write_response(
+                    &mut conn,
+                    &Response::Error {
+                        auth: false,
+                        message: "this request is not understood by the running LocalPass                                   service, which is probably older than the tool that sent                                   it — restart the service (`localpass daemon stop`, then                                   use it again) so it picks up the current build"
+                            .to_string(),
+                    },
+                )?;
+                continue;
+            }
+            Err(e) => return Err(e),
         };
         let frame::IncomingRequest { request, origin } = incoming;
         let kind = request.kind();

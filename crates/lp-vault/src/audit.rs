@@ -194,6 +194,39 @@ pub enum DenyReason {
     WrongProfile,
     /// The caller was authenticated but not permitted to do this.
     NotAuthorized,
+    /// **Agent fill:** the agent-fill arm window was closed or had lapsed
+    /// (`agent-fill.md` §10 `agent_fill_not_armed`).
+    AgentFillNotArmed,
+    /// **Agent fill:** the item named is outside the armed per-item set
+    /// (`agent-fill.md` §10 `item_not_armed`).
+    ItemNotArmed,
+    /// **Agent fill:** the single-use fill intent lapsed before the extension
+    /// redeemed it (`agent-fill.md` §10 `intent_expired`).
+    IntentExpired,
+    /// **Agent fill:** the item's stored URL does not match the requested page
+    /// origin (`agent-fill.md` §10 `origin_mismatch`).
+    OriginMismatch,
+    /// **Agent fill:** the tab the agent named no longer exists
+    /// (`agent-fill.md` §10 `tab_not_found`).
+    TabNotFound,
+    /// **Agent fill:** an origin-only arm matched several tabs, so the target
+    /// was ambiguous (`agent-fill.md` §10 `ambiguous_tab`).
+    AmbiguousTab,
+    /// **Agent fill:** the tab navigated after arming, so the intent's origin no
+    /// longer holds (`agent-fill.md` §10 `origin_changed`).
+    OriginChanged,
+    /// **Agent fill:** a target field was already non-empty and `overwrite` was
+    /// not set (`agent-fill.md` §10 `field_not_empty`).
+    FieldNotEmpty,
+    /// **Agent fill:** the page had no fillable password field
+    /// (`agent-fill.md` §10 `no_login_form`).
+    NoLoginForm,
+    /// The extension holds no host permission for the page's origin, so it
+    /// could not inject at all.
+    PageAccessDenied,
+    /// Injection failed for a mechanical reason — a restricted page, or a tab
+    /// torn down mid-fill.
+    InjectionFailed,
 }
 
 impl DenyReason {
@@ -204,6 +237,17 @@ impl DenyReason {
             DenyReason::Locked => 1,
             DenyReason::WrongProfile => 2,
             DenyReason::NotAuthorized => 3,
+            DenyReason::AgentFillNotArmed => 4,
+            DenyReason::ItemNotArmed => 5,
+            DenyReason::IntentExpired => 6,
+            DenyReason::OriginMismatch => 7,
+            DenyReason::TabNotFound => 8,
+            DenyReason::AmbiguousTab => 9,
+            DenyReason::OriginChanged => 10,
+            DenyReason::FieldNotEmpty => 11,
+            DenyReason::NoLoginForm => 12,
+            DenyReason::PageAccessDenied => 13,
+            DenyReason::InjectionFailed => 14,
         }
     }
 
@@ -214,6 +258,17 @@ impl DenyReason {
             DenyReason::Locked => "locked",
             DenyReason::WrongProfile => "wrong_profile",
             DenyReason::NotAuthorized => "not_authorized",
+            DenyReason::AgentFillNotArmed => "agent_fill_not_armed",
+            DenyReason::ItemNotArmed => "item_not_armed",
+            DenyReason::IntentExpired => "intent_expired",
+            DenyReason::OriginMismatch => "origin_mismatch",
+            DenyReason::TabNotFound => "tab_not_found",
+            DenyReason::AmbiguousTab => "ambiguous_tab",
+            DenyReason::OriginChanged => "origin_changed",
+            DenyReason::FieldNotEmpty => "field_not_empty",
+            DenyReason::NoLoginForm => "no_login_form",
+            DenyReason::PageAccessDenied => "page_access_denied",
+            DenyReason::InjectionFailed => "injection_failed",
         }
     }
 
@@ -224,6 +279,17 @@ impl DenyReason {
             1 => Some(DenyReason::Locked),
             2 => Some(DenyReason::WrongProfile),
             3 => Some(DenyReason::NotAuthorized),
+            4 => Some(DenyReason::AgentFillNotArmed),
+            5 => Some(DenyReason::ItemNotArmed),
+            6 => Some(DenyReason::IntentExpired),
+            7 => Some(DenyReason::OriginMismatch),
+            8 => Some(DenyReason::TabNotFound),
+            9 => Some(DenyReason::AmbiguousTab),
+            10 => Some(DenyReason::OriginChanged),
+            11 => Some(DenyReason::FieldNotEmpty),
+            12 => Some(DenyReason::NoLoginForm),
+            13 => Some(DenyReason::PageAccessDenied),
+            14 => Some(DenyReason::InjectionFailed),
             _ => None,
         }
     }
@@ -442,6 +508,19 @@ pub enum AuditKind {
     /// user (`device-pairing.md` §4). The unit counterpart of
     /// [`PairingModeEnabled`](AuditKind::PairingModeEnabled); it carries no id.
     PairingModeDisabled,
+    /// **Agent-fill mode was armed** — the time-boxed window that permits an AI
+    /// agent to trigger a browser autofill without the user's popup click was
+    /// opened (`agent-fill.md` §7). Like
+    /// [`PairingModeEnabled`](AuditKind::PairingModeEnabled) this is a
+    /// device-local on/off event that references no id; the per-item scope the
+    /// window carries is deliberately **not** recorded, because item ids would
+    /// be fine but the set is a session control, not an action on an item.
+    AgentFillModeEnabled,
+    /// **Agent-fill mode was disarmed** — the window was closed by the user or
+    /// lapsed on its own (`agent-fill.md` §7). The unit counterpart of
+    /// [`AgentFillModeEnabled`](AuditKind::AgentFillModeEnabled); it carries no
+    /// id.
+    AgentFillModeDisabled,
     /// An operation was **refused** — the vault was locked, the caller named a
     /// profile this daemon does not serve, or the caller was not authorized.
     ///
@@ -475,6 +554,8 @@ impl AuditKind {
             AuditKind::PairingModeEnabled => 11,
             AuditKind::PairingModeDisabled => 12,
             AuditKind::AccessDenied { .. } => 13,
+            AuditKind::AgentFillModeEnabled => 14,
+            AuditKind::AgentFillModeDisabled => 15,
         }
     }
 
@@ -496,6 +577,8 @@ impl AuditKind {
             AuditKind::PairingModeEnabled => "pairing_mode_enabled",
             AuditKind::PairingModeDisabled => "pairing_mode_disabled",
             AuditKind::AccessDenied { .. } => "access_denied",
+            AuditKind::AgentFillModeEnabled => "agent_fill_mode_enabled",
+            AuditKind::AgentFillModeDisabled => "agent_fill_mode_disabled",
         }
     }
 
@@ -593,7 +676,9 @@ impl AuditRecord {
             AuditKind::UnlockSuccess
             | AuditKind::UnlockFailure
             | AuditKind::PairingModeEnabled
-            | AuditKind::PairingModeDisabled => {}
+            | AuditKind::PairingModeDisabled
+            | AuditKind::AgentFillModeEnabled
+            | AuditKind::AgentFillModeDisabled => {}
             AuditKind::ItemSecretRead {
                 item_id,
                 vault_id,
@@ -754,6 +839,8 @@ pub(crate) fn kind_from_row(
         },
         Some(11) => AuditKind::PairingModeEnabled,
         Some(12) => AuditKind::PairingModeDisabled,
+        Some(14) => AuditKind::AgentFillModeEnabled,
+        Some(15) => AuditKind::AgentFillModeDisabled,
         Some(13) => AuditKind::AccessDenied {
             reason: deny_reason
                 .and_then(|c| u8::try_from(c).ok())
@@ -905,14 +992,19 @@ mod tests {
         }
         // An unknown code from a newer build reads as Unknown, never an error.
         assert_eq!(AuditSource::from_code(200), AuditSource::Unknown);
-        for r in [
-            DenyReason::Locked,
-            DenyReason::WrongProfile,
-            DenyReason::NotAuthorized,
-        ] {
+        for r in ALL_DENY_REASONS {
             assert_eq!(DenyReason::from_code(r.code()), Some(r));
         }
         assert_eq!(DenyReason::from_code(0), None);
+        // Every reason has a distinct code and a distinct label.
+        let mut codes: Vec<u8> = ALL_DENY_REASONS.iter().map(|r| r.code()).collect();
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(codes.len(), ALL_DENY_REASONS.len());
+        let mut labels: Vec<&str> = ALL_DENY_REASONS.iter().map(|r| r.label()).collect();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), ALL_DENY_REASONS.len());
     }
 
     #[test]
@@ -982,10 +1074,109 @@ mod tests {
             AuditKind::AccessDenied {
                 reason: DenyReason::Locked,
             },
+            AuditKind::AgentFillModeEnabled,
+            AuditKind::AgentFillModeDisabled,
         ];
         let mut codes: Vec<u8> = kinds.iter().map(AuditKind::code).collect();
         codes.sort_unstable();
         codes.dedup();
         assert_eq!(codes.len(), kinds.len(), "kind codes must be distinct");
+    }
+
+    /// Every [`DenyReason`], including the `agent-fill.md` §10 additions.
+    const ALL_DENY_REASONS: [DenyReason; 14] = [
+        DenyReason::Locked,
+        DenyReason::WrongProfile,
+        DenyReason::NotAuthorized,
+        DenyReason::AgentFillNotArmed,
+        DenyReason::ItemNotArmed,
+        DenyReason::IntentExpired,
+        DenyReason::OriginMismatch,
+        DenyReason::TabNotFound,
+        DenyReason::AmbiguousTab,
+        DenyReason::OriginChanged,
+        DenyReason::FieldNotEmpty,
+        DenyReason::NoLoginForm,
+        DenyReason::PageAccessDenied,
+        DenyReason::InjectionFailed,
+    ];
+
+    /// The agent-fill kinds are unit variants, exactly like the pairing-mode
+    /// pair: their canonical bytes are the fixed prefix plus the kind code plus
+    /// the detail slot — no id, no length-prefixed payload. Pinning the exact
+    /// bytes keeps a future change from silently re-shaping the hash chain.
+    #[test]
+    fn agent_fill_kinds_encode_as_bare_unit_records() {
+        for (kind, code) in [
+            (AuditKind::AgentFillModeEnabled, 14u8),
+            (AuditKind::AgentFillModeDisabled, 15u8),
+        ] {
+            let rec = AuditRecord {
+                seq: 3,
+                prev_hash: [8u8; 32],
+                timestamp: 1_700_000_000_001,
+                device_id: dev(),
+                kind,
+                detail: None,
+                origin: None,
+            };
+            let mut expect = Vec::new();
+            expect.extend_from_slice(&3u64.to_le_bytes());
+            expect.extend_from_slice(&[8u8; 32]);
+            expect.extend_from_slice(&1_700_000_000_001i64.to_le_bytes());
+            expect.extend_from_slice(dev().as_bytes());
+            expect.push(code);
+            push_opt_str(&mut expect, None);
+            assert_eq!(rec.canonical_bytes(), expect);
+        }
+    }
+
+    /// Adding kinds and reasons must not disturb the encoding of any record that
+    /// does not use them — the existing chains keep verifying byte for byte.
+    #[test]
+    fn pre_existing_kinds_encode_unchanged_after_the_agent_fill_additions() {
+        let rec = AuditRecord {
+            seq: 1,
+            prev_hash: [0u8; 32],
+            timestamp: 100,
+            device_id: dev(),
+            kind: AuditKind::AccessDenied {
+                reason: DenyReason::Locked,
+            },
+            detail: None,
+            origin: None,
+        };
+        let mut expect = Vec::new();
+        expect.extend_from_slice(&1u64.to_le_bytes());
+        expect.extend_from_slice(&[0u8; 32]);
+        expect.extend_from_slice(&100i64.to_le_bytes());
+        expect.extend_from_slice(dev().as_bytes());
+        expect.push(13); // AccessDenied
+        expect.push(1); // DenyReason::Locked
+        push_opt_str(&mut expect, None);
+        assert_eq!(rec.canonical_bytes(), expect);
+    }
+
+    /// Every kind decodes back from its stored code (the columns the agent-fill
+    /// kinds need are none at all).
+    #[test]
+    fn agent_fill_kinds_round_trip_through_a_row() {
+        for kind in [
+            AuditKind::AgentFillModeEnabled,
+            AuditKind::AgentFillModeDisabled,
+        ] {
+            let back = kind_from_row(
+                i64::from(kind.code()),
+                None,
+                None,
+                None,
+                None,
+                0,
+                None,
+                None,
+            )
+            .expect("decodes");
+            assert_eq!(back, kind);
+        }
     }
 }
