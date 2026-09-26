@@ -25,6 +25,8 @@
   --accent-text: #ffffff;
   --danger: #b3261e;
   --danger-bg: #fdecea;
+  /* Text on a solid --danger fill (white on #b3261e = 6.5:1). */
+  --danger-text: #ffffff;
   --ok: #0d7a63;
   --focus: #0a5cff;
   --shadow: rgba(0, 0, 0, 0.08);
@@ -44,6 +46,9 @@
     --accent-text: #05201a;
     --danger: #ff8f87;
     --danger-bg: #3a1512;
+    /* The dark-theme danger is a light red, so its fill needs dark text:
+       #2a0a08 on #ff8f87 = 8.3:1 (white was 2.2:1 — failed AA). */
+    --danger-text: #2a0a08;
     --ok: #6ee7cd;
     --focus: #7db4ff;
     --shadow: rgba(0, 0, 0, 0.4);
@@ -248,7 +253,10 @@ input[type="range"] {
   .shell[data-mobile="detail"] > main .mobile-back,
   .shell[data-mobile="form"] > main .mobile-back {
     display: inline-flex;
-    margin-bottom: 0.75rem;
+    margin: 0.75rem 1rem 0;
+  }
+  .shell > main.pane .detail {
+    padding: 1rem;
   }
 
   /* Items screen: vault picker + New (replaces the sidebar's vault list). */
@@ -289,7 +297,7 @@ input[type="range"] {
     padding: 6px 2px;
     border: none;
     background: none;
-    color: var(--muted);
+    color: var(--text-muted);
     /* SIX tabs (Items / Generator / Security / Devices / Dev / Help) share the
        width, so each gets ~65px at 390px and ~60px at 360px. 10px is the
        largest size at which the longest label ("Generator", ~9 chars) still
@@ -307,8 +315,21 @@ input[type="range"] {
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .mobile-tabbar button .ico { font-size: 19px; line-height: 1; }
+  .mobile-tabbar button .ico { display: flex; line-height: 1; }
   .mobile-tabbar button.active { color: var(--accent); }
+  /* A short bar above the active tab, so the state is not carried by color
+     alone (WCAG 1.4.1). */
+  .mobile-tabbar button { position: relative; }
+  .mobile-tabbar button.active::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 30%;
+    right: 30%;
+    height: 2px;
+    border-radius: 0 0 2px 2px;
+    background: var(--accent);
+  }
 }
 
 /* Very narrow phones (≤360px: iPhone SE, older Androids) leave ~53px per tab.
@@ -319,7 +340,6 @@ input[type="range"] {
     letter-spacing: -0.01em;
     padding: 6px 1px;
   }
-  .mobile-tabbar button .ico { font-size: 17px; }
 }
 
 .pane {
@@ -346,6 +366,15 @@ input[type="range"] {
   letter-spacing: 0.06em;
   color: var(--text-muted);
   margin: 0;
+}
+.pane-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.search-row {
+  margin-top: 0.5rem;
 }
 
 /* --- Inline new-vault form (sidebar + mobile Items screen) --- */
@@ -390,6 +419,73 @@ input[type="range"] {
 .row-title {
   font-weight: 600;
 }
+
+/* --- Sidebar tool navigation (Generator / Security / …) --- */
+.nav-list {
+  border-top: 1px solid var(--border);
+  padding-top: 0.5rem;
+}
+.nav-row {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--text-muted);
+}
+.nav-row .row-title {
+  color: var(--text);
+  font-weight: 500;
+}
+.nav-row.selected {
+  color: var(--accent);
+}
+.nav-row.selected .row-title {
+  font-weight: 600;
+}
+
+/* --- Item pane footer: Trash + vault-level actions --- */
+.vault-footer {
+  border-top: 1px solid var(--border);
+  padding: 0.4rem;
+}
+.trash-toggle {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--text-muted);
+}
+.trash-toggle .row-title {
+  color: var(--text);
+  font-weight: 500;
+}
+.trash-toggle .count {
+  font-size: 0.8em;
+  font-variant-numeric: tabular-nums;
+}
+.trash-toggle .chev {
+  margin-left: auto;
+  display: flex;
+  transition: transform 0.12s ease;
+}
+.trash-toggle .chev.open {
+  transform: rotate(90deg);
+}
+.vault-footer .empty {
+  padding: 0.75rem 1rem;
+  font-size: 0.9em;
+}
+.vault-footer .list {
+  padding: 0;
+}
+.trash-row {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: default;
+}
+.trash-main {
+  flex: 1;
+  min-width: 0;
+}
 .row-meta {
   font-size: 0.8em;
   color: var(--text-muted);
@@ -399,8 +495,10 @@ input[type="range"] {
 }
 .badge {
   display: inline-block;
-  font-size: 0.72em;
-  padding: 0.05em 0.5em;
+  /* Absolute size: the old 0.72em compounded inside .row-meta to ~8px. */
+  font-size: 0.6875rem;
+  line-height: 1.5;
+  padding: 0 0.5em;
   border-radius: 999px;
   background: var(--bg-hover);
   color: var(--text-muted);
@@ -428,11 +526,31 @@ input[type="range"] {
   margin: 0 0 0.25rem;
   font-size: 1.4rem;
 }
+/* Step headings inside a card (e.g. "Create your account") sit one level
+   below the brand line instead of competing with it. */
+.card h2 {
+  font-size: 1.1rem;
+  margin: 0 0 0.35rem;
+}
 .brand {
   display: flex;
   align-items: center;
   gap: 0.6rem;
   margin-bottom: 1.25rem;
+}
+.topbar .logo {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--accent-text);
+  display: grid;
+  place-items: center;
+  font-weight: 800;
+  font-size: 0.8rem;
+}
+.topbar .vault-count {
+  font-weight: 400;
 }
 .brand .logo {
   width: 34px;
@@ -474,6 +592,27 @@ input[type="range"] {
 .detail h2 {
   margin: 0 0 0.25rem;
 }
+.detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.detail-meta {
+  margin: 0 0 1rem;
+  flex-wrap: wrap;
+}
+.badge-tag {
+  background: transparent;
+}
+.notes {
+  margin-top: 1.25rem;
+}
+.notes-body {
+  white-space: pre-wrap;
+  user-select: text;
+  margin-top: 0.25rem;
+}
 .field {
   display: grid;
   grid-template-columns: 140px 1fr auto;
@@ -482,10 +621,27 @@ input[type="range"] {
   padding: 0.5rem 0;
   border-bottom: 1px solid var(--border);
 }
+/* Narrow: the name stacks above the value and the actions stay on the right,
+   so a field is two short lines instead of three stacked rows. */
 @media (max-width: 620px) {
   .field {
-    grid-template-columns: 1fr;
-    gap: 0.25rem;
+    grid-template-columns: minmax(0, 1fr) auto;
+    column-gap: 0.6rem;
+    row-gap: 0.1rem;
+  }
+  .field > .field-name {
+    grid-column: 1;
+    grid-row: 1;
+    font-size: 0.85em;
+  }
+  .field > .field-value {
+    grid-column: 1;
+    grid-row: 2;
+    min-width: 0;
+  }
+  .field > .field-actions {
+    grid-column: 2;
+    grid-row: 1 / span 2;
   }
 }
 .field-name {
@@ -633,26 +789,26 @@ input[type="range"] {
 
 /* --- Destructive vault deletion: a subtle trigger + a typed-confirm modal. --- */
 .vault-danger-row {
-  margin-top: 0.5rem;
-  text-align: right;
+  margin-top: 0.25rem;
+  padding: 0 0.3rem;
 }
-.link-danger {
-  border: none;
-  background: none;
-  padding: 0;
-  font: inherit;
+.btn-ghost-danger {
   color: var(--danger);
-  cursor: pointer;
-  text-decoration: underline;
-  text-underline-offset: 2px;
 }
-.link-danger:hover {
-  opacity: 0.8;
+.btn-ghost-danger:hover {
+  background: var(--danger-bg);
+}
+.btn-danger-outline {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.btn-danger-outline:hover:not(:disabled) {
+  background: var(--danger-bg);
 }
 .btn-danger {
   background: var(--danger);
   border-color: var(--danger);
-  color: #fff;
+  color: var(--danger-text);
 }
 .btn-danger:hover:not(:disabled) {
   background: color-mix(in srgb, var(--danger) 85%, #000);
