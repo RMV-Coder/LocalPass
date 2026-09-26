@@ -109,7 +109,14 @@ pub fn item_view_masked(view: ItemView) -> MaskedItem {
         updated_at: view.updated_at,
         tags: view.tags,
         favorite: view.favorite,
-        notes: view.notes,
+        // Notes are free text — for the `note` type they are the whole secret
+        // content, and users keep recovery codes and PINs in notes on every
+        // type. Treat them as secret: an agent learns only that notes exist.
+        notes: if view.notes.is_empty() {
+            String::new()
+        } else {
+            MASK.to_string()
+        },
         fields: view
             .fields
             .into_iter()
@@ -206,5 +213,39 @@ mod tests {
             "masked JSON leaked a secret: {json}"
         );
         assert!(json.contains("password"), "field NAME must survive: {json}");
+    }
+
+    /// Notes are free text: the whole content of a `note` item, and where
+    /// users keep recovery codes on every other type. An agent learns only
+    /// that notes exist.
+    #[test]
+    fn non_empty_notes_are_masked() {
+        let m = item_view_masked(view());
+        assert_eq!(m.notes, MASK);
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(
+            !json.contains("reachable from the bastion"),
+            "notes leaked: {json}"
+        );
+    }
+
+    #[test]
+    fn a_secure_note_body_never_reaches_the_json() {
+        let mut v = view();
+        v.type_str = "note".into();
+        v.fields.clear();
+        v.notes = "recovery codes: 1111-2222 3333-4444".into();
+        let json = serde_json::to_string(&item_view_masked(v)).unwrap();
+        assert!(
+            !json.contains("1111-2222"),
+            "secure-note body leaked: {json}"
+        );
+    }
+
+    #[test]
+    fn empty_notes_stay_empty_so_the_agent_can_tell_there_are_none() {
+        let mut v = view();
+        v.notes = String::new();
+        assert_eq!(item_view_masked(v).notes, "");
     }
 }
