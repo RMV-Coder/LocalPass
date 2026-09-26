@@ -24,8 +24,41 @@ export function typeLabel(typeStr: string): string {
     case "totp":
       return "TOTP";
     default:
-      return typeStr;
+      return humanizeKey(typeStr);
   }
+}
+
+/** Turn a snake_case / kebab-case key into sentence case for display
+ *  ("secure_note" -> "Secure note"). Used as the fallback for unknown type
+ *  strings so a raw identifier never leaks into the UI as-is. */
+export function humanizeKey(key: string): string {
+  const words = key.replace(/[_-]+/g, " ").trim();
+  if (!words) return key;
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/** Display labels for the BUILT-IN field names the backend emits for each item
+ *  type (see src-tauri item_input.rs). Only exact matches are relabelled; any
+ *  other (user-defined) field name is shown exactly as typed. */
+const FIELD_LABELS: Record<string, string> = {
+  username: "Username",
+  password: "Password",
+  url: "URL",
+  secret: "Secret",
+  endpoint: "Endpoint",
+  private_pem: "Private key",
+  public_openssh: "Public key",
+  fingerprint: "Fingerprint",
+  algo: "Algorithm",
+};
+
+/** Human label for an item field name. Env-set entries are variable NAMES the
+ *  user will reference verbatim (`localpass://…/KEY`), so they are never
+ *  rewritten; neither are unknown/custom field names. Display-only: the raw
+ *  name is still what reveal/copy calls use. */
+export function fieldLabel(name: string, typeStr: string): string {
+  if (typeStr === "env_set") return name;
+  return Object.prototype.hasOwnProperty.call(FIELD_LABELS, name) ? FIELD_LABELS[name] : name;
 }
 
 /** Format a unix-millis timestamp as a short local date-time. Returns "—" for
@@ -41,6 +74,35 @@ export function formatTimestamp(millis: number): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+/** Compact date for dense lists: the time of day for today, "Mon D" within
+ *  the current year, otherwise "Mon D, YYYY". `now` is injectable for tests.
+ *  Returns "—" for a missing/invalid value. Pair with `formatTimestamp` where
+ *  the full date-time is needed. */
+export function formatShortDate(millis: number, now: number = Date.now()): string {
+  if (!millis) return "—";
+  const d = new Date(millis);
+  if (Number.isNaN(d.getTime())) return "—";
+  const n = new Date(now);
+  if (
+    d.getFullYear() === n.getFullYear() &&
+    d.getMonth() === n.getMonth() &&
+    d.getDate() === n.getDate()
+  ) {
+    return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  }
+  if (d.getFullYear() === n.getFullYear()) {
+    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  }
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
+/** ISO-8601 string for a `<time datetime>` attribute ("" when invalid). */
+export function isoTimestamp(millis: number): string {
+  if (!millis) return "";
+  const d = new Date(millis);
+  return Number.isNaN(d.getTime()) ? "" : d.toISOString();
 }
 
 /** Round entropy bits to one decimal for display. */
