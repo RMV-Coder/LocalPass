@@ -21,6 +21,7 @@
   browser extension over the native-messaging path, and only there.
 -->
 <script lang="ts">
+  import { untrack } from "svelte";
   import {
     listItems,
     auditList,
@@ -123,8 +124,15 @@
       .catch(() => {
         /* Paths are a nicety; the guides still read correctly without them. */
       });
-    refresh();
-    void refreshArm();
+    // Load once on mount. `refresh()` reads `loading` (and `vaults`)
+    // synchronously and writes `loading` again when it settles, so calling it
+    // tracked made this effect re-run itself forever — a continuous
+    // list_items + audit_list loop that, with a fast bridge, starved the UI
+    // thread. The Refresh button covers manual reloads.
+    untrack(() => {
+      refresh();
+      void refreshArm();
+    });
   });
 
   // --- Copy-able snippets ---
