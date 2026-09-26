@@ -85,7 +85,10 @@ script. Agent-triggered fill removes that click. That is the entire security
 delta of this feature and it is paid for, not waived, by three things:
 
 1. A **time-boxed arm window** the user opens deliberately (§7), modelled on
-   device pairing (`device-pairing.md` §4).
+   device pairing (`device-pairing.md` §4). An MCP `run_with_secrets` child
+   cannot open it through the LocalPass CLI (the server refuses to run LocalPass
+   itself and the CLI refuses `agent-fill arm` under `LOCALPASS_MCP_CHILD`), but
+   that is a guard, not a boundary — see `mcp-server.md` §7.
 2. **Per-item scope** — arming covers only the items the user selects, not the
    vault (§7).
 3. A **notification on every fill** (§9), so a fill is never silent.

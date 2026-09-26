@@ -62,6 +62,8 @@ The rule is absolute: **no MCP tool ever returns a raw secret value.** Anything 
 
 There is no tool to create, edit, delete, or export anything. Full tool reference and the redaction contract: [docs/specs/mcp-server.md](docs/specs/mcp-server.md).
 
+**One honest caveat:** `run_with_secrets` runs a command *as you*. It refuses to run LocalPass itself, and a LocalPass CLI inside that command refuses to read the vault, but a deliberately hostile command can still reach an **unlocked daemon** directly. If your agent reads untrusted content (repositories, web pages, issues), keep the daemon locked and let `localpass mcp` unlock on its own route, or don't use `run_with_secrets`. See [threat notes](docs/specs/mcp-server.md#7-threat-notes).
+
 ## Desktop app (GUI)
 
 The [`apps/desktop`](apps/desktop) Tauri app is a zero-terminal way to use LocalPass — create your account, browse and edit items, reveal/copy secrets, read live TOTP codes, manage `.env` documents and attachments, and link + sync devices. It's a thin daemon **client** and holds no key material; secret handling stays in Rust behind an explicit-gesture boundary. See [apps/desktop/README.md](apps/desktop/README.md) for the architecture and security notes.

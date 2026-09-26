@@ -344,27 +344,54 @@ the result is built.
    injected value. If any survives — a bug, by construction — the tool returns an
    error instead of the output. Redaction failing closed is the point.
 
+5. **Transformed echoes.** Each value is also matched in the forms ordinary
+   programs print it in: JSON-escaped, percent-encoded (both hex cases and the
+   `+`-for-space form), base64 in both alphabets at all three byte alignments —
+   so a password *inside* an HTTP Basic `Authorization` header (the `curl -v`
+   leak) is found — and UTF-16 of an ASCII value, as a Windows console redirect
+   writes it. A base64 match needs at least 8 characters determined by the value
+   alone, so short values don't shred unrelated output.
+
 Redaction is a **defense-in-depth** measure, not a guarantee against a hostile
-child: a child that holds the value can encode it (base64, reversed, one
-character per line) and defeat any substring scrubber. It defends against the
-ordinary case — a program that logs its own configuration — which is how secrets
-actually leak in practice. The primary defense remains that no *tool* returns a
-secret at all.
+child: a child that holds the value can transform it deliberately (reverse it,
+encrypt it, print one character per line) and defeat any scrubber. It defends
+against the ordinary case — a program that logs its own configuration or a
+request — which is how secrets actually leak in practice. The primary defense
+remains that no *tool* returns a secret at all.
 
 ---
 
 ## 7. Threat notes
 
-- **A prompt-injected agent** can call any tool with any arguments. The worst it
-  achieves is running a command with a secret in its environment — which is
-  exactly the capability the user granted by starting the server. It cannot read
-  a value back, and it cannot mutate or export a vault (§3).
+- **A prompt-injected agent** can call any tool with any arguments, and no
+  *tool* returns a secret or mutates or exports a vault (§3). But
+  `run_with_secrets` is **arbitrary command execution as the user**, so be
+  precise about what that does and doesn't cover:
+  - The server refuses to run a LocalPass executable (`localpass`,
+    `localpass-daemon`, `localpass-native-host`, or the running binary by path)
+    as the child program, and every child runs with `LOCALPASS_MCP_CHILD=1`. A
+    LocalPass CLI started anywhere under that child — a script, a package hook —
+    refuses everything except `status` and `generate`. That stops the obvious
+    read-back (`localpass item get X --field password`, whose output the
+    redactor would not recognise because the value was never injected) and
+    stops a child arming agent fill (`agent-fill.md` §7).
+  - **These are guards, not a boundary.** A deliberately hostile child can
+    unset the variable, or talk to an unlocked daemon's IPC endpoint directly:
+    it runs as the same user, and the daemon admits every same-user client.
+    While the daemon is unlocked, treat `run_with_secrets` as able to reach any
+    secret in the vault. If the agent may read untrusted content (repositories,
+    web pages, issues), run the server on the **direct route** with the daemon
+    locked, or don't enable `run_with_secrets`. Requiring human presence for
+    reveal and consent requests while an MCP session is active is a planned
+    daemon-side boundary.
 - **A hostile child process** can exfiltrate the value it was given, by any
   channel it likes. `run_with_secrets` is a capability grant to the command the
   agent chose to run; scope it by choosing which references to inject, not by
   trusting the child.
 - **Transcript capture** is the threat this surface exists to defeat, and §1
-  covers it.
+  covers it. Item **notes** count as secret for this purpose: `list_items` and
+  `get_item` show only whether an item has notes (the mask), never their text —
+  for the `note` type the notes *are* the secret.
 - **The server holds an unlocked session between tool calls** on the direct
   route. It is bounded by the idle auto-lock in §3.1 — a forgotten server locks
   itself — but within the window the key material is in this process's memory,

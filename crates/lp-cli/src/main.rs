@@ -95,6 +95,14 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     };
     let no_daemon = cli.no_daemon;
 
+    // Inside a `run_with_secrets` child, refuse everything that could read a
+    // secret or grant consent (defence in depth; see `mcp::child`).
+    if mcp::child::marker_set(std::env::var(mcp::child::MCP_CHILD_ENV).ok().as_deref())
+        && !mcp::child::allowed_in_mcp_child(&cli.command)
+    {
+        return Err(CliError::auth(mcp::child::refusal_message()).into());
+    }
+
     match &cli.command {
         Command::Init(args) => commands::init::run(&profile_dir, src, args),
         Command::Status { json } => commands::status::run(&profile_dir, src, no_daemon, *json),

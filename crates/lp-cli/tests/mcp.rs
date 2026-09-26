@@ -512,3 +512,211 @@ fn assert_no_secret(reply: &str, what: &str) {
         );
     }
 }
+
+/// Handshake helper for the focused tests below.
+fn initialized(mcp: &mut McpServer) {
+    mcp.request(
+        "initialize",
+        json!({
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": { "name": "integration-test", "version": "0" },
+        }),
+    );
+    mcp.notify("notifications/initialized");
+}
+
+/// LP-MCP-01: `run_with_secrets` must not run LocalPass itself. The audit's
+/// payload asks the child to print a password the tool never injected (so the
+/// redactor would never look for it). The spawn is refused outright.
+#[test]
+fn run_with_secrets_refuses_to_run_localpass_itself() {
+    let profile = TestProfile::initialized();
+    seed(&profile);
+    let mut mcp = McpServer::spawn(&profile);
+    initialized(&mut mcp);
+
+    let exe = assert_cmd::cargo::cargo_bin("localpass");
+    for program in [json!("localpass"), json!(exe.to_str().unwrap())] {
+        let (result, body) = mcp.call_tool(
+            "run_with_secrets",
+            json!({
+                "command": [program, "item", "get", "Prod DB", "--field", "password"],
+                "timeout_secs": 60,
+            }),
+        );
+        assert_eq!(result["isError"], json!(true), "must be refused: {result}");
+        assert!(
+            result
+                .to_string()
+                .contains("cannot run a LocalPass executable"),
+            "refusal must say why: {result}"
+        );
+        assert_no_secret(&result.to_string(), "refused run_with_secrets");
+        let _ = body;
+    }
+    mcp.shutdown();
+}
+
+/// LP-MCP-01: every child runs with the MCP-child marker set, and a LocalPass
+/// CLI reached indirectly (here through a shell) refuses to read the vault.
+#[test]
+fn run_with_secrets_children_carry_the_marker_and_localpass_refuses_inside_them() {
+    let profile = TestProfile::initialized();
+    seed(&profile);
+    let mut mcp = McpServer::spawn(&profile);
+    initialized(&mut mcp);
+
+    let (_, marker) = mcp.call_tool(
+        "run_with_secrets",
+        json!({ "command": echo_var_command("LOCALPASS_MCP_CHILD"), "timeout_secs": 60 }),
+    );
+    assert_eq!(marker["stdout"].as_str().unwrap().trim(), "1", "{marker}");
+
+    // Indirect: a shell that calls localpass. The spawn guard can't see it,
+    // the marker must stop it.
+    let exe = assert_cmd::cargo::cargo_bin("localpass");
+    let exe = exe.to_str().unwrap();
+    let profile_dir = profile.path().to_str().unwrap().to_string();
+    #[cfg(windows)]
+    let command = json!([
+        "cmd",
+        "/c",
+        exe,
+        "--profile",
+        profile_dir,
+        "--no-daemon",
+        "item",
+        "get",
+        "Prod DB",
+        "--field",
+        "password"
+    ]);
+    #[cfg(not(windows))]
+    let command = json!([
+        "sh",
+        "-c",
+        format!(
+            "'{exe}' --profile '{profile_dir}' --no-daemon item get 'Prod DB' --field password"
+        )
+    ]);
+
+    let (result, body) = mcp.call_tool(
+        "run_with_secrets",
+        json!({ "command": command, "timeout_secs": 60 }),
+    );
+    assert_eq!(
+        result["isError"],
+        json!(false),
+        "the shell itself runs: {result}"
+    );
+    assert_ne!(
+        body["exit_code"],
+        json!(0),
+        "the nested localpass must fail: {body}"
+    );
+    assert!(
+        body["stderr"]
+            .as_str()
+            .unwrap()
+            .contains("LOCALPASS_MCP_CHILD is set"),
+        "the nested localpass must refuse because of the marker: {body}"
+    );
+    assert_no_secret(&result.to_string(), "nested localpass");
+    mcp.shutdown();
+}
+
+/// LP-MCP-02: a secure note's body (and any item's notes) never reaches the
+/// transcript through list_items or get_item.
+#[test]
+fn notes_are_masked_in_list_and_get() {
+    const PLANTED_NOTE: &str = "recovery codes 7f2c-11aa 93bd-04ee";
+    let profile = TestProfile::initialized();
+    profile
+        .cmd()
+        .args([
+            "item",
+            "add",
+            "--type",
+            "note",
+            "--title",
+            "Recovery",
+            "--note",
+            PLANTED_NOTE,
+        ])
+        .assert()
+        .success();
+    let mut mcp = McpServer::spawn(&profile);
+    initialized(&mut mcp);
+
+    let (list, _) = mcp.call_tool("list_items", json!({}));
+    assert!(
+        !list.to_string().contains(PLANTED_NOTE),
+        "list_items leaked the note: {list}"
+    );
+    let (get, body) = mcp.call_tool("get_item", json!({ "item": "Recovery" }));
+    assert_eq!(get["isError"], json!(false), "{get}");
+    assert!(
+        !get.to_string().contains(PLANTED_NOTE),
+        "get_item leaked the note: {get}"
+    );
+    assert_eq!(
+        body["item"]["notes"],
+        json!("••••••"),
+        "notes must show the mask: {body}"
+    );
+    mcp.shutdown();
+}
+
+/// LP-MCP-01, CLI side: with the marker set, the CLI refuses vault commands
+/// but still answers `status` and `generate`.
+#[test]
+fn the_cli_refuses_vault_commands_when_the_mcp_child_marker_is_set() {
+    let profile = TestProfile::initialized();
+    seed(&profile);
+    for args in [
+        &[
+            "--no-daemon",
+            "item",
+            "get",
+            "Prod DB",
+            "--field",
+            "password",
+        ][..],
+        &["--no-daemon", "item", "list"],
+        &["--no-daemon", "agent-fill", "arm", "--item", "Prod DB"],
+    ] {
+        let out = profile
+            .cmd()
+            .env("LOCALPASS_MCP_CHILD", "1")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{args:?} must be refused");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("LOCALPASS_MCP_CHILD is set"),
+            "{args:?}: {stderr}"
+        );
+        assert!(!String::from_utf8_lossy(&out.stdout).contains(PLANTED_PASSWORD));
+    }
+    profile
+        .cmd()
+        .env("LOCALPASS_MCP_CHILD", "1")
+        .args(["generate"])
+        .assert()
+        .success();
+    profile
+        .cmd()
+        .env("LOCALPASS_MCP_CHILD", "1")
+        .args(["status"])
+        .assert()
+        .success();
+    // An empty value is not the marker.
+    profile
+        .cmd()
+        .env("LOCALPASS_MCP_CHILD", "")
+        .args(["item", "list"])
+        .assert()
+        .success();
+}
