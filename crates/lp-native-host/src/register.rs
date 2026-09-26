@@ -16,14 +16,21 @@
 //! - **macOS / Linux:** no registry — the browser reads the manifest from a
 //!   well-known per-user directory (see [`manifest_dir`]).
 //!
-//! # Extension id placeholder
+//! # Extension ids
 //!
-//! LocalPass has no published extension id yet, so the manifest uses a documented
-//! placeholder ([`PLACEHOLDER_CHROME_EXTENSION_ID`] /
-//! [`PLACEHOLDER_FIREFOX_EXTENSION_ID`]), overridable with `--extension-id`. The
-//! placeholder is intentionally obvious; a real install passes the published id.
 //! The allowlist is the browser-enforced gate on *which* extension may talk to
-//! the host, so it must be set correctly for the real extension before shipping.
+//! the host, so it must name the real extension.
+//!
+//! - **Chrome:** LocalPass has no published extension id yet, so the manifest
+//!   uses the obvious placeholder [`PLACEHOLDER_CHROME_EXTENSION_ID`] until
+//!   `--extension-id` supplies the real one. That is safe as a default: a Chrome
+//!   extension id is derived from the extension's signing key, so nobody can
+//!   obtain the all-`a` id.
+//! - **Firefox:** there is **no default**. A Firefox add-on id is self-declared
+//!   in the add-on's own manifest (`browser_specific_settings.gecko.id`), so
+//!   any placeholder we baked in could be claimed by any add-on, and that add-on
+//!   would be allowlisted to drive fills. Registering Firefox without
+//!   `--extension-id` is an error ([`Error::MissingExtensionId`]).
 //!
 //! # What this module does and does not touch
 //!
@@ -46,10 +53,6 @@ pub const HOST_NAME: &str = "com.localpass.host";
 /// `chrome-extension://<32-char-id>/`. The id here is the obvious all-`a`
 /// placeholder; override with `--extension-id`.
 pub const PLACEHOLDER_CHROME_EXTENSION_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-
-/// The placeholder **Firefox** extension id (an addon id — an email-like or
-/// UUID-in-braces string). Override with `--extension-id`.
-pub const PLACEHOLDER_FIREFOX_EXTENSION_ID: &str = "localpass@localpass.dev";
 
 /// Which browser family a registration targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,12 +128,13 @@ pub fn build_manifest(browser: Browser, host_binary: &Path, extension_id: &str) 
     }
 }
 
-/// The default placeholder extension id for `browser` when none is supplied.
+/// The placeholder extension id for `browser` when none is supplied, if it has
+/// a safe one. Firefox has none (see the module docs).
 #[must_use]
-pub fn default_extension_id(browser: Browser) -> &'static str {
+pub fn default_extension_id(browser: Browser) -> Option<&'static str> {
     match browser {
-        Browser::Chrome => PLACEHOLDER_CHROME_EXTENSION_ID,
-        Browser::Firefox => PLACEHOLDER_FIREFOX_EXTENSION_ID,
+        Browser::Chrome => Some(PLACEHOLDER_CHROME_EXTENSION_ID),
+        Browser::Firefox => None,
     }
 }
 
@@ -211,15 +215,15 @@ pub struct Registration {
 }
 
 /// Register the host for `browser`, pointing at `host_binary` and allowlisting
-/// `extension_id` (or the placeholder if `None`). Writes the manifest file and,
+/// `extension_id` (or Chrome's placeholder if `None`). Writes the manifest file and,
 /// on Windows, the `HKCU\...\NativeMessagingHosts\com.localpass.host` registry
 /// value pointing at it.
 ///
 /// # Errors
 ///
 /// [`Error::Io`] on a filesystem failure, [`Error::Registry`] on a Windows
-/// registry failure, or [`Error::NoConfigDir`] if the target directory cannot be
-/// resolved.
+/// registry failure, [`Error::NoConfigDir`] if the target directory cannot be
+/// resolved, or [`Error::MissingExtensionId`] for Firefox without an id.
 pub fn register(
     browser: Browser,
     host_binary: &Path,
@@ -238,17 +242,20 @@ pub fn register(
 ///
 /// # Errors
 ///
-/// [`Error::Io`] on a filesystem failure or [`Error::Serde`] on a serialization
-/// failure.
+/// [`Error::Io`] on a filesystem failure, [`Error::Serde`] on a serialization
+/// failure, or [`Error::MissingExtensionId`] when no usable id was given for a
+/// browser without a safe default.
 pub fn write_manifest_at(
     browser: Browser,
     host_binary: &Path,
     extension_id: Option<&str>,
     manifest_path: &Path,
 ) -> Result<Registration> {
-    let used_placeholder = extension_id.is_none();
-    let extension_id = extension_id
-        .unwrap_or_else(|| default_extension_id(browser))
+    let supplied = extension_id.map(str::trim).filter(|id| !id.is_empty());
+    let used_placeholder = supplied.is_none();
+    let extension_id = supplied
+        .or_else(|| default_extension_id(browser))
+        .ok_or(Error::MissingExtensionId(browser.token()))?
         .to_string();
     let manifest = build_manifest(browser, host_binary, &extension_id);
     let json = serde_json::to_string_pretty(&manifest).map_err(Error::Serde)?;
@@ -369,26 +376,23 @@ mod tests {
         let m = build_manifest(
             Browser::Firefox,
             &PathBuf::from("/opt/localpass/localpass-native-host"),
-            "localpass@localpass.dev",
+            "localpass@example.org",
         );
         let json = serde_json::to_value(&m).unwrap();
         assert_eq!(json["name"], HOST_NAME);
         assert_eq!(json["type"], "stdio");
-        assert_eq!(json["allowed_extensions"][0], "localpass@localpass.dev");
+        assert_eq!(json["allowed_extensions"][0], "localpass@example.org");
         // Chrome key must be absent for Firefox.
         assert!(json.get("allowed_origins").is_none());
     }
 
     #[test]
-    fn default_extension_ids_are_placeholders() {
+    fn only_chrome_has_a_default_extension_id() {
         assert_eq!(
             default_extension_id(Browser::Chrome),
-            PLACEHOLDER_CHROME_EXTENSION_ID
+            Some(PLACEHOLDER_CHROME_EXTENSION_ID)
         );
-        assert_eq!(
-            default_extension_id(Browser::Firefox),
-            PLACEHOLDER_FIREFOX_EXTENSION_ID
-        );
+        assert_eq!(default_extension_id(Browser::Firefox), None);
     }
 
     #[test]
@@ -425,16 +429,48 @@ mod tests {
     }
 
     #[test]
-    fn write_manifest_at_uses_placeholder_when_no_id() {
+    fn chrome_uses_its_placeholder_when_no_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("chrome.json");
+        let host = PathBuf::from("/opt/localpass/localpass-native-host");
+        let reg = write_manifest_at(Browser::Chrome, &host, None, &path).unwrap();
+        assert!(reg.used_placeholder);
+        assert_eq!(reg.extension_id, PLACEHOLDER_CHROME_EXTENSION_ID);
+    }
+
+    #[test]
+    fn firefox_without_an_id_is_refused_and_writes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("firefox.json");
         let host = PathBuf::from("/opt/localpass/localpass-native-host");
-        let reg = write_manifest_at(Browser::Firefox, &host, None, &path).unwrap();
-        assert!(reg.used_placeholder);
-        assert_eq!(reg.extension_id, PLACEHOLDER_FIREFOX_EXTENSION_ID);
-        let contents = std::fs::read_to_string(&reg.manifest_path).unwrap();
-        assert!(contents.contains(PLACEHOLDER_FIREFOX_EXTENSION_ID));
-        assert!(contents.contains("allowed_extensions"));
+        for missing in [None, Some(""), Some("   ")] {
+            let err = write_manifest_at(Browser::Firefox, &host, missing, &path).unwrap_err();
+            assert!(matches!(err, Error::MissingExtensionId("firefox")), "{err}");
+            assert!(err.to_string().contains("--extension-id"));
+        }
+        assert!(!path.exists(), "no manifest may be written without an id");
+    }
+
+    #[test]
+    fn firefox_with_an_explicit_id_allowlists_exactly_that_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("firefox.json");
+        let host = PathBuf::from("/opt/localpass/localpass-native-host");
+        let reg = write_manifest_at(
+            Browser::Firefox,
+            &host,
+            Some(" localpass@example.org "),
+            &path,
+        )
+        .unwrap();
+        assert!(!reg.used_placeholder);
+        assert_eq!(reg.extension_id, "localpass@example.org");
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            json["allowed_extensions"],
+            serde_json::json!(["localpass@example.org"])
+        );
     }
 
     #[test]

@@ -114,6 +114,23 @@ fn register_cmd(
     let browsers = targets(chrome, firefox, all);
 
     for browser in browsers {
+        match firefox_plan(browser, firefox, extension_id) {
+            Plan::Register => {}
+            Plan::Skip => {
+                println!(
+                    "Skipped firefox: it needs --firefox --extension-id <add-on id>. A Firefox \
+                     add-on id is self-declared, so LocalPass will not allowlist a default one."
+                );
+                continue;
+            }
+            Plan::Refuse => {
+                return Err(CliError::usage(
+                    "--firefox needs --extension-id <add-on id> (the id of your installed \
+                     LocalPass add-on): there is no safe default for Firefox",
+                )
+                .into());
+            }
+        }
         let reg = register::register(browser, &host_binary, extension_id)
             .map_err(|e| CliError::internal(anyhow!("registering {}: {e}", browser.token())))?;
         report_register(&reg);
@@ -122,6 +139,28 @@ fn register_cmd(
     println!("The extension talks to LocalPass over native messaging (no localhost port).");
     println!("Install the LocalPass browser extension, then use autofill on an explicit gesture.");
     Ok(())
+}
+
+/// What `browser register` does for one target browser.
+#[derive(Debug, PartialEq, Eq)]
+enum Plan {
+    Register,
+    /// Firefox was only implied (no browser flag / `--all`) and no id was given.
+    Skip,
+    /// `--firefox` was asked for explicitly without an id.
+    Refuse,
+}
+
+/// Firefox has no safe default extension id (see `lp_native_host::register`),
+/// so without `--extension-id` it is skipped when merely implied and refused
+/// when explicitly requested. Chrome always registers.
+fn firefox_plan(browser: Browser, firefox_flag: bool, extension_id: Option<&str>) -> Plan {
+    let has_id = extension_id.is_some_and(|id| !id.trim().is_empty());
+    match (browser, has_id, firefox_flag) {
+        (Browser::Firefox, false, true) => Plan::Refuse,
+        (Browser::Firefox, false, false) => Plan::Skip,
+        _ => Plan::Register,
+    }
 }
 
 /// `browser unregister`.
@@ -176,6 +215,30 @@ mod tests {
             targets(false, false, true),
             vec![Browser::Chrome, Browser::Firefox]
         );
+    }
+
+    #[test]
+    fn firefox_without_an_id_is_skipped_when_implied_and_refused_when_asked_for() {
+        assert_eq!(firefox_plan(Browser::Firefox, false, None), Plan::Skip);
+        assert_eq!(firefox_plan(Browser::Firefox, true, None), Plan::Refuse);
+        assert_eq!(
+            firefox_plan(Browser::Firefox, true, Some("  ")),
+            Plan::Refuse
+        );
+        assert_eq!(
+            firefox_plan(Browser::Firefox, true, Some("lp@example.org")),
+            Plan::Register
+        );
+        assert_eq!(
+            firefox_plan(Browser::Firefox, false, Some("lp@example.org")),
+            Plan::Register
+        );
+    }
+
+    #[test]
+    fn chrome_always_registers() {
+        assert_eq!(firefox_plan(Browser::Chrome, false, None), Plan::Register);
+        assert_eq!(firefox_plan(Browser::Chrome, true, None), Plan::Register);
     }
 
     #[test]
