@@ -10,7 +10,7 @@
 <script lang="ts">
   import { generatePassword, generatePassphrase } from "../lib/api";
   import type { GeneratedView } from "../lib/types";
-  import { copyToClipboard } from "../lib/clipboard";
+  import { copySecret } from "../lib/clipboard";
   import { formatEntropy, strengthBand } from "../lib/format";
   import { toast } from "../lib/toast";
 
@@ -47,7 +47,7 @@
 
   async function copy() {
     if (!result) return;
-    const ok = await copyToClipboard(result.secret);
+    const ok = await copySecret(result.secret);
     toast(ok ? "Copied to clipboard" : "Copy failed", ok ? "ok" : "error");
   }
 

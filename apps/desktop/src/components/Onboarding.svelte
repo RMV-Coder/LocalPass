@@ -16,7 +16,7 @@
 <script lang="ts">
   import { createAccount } from "../lib/api";
   import type { CreatedAccount } from "../lib/types";
-  import { copyToClipboard } from "../lib/clipboard";
+  import { copySecret } from "../lib/clipboard";
   import { toast } from "../lib/toast";
 
   interface Props {
@@ -66,7 +66,7 @@
 
   async function copyKey() {
     if (!kit) return;
-    const ok = await copyToClipboard(kit.secret_key);
+    const ok = await copySecret(kit.secret_key);
     toast(ok ? "Secret Key copied" : "Copy failed", ok ? "ok" : "error");
   }
 
