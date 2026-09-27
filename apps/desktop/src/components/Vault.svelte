@@ -10,7 +10,8 @@
 <script lang="ts">
   import { listVaults, createVault, deleteVault, listItems, listTrash, untrashItem, search as searchApi, getItem } from "../lib/api";
   import type { VaultView, ItemSummaryView, ItemView, TrashEntryView } from "../lib/types";
-  import { typeLabel, formatTimestamp } from "../lib/format";
+  import { typeLabel, formatTimestamp, formatShortDate, isoTimestamp } from "../lib/format";
+  import Icon, { type IconName } from "./Icon.svelte";
   import ItemDetail from "./ItemDetail.svelte";
   import ItemForm from "./ItemForm.svelte";
   import Generator from "./Generator.svelte";
@@ -282,6 +283,21 @@
     view = next;
     if (next === "item") selectedItem = "";
   }
+
+  // The non-vault sections, shared by the desktop sidebar and (with the extra
+  // Items tab) the mobile tab bar so both stay in sync.
+  type ToolView = "generator" | "security" | "devices" | "dev" | "help";
+  const tools: { view: ToolView; label: string; short: string; icon: IconName }[] = [
+    { view: "generator", label: "Generator", short: "Generator", icon: "generator" },
+    { view: "security", label: "Security", short: "Security", icon: "security" },
+    { view: "devices", label: "Devices & Sync", short: "Devices", icon: "devices" },
+    { view: "dev", label: "Dev", short: "Dev", icon: "dev" },
+    { view: "help", label: "Help", short: "Help", icon: "help" },
+  ];
+  function openTool(next: ToolView) {
+    view = next;
+    selectedItem = "";
+  }
 </script>
 
 <!-- The inline new-vault form, shared between the desktop sidebar and the
@@ -313,8 +329,8 @@
 >
   <!-- Vault sidebar -->
   <nav class="pane vault-pane" aria-label="Vaults">
-    <div class="pane-header" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-      <p class="pane-title" style="margin:0">Vaults</p>
+    <div class="pane-header pane-header-row">
+      <p class="pane-title">Vaults</p>
       <button
         class="btn btn-small"
         onclick={() => { creatingVault = !creatingVault; newVaultName = ""; }}
@@ -340,58 +356,21 @@
         {/each}
       </ul>
     {/if}
-    <div class="pane-header" style="position:static;border-top:1px solid var(--border);border-bottom:none">
-      <button
-        class="row {view === 'generator' ? 'selected' : ''}"
-        aria-current={view === "generator"}
-        onclick={() => {
-          view = "generator";
-          selectedItem = "";
-        }}
-      >
-        <span class="row-title">Generator</span>
-      </button>
-      <button
-        class="row {view === 'security' ? 'selected' : ''}"
-        aria-current={view === "security"}
-        onclick={() => {
-          view = "security";
-          selectedItem = "";
-        }}
-      >
-        <span class="row-title">Security</span>
-      </button>
-      <button
-        class="row {view === 'devices' ? 'selected' : ''}"
-        aria-current={view === "devices"}
-        onclick={() => {
-          view = "devices";
-          selectedItem = "";
-        }}
-      >
-        <span class="row-title">Devices &amp; Sync</span>
-      </button>
-      <button
-        class="row {view === 'dev' ? 'selected' : ''}"
-        aria-current={view === "dev"}
-        onclick={() => {
-          view = "dev";
-          selectedItem = "";
-        }}
-      >
-        <span class="row-title">Dev</span>
-      </button>
-      <button
-        class="row {view === 'help' ? 'selected' : ''}"
-        aria-current={view === "help"}
-        onclick={() => {
-          view = "help";
-          selectedItem = "";
-        }}
-      >
-        <span class="row-title">Help</span>
-      </button>
-    </div>
+    <ul class="list nav-list" aria-label="Tools">
+      {#each tools as t (t.view)}
+        <li>
+          <button
+            class="row nav-row"
+            class:selected={view === t.view}
+            aria-current={view === t.view ? "page" : undefined}
+            onclick={() => openTool(t.view)}
+          >
+            <Icon name={t.icon} />
+            <span class="row-title">{t.label}</span>
+          </button>
+        </li>
+      {/each}
+    </ul>
   </nav>
 
   <!-- Item list + search -->
@@ -414,7 +393,7 @@
         </div>
         {#if creatingVault}{@render newVaultForm()}{/if}
       </div>
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:0.5rem">
+      <div class="pane-header-row">
         <p class="pane-title">{currentVaultName || "Items"}</p>
         <button
           class="btn btn-small btn-primary"
@@ -425,7 +404,7 @@
           + Add
         </button>
       </div>
-      <div style="margin-top:0.5rem">
+      <div class="search-row">
         <label for="item-search" class="sr-only">Search items</label>
         <input
           id="item-search"
@@ -437,13 +416,6 @@
           spellcheck="false"
         />
       </div>
-      {#if selectedVault}
-        <div class="vault-danger-row">
-          <button type="button" class="link-danger" onclick={openDeleteVault}>
-            Delete vault…
-          </button>
-        </div>
-      {/if}
     </div>
 
     {#if error}
@@ -468,8 +440,11 @@
             >
               <span class="row-title">{it.title}</span>
               <span class="row-meta">
-                <span class="badge">{typeLabel(it.type_str)}</span>
-                <span>{formatTimestamp(it.updated_at)}</span>
+                <span>{typeLabel(it.type_str)}</span>
+                <span aria-hidden="true">·</span>
+                <time datetime={isoTimestamp(it.updated_at)} title={`Updated ${formatTimestamp(it.updated_at)}`}
+                  >{formatShortDate(it.updated_at)}</time
+                >
               </span>
             </button>
           </li>
@@ -480,33 +455,38 @@
     <!-- Trash: deleted items, recoverable for 30 days (PRD §4.10). Collapsed by
          default; loads (decrypts titles) only when opened. -->
     {#if selectedVault}
-      <div style="border-top:1px solid var(--border);margin-top:auto">
+      <div class="vault-footer">
         <button
-          class="row"
+          class="row trash-toggle"
           aria-expanded={showTrash}
           onclick={toggleTrash}
           title="Deleted items are recoverable for 30 days"
         >
-          <span class="row-title">🗑 Trash</span>
+          <Icon name="trash" />
+          <span class="row-title">Trash</span>
           {#if showTrash && !trashLoading}
-            <span class="row-meta"><span class="badge">{trash.length}</span></span>
+            <span class="count">{trash.length}</span>
           {/if}
+          <span class="chev" class:open={showTrash}><Icon name="chevron" size={14} /></span>
         </button>
         {#if showTrash}
           {#if trashLoading}
             <p class="empty">Loading…</p>
           {:else if trash.length === 0}
-            <p class="empty">Trash is empty.</p>
+            <p class="empty">Trash is empty. Deleted items stay here for 30 days.</p>
           {:else}
             <ul class="list" aria-label="Trashed items">
               {#each trash as t (t.id)}
                 <li>
-                  <div class="row" style="display:flex;align-items:center;gap:0.5rem">
-                    <span style="flex:1;min-width:0">
+                  <div class="row trash-row">
+                    <span class="trash-main">
                       <span class="row-title">{t.title}</span>
                       <span class="row-meta">
-                        <span class="badge">{typeLabel(t.type_str)}</span>
-                        <span>deleted {formatTimestamp(t.deleted_at)}</span>
+                        <span>{typeLabel(t.type_str)}</span>
+                        <span aria-hidden="true">·</span>
+                        <time datetime={isoTimestamp(t.deleted_at)} title={`Deleted ${formatTimestamp(t.deleted_at)}`}
+                          >deleted {formatShortDate(t.deleted_at)}</time
+                        >
                       </span>
                     </span>
                     <button
@@ -522,6 +502,13 @@
             </ul>
           {/if}
         {/if}
+        <!-- Vault-level destructive action: kept out of the search/add path and
+             behind the typed-confirmation modal below. -->
+        <div class="vault-danger-row">
+          <button type="button" class="btn btn-small btn-ghost btn-ghost-danger" onclick={openDeleteVault}>
+            Delete vault…
+          </button>
+        </div>
       </div>
     {/if}
   </section>
@@ -579,25 +566,20 @@
 <nav class="mobile-tabbar" aria-label="Sections">
   <button
     class:active={mobileScreen === "list" || mobileScreen === "detail" || mobileScreen === "form"}
+    aria-current={mobileScreen === "list" || mobileScreen === "detail" || mobileScreen === "form" ? "page" : undefined}
     onclick={() => goTab("item")}
   >
-    <span class="ico" aria-hidden="true">🔑</span><span>Items</span>
+    <span class="ico"><Icon name="items" size={20} /></span><span>Items</span>
   </button>
-  <button class:active={mobileScreen === "generator"} onclick={() => goTab("generator")}>
-    <span class="ico" aria-hidden="true">🎲</span><span>Generator</span>
-  </button>
-  <button class:active={mobileScreen === "security"} onclick={() => goTab("security")}>
-    <span class="ico" aria-hidden="true">🛡️</span><span>Security</span>
-  </button>
-  <button class:active={mobileScreen === "devices"} onclick={() => goTab("devices")}>
-    <span class="ico" aria-hidden="true">🔗</span><span>Devices</span>
-  </button>
-  <button class:active={mobileScreen === "dev"} onclick={() => goTab("dev")}>
-    <span class="ico" aria-hidden="true">🧰</span><span>Dev</span>
-  </button>
-  <button class:active={mobileScreen === "help"} onclick={() => goTab("help")}>
-    <span class="ico" aria-hidden="true">❔</span><span>Help</span>
-  </button>
+  {#each tools as t (t.view)}
+    <button
+      class:active={mobileScreen === t.view}
+      aria-current={mobileScreen === t.view ? "page" : undefined}
+      onclick={() => goTab(t.view)}
+    >
+      <span class="ico"><Icon name={t.icon} size={20} /></span><span>{t.short}</span>
+    </button>
+  {/each}
 </nav>
 
 <!-- Destructive: delete the selected vault, gated by a typed confirmation. -->

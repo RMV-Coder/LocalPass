@@ -10,6 +10,10 @@ import {
   groupTotp,
   humanSize,
   MASK,
+  humanizeKey,
+  fieldLabel,
+  formatShortDate,
+  isoTimestamp,
 } from "./format";
 
 describe("typeLabel", () => {
@@ -19,8 +23,13 @@ describe("typeLabel", () => {
     expect(typeLabel("ssh_key")).toBe("SSH key");
     expect(typeLabel("totp")).toBe("TOTP");
   });
-  it("passes unknown types through unchanged", () => {
-    expect(typeLabel("mystery")).toBe("mystery");
+  it("maps the backend's note type", () => {
+    expect(typeLabel("note")).toBe("Secure note");
+    expect(typeLabel("env_set")).toBe("Env set");
+  });
+  it("humanizes unknown types instead of showing the raw key", () => {
+    expect(typeLabel("mystery")).toBe("Mystery");
+    expect(typeLabel("secure_note")).toBe("Secure note");
   });
 });
 
@@ -88,5 +97,66 @@ describe("humanSize", () => {
   it("renders invalid/negative sizes as em-dash", () => {
     expect(humanSize(-1)).toBe("—");
     expect(humanSize(Number.NaN)).toBe("—");
+  });
+});
+
+describe("humanizeKey", () => {
+  it("converts snake/kebab case to sentence case", () => {
+    expect(humanizeKey("credit_card")).toBe("Credit card");
+    expect(humanizeKey("wifi-network")).toBe("Wifi network");
+  });
+  it("returns the input unchanged when there is nothing to show", () => {
+    expect(humanizeKey("")).toBe("");
+    expect(humanizeKey("__")).toBe("__");
+  });
+});
+
+describe("fieldLabel", () => {
+  it("relabels built-in field names", () => {
+    expect(fieldLabel("username", "login")).toBe("Username");
+    expect(fieldLabel("url", "login")).toBe("URL");
+    expect(fieldLabel("private_pem", "ssh_key")).toBe("Private key");
+    expect(fieldLabel("secret", "api_key")).toBe("Secret");
+  });
+  it("never rewrites env-set variable names", () => {
+    expect(fieldLabel("url", "env_set")).toBe("url");
+    expect(fieldLabel("DATABASE_URL", "env_set")).toBe("DATABASE_URL");
+  });
+  it("leaves custom field names exactly as typed", () => {
+    expect(fieldLabel("Recovery PIN", "login")).toBe("Recovery PIN");
+    expect(fieldLabel("toString", "login")).toBe("toString");
+  });
+});
+
+describe("formatShortDate", () => {
+  const now = new Date(2026, 8, 26, 15, 0).getTime(); // Sep 26, 2026 15:00 local
+
+  it("returns an em dash for zero/invalid", () => {
+    expect(formatShortDate(0, now)).toBe("—");
+    expect(formatShortDate(Number.NaN, now)).toBe("—");
+  });
+  it("shows only the time for today", () => {
+    const s = formatShortDate(new Date(2026, 8, 26, 8, 41).getTime(), now);
+    expect(s).toMatch(/41/);
+    expect(s).not.toMatch(/2026/);
+    expect(s).not.toMatch(/Sep/);
+  });
+  it("shows month and day (no year) within the current year", () => {
+    const s = formatShortDate(new Date(2026, 5, 28, 9, 0).getTime(), now);
+    expect(s).toMatch(/28/);
+    expect(s).not.toMatch(/2026/);
+    expect(s).not.toMatch(/:/);
+  });
+  it("includes the year for older dates", () => {
+    const s = formatShortDate(new Date(2025, 11, 31, 9, 0).getTime(), now);
+    expect(s).toMatch(/2025/);
+  });
+});
+
+describe("isoTimestamp", () => {
+  it("produces an ISO string or empty", () => {
+    expect(isoTimestamp(0)).toBe("");
+    expect(isoTimestamp(Number.NaN)).toBe("");
+    expect(isoTimestamp(1_700_000_000_000)).toBe("2023-11-14T22:13:20.000Z");
   });
 });

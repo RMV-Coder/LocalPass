@@ -15,6 +15,7 @@
 //! the MPL GUI (PRD §5.6). It reaches the core only via the `lp-daemon` path
 //! dependency — as a client, exactly like the CLI and the native-messaging host.
 
+pub mod clipboard;
 pub mod commands;
 pub mod daemon;
 pub mod dotenv;
@@ -98,6 +99,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::ensure_service,
+            commands::copy_secret,
             commands::status,
             commands::create_account,
             commands::unlock,
