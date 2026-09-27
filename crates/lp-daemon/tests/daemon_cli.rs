@@ -470,3 +470,115 @@ fn daemon_binary_is_built_alongside_cli() {
         daemon.display()
     );
 }
+
+/// Human presence (`mcp-server.md` §7), end to end: while `localpass mcp` is
+/// connected, a CLI change asks for the master password — refused when there
+/// is none to read, allowed when there is, refused on a wrong one — and once
+/// the MCP server exits, the change goes through with no password again.
+#[test]
+fn an_mcp_session_makes_changes_ask_for_the_password() {
+    use std::process::{Command as StdCommand, Stdio};
+    use std::time::{Duration, Instant};
+
+    let p = DaemonProfile::initialized("presence");
+    p.cmd().args(["daemon", "start"]).assert().success();
+    p.cmd().arg("unlock").assert().success();
+
+    let agent_connected = || {
+        let out = p
+            .cmd()
+            .args(["daemon", "status", "--json"])
+            .assert()
+            .success();
+        let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+        v["agent_session"] == serde_json::json!(true)
+    };
+    let wait_for = |want: bool| {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while agent_connected() != want {
+            assert!(
+                Instant::now() < deadline,
+                "agent_session never became {want}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    let add = |title: &str| {
+        let mut cmd = p.cmd_no_password();
+        cmd.args([
+            "--no-input",
+            "item",
+            "add",
+            "--title",
+            title,
+            "--password",
+            "pw1",
+        ]);
+        cmd
+    };
+
+    // The agent: an MCP server on the daemon route, its stdin held open.
+    let mut mcp = StdCommand::new(assert_cmd::cargo::cargo_bin("localpass"))
+        .env_remove("LOCALPASS_PASSWORD")
+        .env("USERNAME", &p.endpoint_user)
+        .env("USER", &p.endpoint_user)
+        .arg("--profile")
+        .arg(p.path())
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn localpass mcp");
+    wait_for(true);
+
+    p.cmd()
+        .args(["daemon", "status"])
+        .assert()
+        .success()
+        .stdout(contains("AI agent: connected"));
+
+    // No password to read (--no-input, no env var): refused, nothing written.
+    add("Blocked")
+        .assert()
+        .failure()
+        .stderr(contains("AI agent is connected"));
+    // A wrong password: the auth exit code.
+    p.cmd()
+        .env("LOCALPASS_PASSWORD", "not-the-password")
+        .args(["item", "add", "--title", "Wrong", "--password", "pw1"])
+        .assert()
+        .failure()
+        .code(2);
+    // The right one: confirmed, then applied.
+    p.cmd()
+        .args(["item", "add", "--title", "Confirmed", "--password", "pw1"])
+        .assert()
+        .success();
+    // Reads never ask.
+    p.cmd_no_password()
+        .args([
+            "--no-input",
+            "item",
+            "get",
+            "Confirmed",
+            "--field",
+            "password",
+        ])
+        .assert()
+        .success()
+        .stdout("pw1\n");
+    p.cmd_no_password()
+        .args(["--no-input", "item", "get", "Blocked"])
+        .assert()
+        .failure();
+
+    // The agent goes away (stdin EOF is how an MCP host stops it): its session
+    // ends with its connection.
+    drop(mcp.stdin.take());
+    let _ = mcp.wait();
+    wait_for(false);
+    add("Free").assert().success();
+
+    p.cmd().args(["daemon", "stop"]).assert().success();
+}

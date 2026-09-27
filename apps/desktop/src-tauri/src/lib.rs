@@ -104,6 +104,7 @@ pub fn run() {
             commands::create_account,
             commands::unlock,
             commands::lock,
+            commands::confirm_presence,
             commands::list_vaults,
             commands::create_vault,
             commands::delete_vault,

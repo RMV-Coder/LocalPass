@@ -55,6 +55,27 @@ pub fn app_handle() -> Option<tauri::AppHandle> {
     APP_HANDLE.get().cloned()
 }
 
+/// The marker a command error carries when the daemon asked for a person to
+/// confirm with the master password (an AI agent is connected; see
+/// `mcp-server.md` §7). The frontend matches it, shows the password dialog,
+/// calls `confirm_presence`, and retries. The request kind follows the colon.
+pub const PRESENCE_REQUIRED_MARKER: &str = "presence_required:";
+
+/// Turn [`Response::PresenceRequired`] into an ordinary error response carrying
+/// [`PRESENCE_REQUIRED_MARKER`], so it reaches the webview through every
+/// command's existing error path, whichever way that command maps errors.
+fn surface_presence(response: lp_daemon::protocol::Response) -> lp_daemon::protocol::Response {
+    match response {
+        lp_daemon::protocol::Response::PresenceRequired { action } => {
+            lp_daemon::protocol::Response::Error {
+                auth: false,
+                message: format!("{PRESENCE_REQUIRED_MARKER}{action}"),
+            }
+        }
+        other => other,
+    }
+}
+
 /// A backend-call failure the command layer can map to a UI state.
 #[derive(Debug)]
 pub enum DaemonError {
@@ -188,7 +209,7 @@ mod backend {
             Err(e) => return Err(DaemonError::Transport(e.to_string())),
         };
         match client.call(request) {
-            Ok(resp) => Ok(resp),
+            Ok(resp) => Ok(super::surface_presence(resp)),
             Err(lp_daemon::Error::NotRunning | lp_daemon::Error::Closed) => {
                 Err(DaemonError::NotRunning)
             }
@@ -261,7 +282,9 @@ mod backend {
     pub fn call(request: &Request) -> Result<Response, DaemonError> {
         let mut guard = state().lock().unwrap_or_else(PoisonError::into_inner);
         guard.maybe_autolock();
-        Ok(engine::handle(&mut guard, request.clone()).response)
+        Ok(super::surface_presence(
+            engine::handle(&mut guard, request.clone()).response,
+        ))
     }
 }
 
@@ -319,5 +342,33 @@ mod inprocess_tests {
             ),
             other => panic!("expected Vaults, got {}", other.kind()),
         }
+    }
+}
+
+#[cfg(test)]
+mod presence_tests {
+    use super::*;
+    use lp_daemon::protocol::Response;
+
+    #[test]
+    fn presence_required_becomes_a_marked_error() {
+        match surface_presence(Response::PresenceRequired {
+            action: "UpdateItem".into(),
+        }) {
+            Response::Error { auth, message } => {
+                assert!(!auth);
+                assert_eq!(message, "presence_required:UpdateItem");
+            }
+            other => panic!("expected an Error, got {}", other.kind()),
+        }
+    }
+
+    #[test]
+    fn other_responses_pass_through() {
+        assert!(matches!(surface_presence(Response::Pong), Response::Pong));
+        assert!(matches!(
+            surface_presence(Response::Locked),
+            Response::Locked
+        ));
     }
 }

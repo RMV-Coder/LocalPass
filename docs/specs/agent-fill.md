@@ -185,6 +185,9 @@ tab than the one the agent reasoned about.
 - **One at a time.** Arming replaces any unredeemed intent; there is no queue.
 - **In memory only**, like `pairing_mode_until` — never persisted.
 - **A locked daemon refuses**, as every other credential path does.
+- **A person turns it on.** While an MCP server is connected, opening the
+  window needs the master password (`mcp-server.md` §7.1), so a process the
+  agent started cannot arm fills for itself. Closing it never does.
 
 ## 8. Rules
 

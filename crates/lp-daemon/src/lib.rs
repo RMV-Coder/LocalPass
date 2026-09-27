@@ -84,6 +84,7 @@ pub mod engine;
 pub mod error;
 pub mod frame;
 pub mod origin;
+pub mod presence;
 pub mod protocol;
 pub mod render;
 pub mod server;

@@ -235,9 +235,39 @@ fn start_ssh_agent(
     }
 }
 
+/// Ends a connection's AI-agent session when the connection is done, however it
+/// is done: a clean close, a transport error, or a panic in the handler. Without
+/// this, a crashed agent would leave the daemon demanding a password forever.
+struct AgentSessionGuard<'a> {
+    shared: &'a Shared,
+    active: bool,
+}
+
+impl Drop for AgentSessionGuard<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.shared
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .end_agent_session();
+            if self.shared.verbose {
+                log("agent session ended (connection closed)");
+            }
+        }
+    }
+}
+
 /// Serve one connection: read requests, handle them, write responses, until the
 /// client closes or a `Shutdown` is handled.
 fn serve_connection(shared: &Arc<Shared>, mut conn: transport::Connection) -> Result<()> {
+    // Whether THIS connection registered as an AI-agent session. The session is
+    // bound to the connection itself: only the process holding it can use it,
+    // and it ends when the connection does.
+    let mut agent = AgentSessionGuard {
+        shared,
+        active: false,
+    };
     loop {
         // 1) Read the full request off the wire — NO lock held here, so a slow
         //    client cannot block the mutex.
@@ -268,7 +298,15 @@ fn serve_connection(shared: &Arc<Shared>, mut conn: transport::Connection) -> Re
             }
             Err(e) => return Err(e),
         };
-        let frame::IncomingRequest { request, origin } = incoming;
+        let frame::IncomingRequest {
+            request,
+            origin,
+            presence_grant,
+        } = incoming;
+        let ctx = engine::RequestContext {
+            agent_connection: agent.active,
+            presence_grant,
+        };
         let kind = request.kind();
         let started = std::time::Instant::now();
 
@@ -284,10 +322,18 @@ fn serve_connection(shared: &Arc<Shared>, mut conn: transport::Connection) -> Re
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             match origin {
-                Some(o) => lp_vault::audit::with_origin(o, || engine::handle(&mut state, request)),
-                None => engine::handle(&mut state, request),
+                Some(o) => lp_vault::audit::with_origin(o, || {
+                    engine::handle_with(&mut state, request, &ctx)
+                }),
+                None => engine::handle_with(&mut state, request, &ctx),
             }
         };
+        if handled.began_agent_session && !agent.active {
+            agent.active = true;
+            if shared.verbose {
+                log("agent session started");
+            }
+        }
 
         if shared.verbose {
             log(&format!(

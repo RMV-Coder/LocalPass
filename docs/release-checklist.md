@@ -58,9 +58,10 @@ The review's confirmed findings are fixed: #40 (MCP secret boundary), #41
 shares), #44 (Firefox extension id). Remaining work — details of anything
 unfixed are held privately, per [SECURITY.md](../SECURITY.md):
 
-- [ ] Daemon-side **human-presence check** for reveal and agent-fill arming
-  while an MCP session is active. This is the real boundary behind #40's
-  guards (docs/specs/mcp-server.md §7).
+- [x] Daemon-side **human-presence check** while an MCP session is active:
+  consent and change requests need the master password
+  (docs/specs/mcp-server.md §7.1). Reads stay open by design, since
+  `run_with_secrets` can already inject any secret.
 - [ ] Review the subsystems the internal review did not cover: Android
   storage, the SSH agent, backup/restore, the search index, and `run` /
   `env export`.

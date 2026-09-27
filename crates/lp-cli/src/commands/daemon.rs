@@ -94,7 +94,7 @@ fn status(profile_dir: &Path, json_out: bool) -> Result<()> {
                 Ok(r) => r,
                 Err(lp_daemon::Error::Closed | lp_daemon::Error::NotRunning) => {
                     print_status(
-                        json_out, false, None, &profile, None, None, None, None, None,
+                        json_out, false, None, &profile, None, None, None, None, None, None,
                     );
                     return Ok(());
                 }
@@ -113,6 +113,7 @@ fn status(profile_dir: &Path, json_out: bool) -> Result<()> {
                     idle_remaining_secs,
                     ssh_agent_endpoint,
                     ssh_identity_count,
+                    agent_session,
                     ..
                 } => print_status(
                     json_out,
@@ -124,9 +125,10 @@ fn status(profile_dir: &Path, json_out: bool) -> Result<()> {
                     idle_remaining_secs,
                     ssh_agent_endpoint,
                     Some(ssh_identity_count),
+                    Some(agent_session),
                 ),
                 Response::WrongProfile { expected } => print_status(
-                    json_out, true, None, &expected, None, None, None, None, None,
+                    json_out, true, None, &expected, None, None, None, None, None, None,
                 ),
                 other => {
                     return Err(CliError::internal(anyhow!(
@@ -139,7 +141,7 @@ fn status(profile_dir: &Path, json_out: bool) -> Result<()> {
         }
         Err(lp_daemon::Error::NotRunning) => {
             print_status(
-                json_out, false, None, &profile, None, None, None, None, None,
+                json_out, false, None, &profile, None, None, None, None, None, None,
             );
         }
         Err(e) => {
@@ -161,6 +163,7 @@ fn print_status(
     idle_remaining_secs: Option<u64>,
     ssh_agent_endpoint: Option<String>,
     ssh_identity_count: Option<usize>,
+    agent_session: Option<bool>,
 ) {
     let state_str = match state {
         Some(LockState::Unlocked) => "unlocked",
@@ -177,6 +180,7 @@ fn print_status(
             "idle_remaining_secs": idle_remaining_secs,
             "ssh_agent_endpoint": ssh_agent_endpoint,
             "ssh_identity_count": ssh_identity_count,
+            "agent_session": agent_session,
         });
         println!("{}", serde_json::to_string_pretty(&obj).unwrap_or_default());
     } else {
@@ -206,6 +210,9 @@ fn print_status(
                     println!("SSH agent: {ep} ({n} identities)");
                 }
                 None => println!("SSH agent: disabled"),
+            }
+            if agent_session == Some(true) {
+                println!("AI agent: connected (changes and consent need your master password)");
             }
         }
     }

@@ -378,12 +378,12 @@ remains that no *tool* returns a secret at all.
   - **These are guards, not a boundary.** A deliberately hostile child can
     unset the variable, or talk to an unlocked daemon's IPC endpoint directly:
     it runs as the same user, and the daemon admits every same-user client.
-    While the daemon is unlocked, treat `run_with_secrets` as able to reach any
-    secret in the vault. If the agent may read untrusted content (repositories,
-    web pages, issues), run the server on the **direct route** with the daemon
-    locked, or don't enable `run_with_secrets`. Requiring human presence for
-    reveal and consent requests while an MCP session is active is a planned
-    daemon-side boundary.
+    While the daemon is unlocked, treat `run_with_secrets` as able to **read**
+    any secret in the vault. If the agent may read untrusted content
+    (repositories, web pages, issues), run the server on the **direct route**
+    with the daemon locked, or don't enable `run_with_secrets`. What such a
+    child can no longer do is **widen its reach or change the vault**: that
+    needs a person, see §7.1.
 - **A hostile child process** can exfiltrate the value it was given, by any
   channel it likes. `run_with_secrets` is a capability grant to the command the
   agent chose to run; scope it by choosing which references to inject, not by
@@ -398,6 +398,54 @@ remains that no *tool* returns a secret at all.
   which is the T3 (same-user malware, vault unlocked) limit the PRD already
   states honestly. The daemon route (`localpass unlock` first) is still
   preferable: there the server holds no keys at all.
+
+### 7.1 Human presence
+
+While an MCP server is running, the daemon asks a person for the **master
+password** before any consent or change request, from any client:
+
+| Needs the password | Stays open |
+|--------------------|-----------|
+| Turning **on** agent fill or pairing mode; trusting a device; sharing a vault to a device; setting up sync | Every read: listing, `item get`, reveal, TOTP, field resolution, autofill |
+| Creating, editing, deleting, restoring, or untrashing an item; creating or deleting a vault; adding or deleting an attachment | Turning agent fill or pairing mode **off** (it only narrows) |
+
+**Why reads stay open.** `run_with_secrets` already injects any secret into a
+process the agent chose, so a password prompt on reveal would add friction
+without adding confidentiality. What a person must approve is anything that
+grants new reach or could destroy or silently rewrite data.
+
+**How it works.**
+
+1. The server registers its daemon connection as an **agent session**
+   (`BeginAgentSession`). The session is bound to that connection: it ends when
+   the connection closes (the server exits or crashes), and no other process can
+   end it. Registering only makes the daemon stricter, so it needs no
+   authentication. A background **sentinel** connection does the same on the
+   direct route and after a daemon restart: it re-registers within a second of a
+   daemon appearing, and a new daemon starts locked. It runs even under
+   `--no-daemon`, so that flag cannot switch the check off.
+2. While any agent session is open, a gated request is answered
+   `PresenceRequired`, audited as `AccessDenied` (`presence_required`), and
+   nothing changes.
+3. The client asks for the master password and sends `ConfirmPresence`. The
+   daemon checks it with a quiet unlock (the full KDF) and returns a random
+   256-bit **grant**, valid for **5 minutes** and only until the next lock. The
+   client attaches it to later requests; the retry then succeeds.
+4. Five wrong passwords in a row **lock the vault**. Each is audited
+   (`not_authorized`).
+
+**Who can answer.** The agent's own connection can never confirm, and a request
+on it is refused even with a grant. The CLI reads the password from
+`LOCALPASS_PASSWORD`, `--password-stdin`, or a hidden prompt; LocalPass strips
+the variable from every `run_with_secrets` child, and a child's stdin is not a
+terminal, so a child has no way to answer. The desktop app shows a password
+dialog and keeps the grant in its Rust backend; the webview never sees it.
+`localpass daemon status` and the desktop app show when an agent is connected.
+
+**Limits.** A same-user process that already has the master password (a key
+logger, a script with `LOCALPASS_PASSWORD` set) can still confirm; that is the
+PRD's T3 limit. So can a process able to read another process's memory while a
+grant is live. A grant is a bearer token for its 5 minutes.
 
 ---
 

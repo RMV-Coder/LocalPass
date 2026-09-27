@@ -5,7 +5,14 @@
 // `model.rs` types exactly (serde snake_case tags / field names).
 
 export type SessionState =
-  | { state: "unlocked"; vault_count: number; profile: string; idle_remaining_secs: number | null }
+  | {
+      state: "unlocked";
+      vault_count: number;
+      profile: string;
+      idle_remaining_secs: number | null;
+      /** An AI agent is connected: changes and consent ask for the master password. */
+      agent_session?: boolean;
+    }
   | { state: "locked"; profile: string }
   | { state: "no_daemon" }
   | { state: "no_account"; profile: string }

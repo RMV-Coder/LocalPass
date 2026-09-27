@@ -20,6 +20,7 @@
 //! which mirror the CLI's own display model, so output is identical either way.
 
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
@@ -27,8 +28,20 @@ use lp_daemon::client::{self, Client};
 use lp_daemon::protocol::{Request, Response, WireItem, WireItemSummary};
 use lp_daemon::spawn::{self, DaemonExe};
 use serde_json::json;
+use zeroize::Zeroize;
 
 use crate::error::CliError;
+use crate::unlock::{self, PasswordSource};
+
+/// How this invocation may ask for the master password, recorded once by
+/// `main` so a proxied call can confirm presence (`mcp-server.md` §7) without
+/// every command threading the source through.
+static PASSWORD_SOURCE: OnceLock<PasswordSource> = OnceLock::new();
+
+/// Record this invocation's password source. Later calls are ignored.
+pub fn set_password_source(src: PasswordSource) {
+    let _ = PASSWORD_SOURCE.set(src);
+}
 
 /// How long to wait for a freshly-spawned daemon to answer a Ping.
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -99,13 +112,90 @@ fn route_inner(profile: &Path, no_daemon: bool, keepalive: bool) -> Route {
 /// Send `request` and return the response, mapping transport failures to a clean
 /// internal error.
 ///
+/// If the daemon answers [`Response::PresenceRequired`] (an AI agent is
+/// connected and this is a consent or change request), ask for the master
+/// password, confirm presence, and send the request once more. The password
+/// comes from the same sources as an unlock (`LOCALPASS_PASSWORD`,
+/// `--password-stdin`, or a hidden prompt), none of which a process started by
+/// the agent has: LocalPass strips the variable from its children, and their
+/// stdin is not a terminal.
+///
 /// # Errors
 ///
-/// [`CliError::Internal`] on a transport failure.
+/// [`CliError::Internal`] on a transport failure; [`CliError::Auth`] on a wrong
+/// password; [`CliError::Usage`] when no password can be asked for.
 pub fn call(client: &mut Client, request: &Request) -> Result<Response> {
+    let response = send(client, request)?;
+    let Response::PresenceRequired { action } = &response else {
+        return Ok(response);
+    };
+    let Some(profile) = request.profile() else {
+        return Ok(response);
+    };
+    confirm_presence(client, profile, action)?;
+    send(client, request)
+}
+
+/// One round trip, with transport failures mapped to an internal error.
+fn send(client: &mut Client, request: &Request) -> Result<Response> {
     client
         .call(request)
         .map_err(|e| CliError::internal(anyhow!("daemon communication failed: {e}")).into())
+}
+
+/// Ask for the master password and trade it for a presence grant, which then
+/// rides on every later request from this process.
+fn confirm_presence(client: &mut Client, profile: &str, action: &str) -> Result<()> {
+    let src = PASSWORD_SOURCE.get().copied().unwrap_or(PasswordSource {
+        no_input: true,
+        stdin: false,
+    });
+    eprintln!(
+        "An AI agent is connected to LocalPass, so {} needs your master password.",
+        describe_action(action)
+    );
+    let mut password = unlock::acquire_password(src, "Master password: ").map_err(|e| {
+        CliError::usage(format!(
+            "an AI agent is connected, so this change needs your master password, and none \
+             could be read: {e:#}"
+        ))
+    })?;
+    let result = lp_daemon::presence::confirm(client, profile, &password);
+    password.zeroize();
+    let response =
+        result.map_err(|e| CliError::internal(anyhow!("daemon communication failed: {e}")))?;
+    match response {
+        Response::PresenceGrant { .. } => Ok(()),
+        other => {
+            check_error(&other)?;
+            Err(CliError::internal(anyhow!(
+                "unexpected daemon response to a presence check: {}",
+                other.kind()
+            ))
+            .into())
+        }
+    }
+}
+
+/// A short phrase for the refused request, for the prompt.
+fn describe_action(action: &str) -> &'static str {
+    match action {
+        "CreateItem" => "creating an item",
+        "UpdateItem" => "editing an item",
+        "DeleteItem" => "deleting an item",
+        "RestoreVersion" => "restoring an item version",
+        "UntrashItem" => "restoring an item from the trash",
+        "CreateVault" => "creating a vault",
+        "DeleteVault" => "deleting a vault",
+        "AddAttachment" => "adding an attachment",
+        "DeleteAttachment" => "deleting an attachment",
+        "SetAgentFillMode" => "turning on agent fill",
+        "SetPairingMode" => "turning on pairing mode",
+        "TrustDevice" => "trusting a device",
+        "ShareVaultToDevice" => "sharing a vault to a device",
+        "SyncSetup" => "setting up sync",
+        _ => "this change",
+    }
 }
 
 /// Map a [`Response::Error`] / [`Response::Locked`] / [`Response::WrongProfile`]
@@ -132,6 +222,12 @@ pub fn check_error(response: &Response) -> Result<()> {
         Response::WrongProfile { expected } => Err(CliError::usage(format!(
             "the running daemon serves a different profile ({expected}); \
              stop it or pass --no-daemon"
+        ))
+        .into()),
+        Response::PresenceRequired { action } => Err(CliError::auth(format!(
+            "an AI agent is connected to LocalPass, so {} needs a person to confirm it \
+             with the master password",
+            describe_action(action)
         ))
         .into()),
         _ => Ok(()),

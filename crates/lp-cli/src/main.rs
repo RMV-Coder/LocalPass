@@ -93,6 +93,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         no_input: cli.no_input,
         stdin: cli.password_stdin,
     };
+    daemonctl::set_password_source(src);
     let no_daemon = cli.no_daemon;
 
     // Inside a `run_with_secrets` child, refuse everything that could read a

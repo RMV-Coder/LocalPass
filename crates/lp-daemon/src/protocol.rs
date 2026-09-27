@@ -678,9 +678,46 @@ pub enum Request {
         /// Only records with `timestamp >= since` (unix millis). `None` = all.
         since: Option<i64>,
     },
+    /// **Human presence:** mark the connection this request arrives on as an
+    /// **AI-agent session** (`mcp-server.md` §7). Answered by [`Response::Ok`].
+    ///
+    /// While at least one agent session is open, the daemon answers every
+    /// consent or change request (see [`Request::needs_presence`]) with
+    /// [`Response::PresenceRequired`] unless it carries a fresh presence grant
+    /// from [`Request::ConfirmPresence`]. The session is bound to the
+    /// connection, not to a token: it ends by itself when that connection
+    /// closes, so a crashed agent can never leave the daemon stricter forever,
+    /// and a process that did not open the connection cannot end it.
+    /// Registering only ever makes the daemon stricter, so it needs no
+    /// authentication. Needs no unlocked session.
+    BeginAgentSession {
+        /// The profile directory being operated on.
+        profile: String,
+    },
+    /// **Human presence:** re-enter the master password to prove a person is
+    /// at the keyboard. Answered by [`Response::PresenceGrant`], or
+    /// [`Response::Error`] with `auth: true` on a wrong password.
+    ///
+    /// Needs an unlocked session. Refused on an agent-session connection (the
+    /// agent is never the one who answers). Repeated wrong passwords lock the
+    /// vault ([`MAX_PRESENCE_FAILURES`]).
+    ConfirmPresence {
+        /// The profile directory being operated on.
+        profile: String,
+        /// The master password (zeroized after handling).
+        password: String,
+    },
     /// Terminate the daemon: drop the session and exit, removing the endpoint.
     Shutdown,
 }
+
+/// How long a presence grant from [`Request::ConfirmPresence`] stays valid.
+pub const PRESENCE_GRANT_SECS: u64 = 300;
+
+/// Wrong passwords to [`Request::ConfirmPresence`] tolerated before the daemon
+/// locks the vault. A lock forces a full unlock, which already has its own
+/// cost (the KDF); this just stops an unattended guessing loop.
+pub const MAX_PRESENCE_FAILURES: u32 = 5;
 
 /// The hard cap on how many audit records one [`Request::AuditList`] returns.
 /// A UI shows a recent window; an auditor uses `localpass audit`, which reads
@@ -739,7 +776,98 @@ impl Request {
             Request::DeleteAttachment { .. } => "DeleteAttachment",
             Request::GetEnvSet { .. } => "GetEnvSet",
             Request::AuditList { .. } => "AuditList",
+            Request::BeginAgentSession { .. } => "BeginAgentSession",
+            Request::ConfirmPresence { .. } => "ConfirmPresence",
             Request::Shutdown => "Shutdown",
+        }
+    }
+
+    /// The profile directory this request names, or `None` for the few requests
+    /// that are global to a single-profile daemon (`Ping`, `Lock`, `Shutdown`).
+    #[must_use]
+    pub fn profile(&self) -> Option<&str> {
+        match self {
+            Request::Status { profile, .. }
+            | Request::AuditList { profile, .. }
+            | Request::GetEnvSet { profile, .. }
+            | Request::Unlock { profile, .. }
+            | Request::CreateAccount { profile, .. }
+            | Request::ListVaults { profile }
+            | Request::CreateVault { profile, .. }
+            | Request::DeleteVault { profile, .. }
+            | Request::ListItems { profile, .. }
+            | Request::PasswordHealth { profile, .. }
+            | Request::GetItem { profile, .. }
+            | Request::History { profile, .. }
+            | Request::Search { profile, .. }
+            | Request::Totp { profile, .. }
+            | Request::ResolveField { profile, .. }
+            | Request::GetRawPayload { profile, .. }
+            | Request::CreateItem { profile, .. }
+            | Request::UpdateItem { profile, .. }
+            | Request::DeleteItem { profile, .. }
+            | Request::RestoreVersion { profile, .. }
+            | Request::ListTrash { profile, .. }
+            | Request::UntrashItem { profile, .. }
+            | Request::MatchLogins { profile, .. }
+            | Request::FillLogin { profile, .. }
+            | Request::ExportIdentity { profile }
+            | Request::ListPeers { profile }
+            | Request::TrustDevice { profile, .. }
+            | Request::SetPairingMode { profile, .. }
+            | Request::SetAgentFillMode { profile, .. }
+            | Request::ArmFillIntent { profile, .. }
+            | Request::TakeFillIntent { profile }
+            | Request::ReportFillOutcome { profile, .. }
+            | Request::PollFillOutcome { profile }
+            | Request::SyncSetup { profile, .. }
+            | Request::SyncPush { profile, .. }
+            | Request::SyncPull { profile, .. }
+            | Request::SyncStatus { profile, .. }
+            | Request::ShareVaultToDevice { profile, .. }
+            | Request::SyncAdopt { profile, .. }
+            | Request::ListPendingDevices { profile, .. }
+            | Request::AddAttachment { profile, .. }
+            | Request::ListAttachments { profile, .. }
+            | Request::GetAttachment { profile, .. }
+            | Request::DeleteAttachment { profile, .. }
+            | Request::BeginAgentSession { profile }
+            | Request::ConfirmPresence { profile, .. } => Some(profile),
+            Request::Ping | Request::Lock | Request::Shutdown => None,
+        }
+    }
+
+    /// Whether this request needs a person present while an AI-agent session
+    /// is open (`mcp-server.md` §7): the **consent** requests that widen what an
+    /// agent or another device may do, and every **change** to vault contents.
+    ///
+    /// Reads are deliberately not here. An agent that can reach the daemon can
+    /// already have any secret injected into a process it chooses
+    /// (`run_with_secrets`), so a prompt on reveal would add friction without
+    /// adding confidentiality. What a person must approve is anything that
+    /// grants new reach (agent fill, pairing, trusting or sharing to a device,
+    /// a sync channel) or that could destroy or silently rewrite data.
+    ///
+    /// Switching agent fill or pairing mode **off** is always allowed: it only
+    /// narrows.
+    #[must_use]
+    pub fn needs_presence(&self) -> bool {
+        match self {
+            Request::SetAgentFillMode { on, .. } => *on,
+            Request::SetPairingMode { enabled, .. } => *enabled,
+            Request::TrustDevice { .. }
+            | Request::ShareVaultToDevice { .. }
+            | Request::SyncSetup { .. }
+            | Request::CreateVault { .. }
+            | Request::DeleteVault { .. }
+            | Request::CreateItem { .. }
+            | Request::UpdateItem { .. }
+            | Request::DeleteItem { .. }
+            | Request::RestoreVersion { .. }
+            | Request::UntrashItem { .. }
+            | Request::AddAttachment { .. }
+            | Request::DeleteAttachment { .. } => true,
+            _ => false,
         }
     }
 
@@ -757,7 +885,9 @@ impl Request {
                     sk.zeroize();
                 }
             }
-            Request::CreateAccount { password, .. } => password.zeroize(),
+            Request::CreateAccount { password, .. } | Request::ConfirmPresence { password, .. } => {
+                password.zeroize()
+            }
             _ => {}
         }
     }
@@ -1294,6 +1424,12 @@ pub enum Response {
         /// predates agent fill still decodes — as `None`, i.e. "off".
         #[serde(default)]
         agent_fill_secs: Option<u64>,
+        /// Whether an **AI-agent session** is open ([`Request::BeginAgentSession`]),
+        /// so consent and change requests need the master password
+        /// ([`Response::PresenceRequired`]). A GUI shows this as a banner.
+        /// `#[serde(default)]` for peers that predate the presence check.
+        #[serde(default)]
+        agent_session: bool,
     },
     /// A generic "did it" acknowledgement (Unlock, Lock, mutations).
     Ok {
@@ -1564,6 +1700,23 @@ pub enum Response {
     },
     /// The requested operation needs an unlocked session and none is held.
     Locked,
+    /// Answer to [`Request::ConfirmPresence`]: a short-lived grant the client
+    /// attaches to later requests (the envelope's `presence_grant`). The token is
+    /// a random bearer value held only in the confirming process's memory.
+    PresenceGrant {
+        /// The grant token (64 hex characters).
+        token: String,
+        /// Seconds until the grant expires ([`PRESENCE_GRANT_SECS`]).
+        expires_in_secs: u64,
+    },
+    /// An AI-agent session is open and this request needs a person present
+    /// ([`Request::needs_presence`]). The client asks for the master password,
+    /// sends [`Request::ConfirmPresence`], and retries with the grant. Nothing
+    /// was changed, and the refusal is audited.
+    PresenceRequired {
+        /// The refused request's kind (e.g. `"UpdateItem"`), for the prompt.
+        action: String,
+    },
     /// This daemon serves a different profile than the request named.
     WrongProfile {
         /// The profile this daemon actually serves.
@@ -1619,6 +1772,8 @@ impl Response {
             Response::FillOutcome { .. } => "FillOutcome",
             Response::FillRefused { .. } => "FillRefused",
             Response::Locked => "Locked",
+            Response::PresenceGrant { .. } => "PresenceGrant",
+            Response::PresenceRequired { .. } => "PresenceRequired",
             Response::WrongProfile { .. } => "WrongProfile",
             Response::Error { .. } => "Error",
         }
@@ -1649,11 +1804,18 @@ impl core::fmt::Debug for Response {
 /// field was called `origin` and collided with [`Request::MatchLogins`] /
 /// [`Request::FillLogin`], whose `origin` is the browser origin — every autofill
 /// request died on the wire. Keep this name distinct from every request field.
+///
+/// `presence_grant` carries a token from [`Response::PresenceGrant`] when the
+/// client holds a live one (see [`crate::presence`]); it is ignored except on a
+/// request that [needs presence](Request::needs_presence) while an agent session
+/// is open.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct RequestEnvelope {
     pub(crate) v: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) caller: Option<WireOrigin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) presence_grant: Option<String>,
     #[serde(flatten)]
     pub(crate) request: Request,
 }
@@ -1770,6 +1932,7 @@ mod tests {
     fn envelope_roundtrips_with_version() {
         let env = RequestEnvelope {
             v: PROTOCOL_VERSION,
+            presence_grant: None,
             caller: None,
             request: Request::Ping,
         };
@@ -1794,6 +1957,7 @@ mod tests {
     fn envelope_roundtrips_a_request_whose_field_shadows_the_caller_slot() {
         let env = RequestEnvelope {
             v: PROTOCOL_VERSION,
+            presence_grant: None,
             caller: Some(WireOrigin::from_origin(&lp_vault::AuditOrigin::sanitized(
                 lp_vault::AuditSource::NativeHost,
                 Some("host"),
@@ -1844,6 +2008,7 @@ mod tests {
     fn the_agent_fill_requests_round_trip_through_the_envelope() {
         let env = RequestEnvelope {
             v: PROTOCOL_VERSION,
+            presence_grant: None,
             caller: Some(WireOrigin::from_origin(&lp_vault::AuditOrigin::sanitized(
                 lp_vault::AuditSource::Mcp,
                 Some("agent"),

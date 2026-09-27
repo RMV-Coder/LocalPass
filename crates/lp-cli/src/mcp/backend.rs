@@ -157,10 +157,14 @@ impl Backend {
     /// [`CliError::Usage`] when there is no account at `profile_dir`.
     pub fn acquire(profile_dir: &Path, src: PasswordSource, no_daemon: bool) -> Result<Self> {
         match daemonctl::route(profile_dir, no_daemon) {
-            Route::Proxy(client) => Ok(Backend::Proxy {
-                client,
-                profile: profile_dir.display().to_string(),
-            }),
+            Route::Proxy(mut client) => {
+                let profile = profile_dir.display().to_string();
+                // Mark this connection as the agent's, so the daemon asks a
+                // person before any consent or change (mcp-server.md §7). A
+                // daemon that cannot is refused rather than silently served.
+                super::presence::register(&mut client, &profile)?;
+                Ok(Backend::Proxy { client, profile })
+            }
             Route::Direct => {
                 let (session, _sk) = unlock::unlock(profile_dir, src)?;
                 Ok(Backend::Direct(DirectSession::new(session)))
