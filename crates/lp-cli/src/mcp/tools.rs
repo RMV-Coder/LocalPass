@@ -489,15 +489,26 @@ fn run_with_secrets(backend: &mut Backend, args: &Value) -> Result<Value> {
     }
 
     // 2) Build the child environment: inherited (minus LocalPass's own password
-    //    channel) with the injected vars layered on top.
+    //    channel) with the injected vars layered on top, plus the MCP-child
+    //    marker so a LocalPass CLI anywhere under this child refuses to read
+    //    secrets or grant consent (see `mcp::child`).
     let mut child_env = inherited_env();
     for (k, v) in injected.iter() {
         child_env.set(k, v);
     }
+    child_env.set(super::child::MCP_CHILD_ENV, "1");
 
-    // 3) Program + args.
+    // 3) Program + args. The child may not be LocalPass itself: with the
+    //    daemon unlocked it would be a same-user client that can print values
+    //    this tool never injected (and so never redacts), or arm agent fill.
     let argv = command_argv(args)?;
     let (program, rest) = argv.split_first().expect("command_argv rejects empty argv");
+    if super::child::is_localpass_program(program) {
+        return Err(CliError::usage(
+            "run_with_secrets cannot run a LocalPass executable; use the MCP tools instead",
+        )
+        .into());
+    }
 
     let timeout = timeout_arg(args)?;
     let cwd = opt_str(args, "cwd").map(PathBuf::from);
