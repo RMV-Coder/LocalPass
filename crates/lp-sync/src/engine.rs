@@ -588,13 +588,43 @@ pub fn import_shared_key(
 /// # Errors
 ///
 /// [`Error::Invalid`] if `factory` cannot open `sync_root`; [`Error::Io`] on an
-/// unreadable root; [`Error::Vault`] on a tampered blob.
+/// unreadable root. A share that fails authentication (unsigned, untrusted
+/// sender, bad signature, tampered) is **skipped**, not fatal; see
+/// [`adopt_report`] for the list.
 pub fn adopt(
     session: &Session,
     sync_root: &str,
     factory: &dyn StoreFactory,
 ) -> Result<Vec<VaultId>> {
-    let mut adopted = Vec::new();
+    Ok(adopt_report(session, sync_root, factory)?.adopted)
+}
+
+/// What [`adopt_report`] did.
+#[derive(Debug, Default)]
+pub struct AdoptReport {
+    /// Vaults imported and enrolled.
+    pub adopted: Vec<VaultId>,
+    /// Shares refused, with the reason. Their blobs are left in place (nothing
+    /// was imported or enrolled) so the user can inspect them; a genuine
+    /// sharer can re-share after the devices trust each other.
+    pub rejected: Vec<(VaultId, String)>,
+}
+
+/// [`adopt`], also reporting the shares it refused. A share is refused when it
+/// is unsigned (old format), comes from a device this one has not pinned, or
+/// fails signature verification or unsealing. One bad blob never blocks the
+/// rest: the sync folder is untrusted, so a planted blob must not be able to
+/// stop a legitimate adopt either.
+///
+/// # Errors
+///
+/// As [`adopt`].
+pub fn adopt_report(
+    session: &Session,
+    sync_root: &str,
+    factory: &dyn StoreFactory,
+) -> Result<AdoptReport> {
+    let mut report = AdoptReport::default();
     let self_id = session.device_id();
     // The scan and every per-vault dir below share one channel backend, so the
     // whole adopt walk goes through a single `Store` seam (one factory call).
@@ -612,11 +642,18 @@ pub fn adopt(
 
         let dir = SyncDir::with_store(std::sync::Arc::clone(&store), vault_id)?;
         if let Some(blob) = dir.read_key_blob(&self_id)? {
-            session.import_shared_vault_key(&vault_id, &blob)?;
+            match session.import_shared_vault_key(&vault_id, &blob) {
+                Ok(_) => {}
+                Err(e @ (lp_vault::Error::Invalid(_) | lp_vault::Error::DecryptionFailed)) => {
+                    report.rejected.push((vault_id, e.to_string()));
+                    continue;
+                }
+                Err(other) => return Err(other.into()),
+            }
             dir.remove_key_blob(&self_id)?;
             session.set_setting(&sync_root_key(&vault_id), sync_root)?;
-            adopted.push(vault_id);
+            report.adopted.push(vault_id);
         }
     }
-    Ok(adopted)
+    Ok(report)
 }

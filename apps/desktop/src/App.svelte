@@ -111,11 +111,9 @@
 {:else if session && session.state === "unlocked"}
   <header class="topbar">
     <div class="left">
-      <span class="logo" aria-hidden="true"
-        style="width:24px;height:24px;border-radius:6px;background:var(--accent);color:var(--accent-text);display:grid;place-items:center;font-weight:800;font-size:0.8rem"
-      >L</span>
+      <span class="logo" aria-hidden="true">L</span>
       LocalPass
-      <span class="muted" style="font-weight:400">
+      <span class="muted vault-count">
         · {session.vault_count} vault{session.vault_count === 1 ? "" : "s"}
       </span>
     </div>

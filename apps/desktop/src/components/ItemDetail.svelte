@@ -20,9 +20,9 @@
     deleteAttachment,
   } from "../lib/api";
   import type { ItemView, TotpView, AttachmentView } from "../lib/types";
-  import { MASK, typeLabel, formatTimestamp, groupTotp, humanSize } from "../lib/format";
+  import { MASK, typeLabel, fieldLabel, formatTimestamp, groupTotp, humanSize } from "../lib/format";
   import { formatDotenv, buildRunCommand } from "../lib/envset";
-  import { copyToClipboard } from "../lib/clipboard";
+  import { copySecret, copyToClipboard } from "../lib/clipboard";
   import { toast } from "../lib/toast";
   import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 
@@ -102,7 +102,7 @@
 
   async function copyEnvExport() {
     if (envExport === null) return;
-    const ok = await copyToClipboard(envExport);
+    const ok = await copySecret(envExport);
     toast(ok ? "Copied .env to clipboard" : "Copy failed", ok ? "ok" : "error");
   }
 
@@ -270,7 +270,7 @@
         return;
       }
     }
-    const ok = await copyToClipboard(value);
+    const ok = await copySecret(value);
     toast(ok ? "Copied to clipboard" : "Copy failed", ok ? "ok" : "error");
   }
 
@@ -300,7 +300,7 @@
 
   async function copyTotp() {
     if (!totp) return;
-    const ok = await copyToClipboard(totp.code);
+    const ok = await copySecret(totp.code);
     toast(ok ? "Code copied" : "Copy failed", ok ? "ok" : "error");
   }
 
@@ -327,24 +327,20 @@
   </div>
 {:else if item}
   <div class="detail">
-    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:0.5rem">
+    <div class="detail-head">
       <h2>{item.title}</h2>
       <div class="field-actions">
         <button class="btn btn-small" onclick={() => onEdit?.(itemId)}>Edit</button>
-        <button
-          class="btn btn-small"
-          style="color:var(--danger);border-color:var(--danger)"
-          onclick={() => (confirmingDelete = true)}
-        >
+        <button class="btn btn-small btn-danger-outline" onclick={() => (confirmingDelete = true)}>
           Delete
         </button>
       </div>
     </div>
-    <p class="row-meta" style="margin-top:0">
+    <p class="row-meta detail-meta">
       <span class="badge">{typeLabel(item.type_str)}</span>
-      {#if item.favorite}<span class="badge">★ favorite</span>{/if}
-      <span>Updated {formatTimestamp(item.updated_at)}</span>
-      <span>· v{item.version}</span>
+      {#if item.favorite}<span class="badge">★ Favorite</span>{/if}
+      {#each item.tags as tag (tag)}<span class="badge badge-tag">#{tag}</span>{/each}
+      <span>Updated {formatTimestamp(item.updated_at)} · v{item.version}</span>
     </p>
 
     {#if confirmingDelete}
@@ -355,8 +351,7 @@
         </p>
         <div class="toolbar">
           <button
-            class="btn btn-small"
-            style="color:var(--danger);border-color:var(--danger)"
+            class="btn btn-small btn-danger-outline"
             onclick={doDelete}
             disabled={deleting}
           >
@@ -371,12 +366,6 @@
           </button>
         </div>
       </div>
-    {/if}
-
-    {#if item.tags.length}
-      <p class="row-meta">
-        {#each item.tags as tag (tag)}<span class="badge">#{tag}</span>{/each}
-      </p>
     {/if}
 
     {#if item.type_str === "totp"}
@@ -404,18 +393,11 @@
       </div>
     {/if}
 
-    {#if item.notes}
-      <div class="field-group" style="margin-top:1rem">
-        <div class="field-name">Notes</div>
-        <div style="white-space:pre-wrap;user-select:text">{item.notes}</div>
-      </div>
-    {/if}
-
     {#if item.fields.length}
       <div role="list" aria-label="Item fields" style="margin-top:0.5rem">
         {#each item.fields as f (f.name)}
           <div class="field" role="listitem">
-            <div class="field-name" id={`fld-${f.name}`}>{f.name}</div>
+            <div class="field-name" id={`fld-${f.name}`}>{fieldLabel(f.name, item.type_str)}</div>
             <div class="field-value" aria-labelledby={`fld-${f.name}`}>
               {#if f.secret}
                 {#if revealed[f.name] !== undefined}
@@ -439,7 +421,7 @@
                     class="btn btn-small"
                     onclick={() => reveal(f.name)}
                     disabled={revealBusy[f.name]}
-                    aria-label={`Reveal ${f.name}`}
+                    aria-label={`Reveal ${fieldLabel(f.name, item.type_str)}`}
                   >
                     {revealBusy[f.name] ? "…" : "Reveal"}
                   </button>
@@ -447,15 +429,15 @@
                 <button
                   class="btn btn-small"
                   onclick={() => copyField(f.name)}
-                  aria-label={`Copy ${f.name}`}
+                  aria-label={`Copy ${fieldLabel(f.name, item.type_str)}`}
                 >
                   Copy
                 </button>
               {:else if f.value}
                 <button
-                  class="btn btn-small btn-ghost"
+                  class="btn btn-small"
                   onclick={() => copyPlain(f.value)}
-                  aria-label={`Copy ${f.name}`}
+                  aria-label={`Copy ${fieldLabel(f.name, item.type_str)}`}
                 >
                   Copy
                 </button>
@@ -466,6 +448,13 @@
       </div>
     {:else if !item.notes && item.type_str !== "totp"}
       <p class="muted" style="margin-top:1rem">This item has no fields.</p>
+    {/if}
+
+    {#if item.notes}
+      <div class="notes">
+        <div class="field-name">Notes</div>
+        <div class="notes-body">{item.notes}</div>
+      </div>
     {/if}
 
     {#if item.type_str === "env_set"}
@@ -570,8 +559,7 @@
                     <span class="sr-only" role="status">Confirm removing {att.filename}</span>
                     <span aria-hidden="true" class="muted" style="align-self:center">Remove?</span>
                     <button
-                      class="btn btn-small"
-                      style="color:var(--danger);border-color:var(--danger)"
+                      class="btn btn-small btn-danger-outline"
                       onclick={() => removeAttachment(att)}
                       disabled={attachBusy[att.id]}
                     >

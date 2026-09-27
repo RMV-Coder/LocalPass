@@ -43,6 +43,10 @@ anchor, an X25519 key-share recipient key, a device id, and a CRC. It contains
 - They **cannot inject a single op into your vault.** §5 step 1: an author whose
   `device_id` is not in your `peer_devices` is rejected (`Alarm::UnknownDevice`).
   Your device only ever accepts ops from devices **you** pinned.
+- They **cannot hand you a vault.** Knowing your X25519 key lets anyone *seal*
+  a vault key to you, so a share must also be **signed** by the sending device,
+  and adopt accepts it only from a device you pinned (`sync-protocol.md` §7.1).
+  A share planted in the sync folder by anyone else is refused and reported.
 - There is **no listener to reach.** The MVP channel (§7) is a dumb, untrusted
   folder. Nothing in LocalPass accepts an inbound pairing request.
 

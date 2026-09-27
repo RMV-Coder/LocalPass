@@ -44,6 +44,14 @@ export function ensureService(): Promise<SessionState> {
   return invoke<SessionState>("ensure_service");
 }
 
+/** Put a secret the webview already holds on the system clipboard through the
+ *  native path: excluded from clipboard history / cloud sync and cleared again
+ *  after 30 s or on lock. Returns nothing. Rejects where there is no native
+ *  clipboard (mobile); callers fall back to the webview Clipboard API. */
+export function copySecretNative(text: string): Promise<void> {
+  return invoke<void>("copy_secret", { text });
+}
+
 /** Current lock/availability state. Never rejects for the "no daemon" case —
  *  that is a normal state returned in the payload. */
 export function status(): Promise<SessionState> {
