@@ -302,14 +302,25 @@ pub(crate) fn sync_adopt(
     dir: &str,
     factory: &dyn StoreFactory,
 ) -> Result<Response, Response> {
-    let adopted = engine::adopt(session, dir, factory).map_err(map_sync_error)?;
+    let report = engine::adopt_report(session, dir, factory).map_err(map_sync_error)?;
 
     // Resolve names (best-effort) and pull each adopted vault so its items land.
     let names = session.list_vaults().unwrap_or_default();
-    let mut wire = Vec::with_capacity(adopted.len());
+    let mut wire = Vec::with_capacity(report.adopted.len());
     let mut applied_total = 0usize;
-    let mut alarms = Vec::new();
-    for vault_id in adopted {
+    // A refused share is an alarm: something in the untrusted folder offered
+    // this device a vault key it could not authenticate.
+    let mut alarms: Vec<String> = report
+        .rejected
+        .iter()
+        .map(|(vault_id, reason)| {
+            format!(
+                "refused a vault-key share for {}: {reason}",
+                vault_id.to_hyphenated()
+            )
+        })
+        .collect();
+    for vault_id in report.adopted {
         let name = names
             .iter()
             .find(|(id, _)| *id == vault_id)

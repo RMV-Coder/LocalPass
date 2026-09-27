@@ -620,7 +620,58 @@ fn open_secret_32(
 /// Split a cross-device share blob: `u32 LE len || sealed_key || u32 LE len ||
 /// sealed_name` (see [`Session::share_vault_key_to_peer`]). Structural only —
 /// no crypto; both segments are still sealed.
-fn split_share_blob(blob: &[u8]) -> Result<(&[u8], &[u8])> {
+/// Leading magic of a signed vault-key share blob (format 2).
+pub const SHARE_BLOB_MAGIC: &[u8; 4] = b"LPS2";
+
+/// Ed25519 signing context for a vault-key share (see
+/// [`Session::share_vault_key_to_peer`]).
+pub const SHARE_SIGN_CONTEXT: &str = "localpass/v1/sign/vault-key-share";
+
+/// Refusal for a share blob in the old, unsigned format.
+pub const UNSIGNED_SHARE: &str =
+    "unsigned vault-key share (old format) refused: re-share the vault from the sending device";
+
+/// Refusal for a share blob whose sender is not a pinned (trusted) device.
+pub const UNTRUSTED_SHARE_SENDER: &str =
+    "vault-key share from a device this device has not trusted: verify and trust it first";
+
+/// The parts of a signed share blob.
+struct SignedShare<'a> {
+    sender: DeviceId,
+    sealed_key: &'a [u8],
+    sealed_name: &'a [u8],
+    signature: [u8; 64],
+}
+
+/// The bytes a share signature covers: vault id, recipient, sender, then both
+/// sealed segments length-prefixed. Binding the vault and both device ids stops
+/// a valid signature being replayed for another vault or recipient.
+fn share_signed_message(
+    vault_id: &VaultId,
+    recipient: &DeviceId,
+    sender: &DeviceId,
+    sealed_key: &[u8],
+    sealed_name: &[u8],
+) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(48 + 8 + sealed_key.len() + sealed_name.len());
+    msg.extend_from_slice(vault_id.as_bytes());
+    msg.extend_from_slice(recipient.as_bytes());
+    msg.extend_from_slice(sender.as_bytes());
+    for segment in [sealed_key, sealed_name] {
+        msg.extend_from_slice(
+            &u32::try_from(segment.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        msg.extend_from_slice(segment);
+    }
+    msg
+}
+
+/// Parse a signed share blob:
+/// `"LPS2" || sender_device_id(16) || u32 LE len || sealed_key || u32 LE len ||
+/// sealed_name || signature(64)`.
+fn split_share_blob(blob: &[u8]) -> Result<SignedShare<'_>> {
     fn take(b: &[u8]) -> Result<(&[u8], &[u8])> {
         if b.len() < 4 {
             return Err(Error::Invalid("share blob truncated (length prefix)"));
@@ -632,12 +683,24 @@ fn split_share_blob(blob: &[u8]) -> Result<(&[u8], &[u8])> {
         }
         Ok(rest.split_at(n))
     }
-    let (sealed_key, rest) = take(blob)?;
-    let (sealed_name, tail) = take(rest)?;
-    if !tail.is_empty() {
-        return Err(Error::Invalid("share blob has trailing bytes"));
+    let Some(rest) = blob.strip_prefix(SHARE_BLOB_MAGIC.as_slice()) else {
+        return Err(Error::Invalid(UNSIGNED_SHARE));
+    };
+    if rest.len() < 16 {
+        return Err(Error::Invalid("share blob truncated (sender)"));
     }
-    Ok((sealed_key, sealed_name))
+    let (sender, rest) = rest.split_at(16);
+    let (sealed_key, rest) = take(rest)?;
+    let (sealed_name, rest) = take(rest)?;
+    let signature: [u8; 64] = rest
+        .try_into()
+        .map_err(|_| Error::Invalid("share blob signature missing or has trailing bytes"))?;
+    Ok(SignedShare {
+        sender: DeviceId::from_slice(sender)?,
+        sealed_key,
+        sealed_name,
+        signature,
+    })
 }
 
 /// Return a vault name that does not collide with any in `existing`.
@@ -1289,8 +1352,13 @@ impl Session {
     /// cross-device sharing (PRD §4.5, single-user multi-device). Returns the
     /// opaque share blob shipped via the sync channel's `keys/` dir.
     ///
-    /// Blob layout: `u32 LE len || sealed_key || u32 LE len || sealed_name`.
-    /// The key travels through lp-crypto's typed key transport
+    /// Blob layout (format 2): `"LPS2" || sender_device_id || u32 LE len ||
+    /// sealed_key || u32 LE len || sealed_name || Ed25519 signature`. The
+    /// signature (context [`SHARE_SIGN_CONTEXT`], this device's signing key)
+    /// covers the vault id, the recipient and sender ids, and both sealed
+    /// segments, so the recipient can require the share to come from a device
+    /// it pinned (sync-protocol.md section 7.2). The key travels through
+    /// lp-crypto's typed key transport
     /// ([`lp_crypto::seal_key_for`] → [`lp_crypto::SealingKeyPair::open_key`])
     /// so raw key bytes never surface; both AADs bind the vault id AND the
     /// recipient device id (no cross-vault or cross-recipient replay).
@@ -1349,11 +1417,24 @@ impl Session {
         )
         .map_err(Error::from_crypto)?;
 
-        let mut blob = Vec::with_capacity(8 + sealed_key.len() + sealed_name.len());
+        let me = self.device.device_id;
+        let signature = self
+            .device
+            .signing
+            .sign(
+                SHARE_SIGN_CONTEXT,
+                &share_signed_message(vault_id, &peer.device_id, &me, &sealed_key, &sealed_name),
+            )
+            .map_err(Error::from_crypto)?;
+
+        let mut blob = Vec::with_capacity(4 + 16 + 8 + sealed_key.len() + sealed_name.len() + 64);
+        blob.extend_from_slice(SHARE_BLOB_MAGIC);
+        blob.extend_from_slice(me.as_bytes());
         blob.extend_from_slice(&u32::try_from(sealed_key.len()).unwrap().to_le_bytes());
         blob.extend_from_slice(&sealed_key);
         blob.extend_from_slice(&u32::try_from(sealed_name.len()).unwrap().to_le_bytes());
         blob.extend_from_slice(&sealed_name);
+        blob.extend_from_slice(&signature);
         // Sharing a vault key to a peer is an audited action (PRD §4.9 "shares"):
         // record the vault id + recipient device id (both non-secret).
         self.record_vault_share(vault_id, &peer.device_id).ok();
@@ -1370,12 +1451,45 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// - [`Error::Invalid`] on a malformed blob.
-    /// - [`Error::DecryptionFailed`] if this device is not the recipient, the
-    ///   blob was tampered, or it was sealed for a different vault id.
+    /// - [`Error::Invalid`] on a malformed blob, an unsigned (old-format) blob
+    ///   ([`UNSIGNED_SHARE`]), or a sender this device has not pinned
+    ///   ([`UNTRUSTED_SHARE_SENDER`]).
+    /// - [`Error::DecryptionFailed`] if the signature does not verify, this
+    ///   device is not the recipient, the blob was tampered, or it was sealed
+    ///   for a different vault id.
+    ///
+    /// The sender is authenticated **before** anything is unsealed: a share is
+    /// accepted only from a device pinned in `peer_devices` (or this device),
+    /// mirroring op ingest, which rejects unpinned authors. Without this,
+    /// anyone able to write the untrusted sync folder could plant a vault key
+    /// of their choosing, or swap a genuine one before adoption.
     pub fn import_shared_vault_key(&self, vault_id: &VaultId, blob: &[u8]) -> Result<bool> {
-        let (sealed_key, sealed_name) = split_share_blob(blob)?;
+        let share = split_share_blob(blob)?;
         let me = self.device.device_id;
+
+        let sender_pub = if share.sender == me {
+            self.device.ed25519_pub
+        } else {
+            self.peer_device(&share.sender)?
+                .ok_or(Error::Invalid(UNTRUSTED_SHARE_SENDER))?
+                .ed25519_pub
+        };
+        let verifying =
+            lp_crypto::VerifyingKey::from_bytes(&sender_pub).map_err(Error::from_crypto)?;
+        verifying
+            .verify(
+                SHARE_SIGN_CONTEXT,
+                &share_signed_message(
+                    vault_id,
+                    &me,
+                    &share.sender,
+                    share.sealed_key,
+                    share.sealed_name,
+                ),
+                &share.signature,
+            )
+            .map_err(Error::from_crypto)?;
+        let (sealed_key, sealed_name) = (share.sealed_key, share.sealed_name);
 
         let key = self
             .device
