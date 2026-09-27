@@ -58,6 +58,23 @@
 //! A full PSL is tracked as a follow-up; the wire protocol and the daemon-side
 //! re-check do not change when it lands — only [`registrable_domain`]'s internals.
 //!
+//! # Shared-hosting suffixes (the PSL "private" section)
+//!
+//! Platforms that give every customer a subdomain — `myapp.vercel.app`,
+//! `alice.github.io`, `shop.herokuapp.com` — are public suffixes too: each
+//! customer's site is its own registrable domain, and anyone can register a
+//! neighbour. Treating `vercel.app` as an ordinary registrable domain would
+//! fill a login saved for `myapp.vercel.app` on `attacker.vercel.app`. The
+//! built-in [`PRIVATE_SUFFIXES`] set covers the common platforms, and matching
+//! uses the **longest** known suffix, so three-label suffixes such as
+//! `web.core.windows.net` work as well.
+//!
+//! # Scheme
+//!
+//! A login saved with an `https://` URL never matches an `http://` page on the
+//! same domain: offering or filling it there would hand the credential to a
+//! page an on-path attacker can rewrite (see [`url_matches_origin`]).
+//!
 //! # Origin parsing
 //!
 //! [`registrable_domain`] accepts either a bare host (`example.com`) or a full
@@ -88,6 +105,91 @@ pub const MULTI_PART_SUFFIXES: &[&str] = &[
     "com.cn", "net.cn", "org.cn", "gov.cn", // Others frequently encountered
     "com.mx", "com.tr", "com.sg", "com.hk", "com.tw", "co.il", "com.ar", "com.pl",
 ];
+
+/// Shared-hosting suffixes from the Public Suffix List's private section: every
+/// customer subdomain under one of these is its own registrable domain. A
+/// pragmatic subset of the platforms people actually deploy to; extend as
+/// needed (same maintenance model as [`MULTI_PART_SUFFIXES`]).
+pub const PRIVATE_SUFFIXES: &[&str] = &[
+    // Frontend and static hosting
+    "vercel.app",
+    "now.sh",
+    "netlify.app",
+    "netlify.com",
+    "pages.dev",
+    "workers.dev",
+    "github.io",
+    "gitlab.io",
+    "bitbucket.io",
+    "surge.sh",
+    "web.app",
+    "firebaseapp.com",
+    "onrender.com",
+    "fly.dev",
+    "glitch.me",
+    "replit.app",
+    "repl.co",
+    "deno.dev",
+    "vercel.sh",
+    "azurestaticapps.net",
+    "amplifyapp.com",
+    "cloudfront.net",
+    // Application platforms
+    "herokuapp.com",
+    "appspot.com",
+    "azurewebsites.net",
+    "cloudapp.net",
+    "elasticbeanstalk.com",
+    "run.app",
+    "ondigitalocean.app",
+    "railway.app",
+    "up.railway.app",
+    "web.core.windows.net",
+    "blob.core.windows.net",
+    // Tunnels and previews
+    "ngrok.io",
+    "ngrok-free.app",
+    "ngrok.app",
+    "trycloudflare.com",
+    "loca.lt",
+    // Site builders and blogs
+    "blogspot.com",
+    "wordpress.com",
+    "wixsite.com",
+    "myshopify.com",
+    "tumblr.com",
+    "webflow.io",
+    "carrd.co",
+    "notion.site",
+];
+
+/// The longest built-in public suffix (registry multi-part or shared-hosting)
+/// that `host` ends with on a label boundary, if any. `host` is lowercased.
+fn known_suffix(host: &str) -> Option<&'static str> {
+    MULTI_PART_SUFFIXES
+        .iter()
+        .chain(PRIVATE_SUFFIXES)
+        .copied()
+        .filter(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")))
+        .max_by_key(|suffix| suffix.len())
+}
+
+/// The scheme of a full URL/origin, lowercased (`https`), or `None` for a bare
+/// host.
+#[must_use]
+pub fn scheme_of(origin: &str) -> Option<String> {
+    let s = origin.trim();
+    let (scheme, _) = s.split_once("://")?;
+    let valid = !scheme.is_empty()
+        && scheme
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    valid.then(|| scheme.to_ascii_lowercase())
+}
 
 /// Extract the **host** component from a bare host or a full origin/URL.
 ///
@@ -162,17 +264,13 @@ fn is_ip_or_localhost(host: &str) -> bool {
 }
 
 /// Whether the whole `host` is itself a (built-in) public suffix — a bare TLD
-/// (`com`) or a known multi-part suffix (`co.uk`). Such a host has no
-/// registrable domain and must never be filled. `host` must be lowercased.
+/// (`com`), a known multi-part suffix (`co.uk`), or a shared-hosting suffix
+/// (`vercel.app`). Such a host has no registrable domain and must never be
+/// filled. `host` must be lowercased.
 fn is_bare_public_suffix(host: &str) -> bool {
-    let labels: Vec<&str> = host.split('.').collect();
-    match labels.len() {
-        // A single label is always a bare TLD (or an intranet single name); no
-        // registrable domain either way.
-        0 | 1 => true,
-        2 => MULTI_PART_SUFFIXES.contains(&host),
-        _ => false,
-    }
+    // A single label is always a bare TLD (or an intranet single name); no
+    // registrable domain either way.
+    !host.contains('.') || known_suffix(host) == Some(host)
 }
 
 /// Compute the **registrable domain** (eTLD+1) of `origin`, or `None` if it has
@@ -206,19 +304,15 @@ pub fn registrable_domain(origin: &str) -> Option<String> {
     if labels.len() < 2 {
         return None;
     }
-    // If the last two labels form a known multi-part suffix, the registrable
-    // domain is the last three; else the last two.
-    let last_two = labels[labels.len() - 2..].join(".");
-    let take = if MULTI_PART_SUFFIXES.contains(&last_two.as_str()) {
-        // Need a label in front of the multi-part suffix; without one it is a
-        // bare public suffix (already handled above, but guard again).
-        if labels.len() < 3 {
-            return None;
-        }
-        3
-    } else {
-        2
-    };
+    // The registrable domain is one label in front of the longest known public
+    // suffix (multi-part registry or shared hosting); with none known, the
+    // suffix is the TLD and the registrable domain is the last two labels.
+    let suffix_labels = known_suffix(&host).map_or(1, |suffix| suffix.split('.').count());
+    let take = suffix_labels + 1;
+    if labels.len() < take {
+        // The host IS the suffix (handled above, but guard again).
+        return None;
+    }
     Some(labels[labels.len() - take..].join("."))
 }
 
@@ -229,8 +323,15 @@ pub fn registrable_domain(origin: &str) -> Option<String> {
 /// Returns `false` unless **both** the stored URL and the origin resolve to the
 /// same non-empty registrable domain. A stored URL with no registrable domain
 /// (blank, an IP, a bare suffix) never matches anything.
+///
+/// **No scheme downgrade:** a login saved with an `https://` URL does not match
+/// an `http://` origin. A bare stored host (no scheme) states no preference and
+/// matches either.
 #[must_use]
 pub fn url_matches_origin(url: &str, origin: &str) -> bool {
+    if scheme_of(url).as_deref() == Some("https") && scheme_of(origin).as_deref() == Some("http") {
+        return false;
+    }
     match (registrable_domain(url), registrable_domain(origin)) {
         (Some(a), Some(b)) => a == b,
         _ => false,
@@ -358,5 +459,136 @@ mod tests {
         assert!(!url_matches_origin("", "https://example.com"));
         assert!(!url_matches_origin("com", "https://example.com"));
         assert!(!url_matches_origin("https://example.com", ""));
+    }
+
+    #[test]
+    fn https_logins_never_match_an_http_page() {
+        assert!(!url_matches_origin(
+            "https://example.com/login",
+            "http://example.com"
+        ));
+        assert!(!url_matches_origin(
+            "https://login.example.com",
+            "HTTP://www.example.com/"
+        ));
+        assert!(url_matches_origin(
+            "https://example.com/login",
+            "https://www.example.com"
+        ));
+    }
+
+    #[test]
+    fn an_http_login_still_matches_http_and_https() {
+        assert!(url_matches_origin(
+            "http://intranet.example.com",
+            "http://intranet.example.com"
+        ));
+        assert!(url_matches_origin(
+            "http://example.com",
+            "https://example.com"
+        ));
+    }
+
+    #[test]
+    fn a_bare_stored_host_matches_either_scheme() {
+        assert!(url_matches_origin("example.com", "http://example.com"));
+        assert!(url_matches_origin("example.com", "https://example.com"));
+    }
+
+    #[test]
+    fn scheme_parsing() {
+        assert_eq!(scheme_of("HTTPS://x.com").as_deref(), Some("https"));
+        assert_eq!(scheme_of("http://x.com").as_deref(), Some("http"));
+        assert_eq!(
+            scheme_of("chrome-extension://abc").as_deref(),
+            Some("chrome-extension")
+        );
+        assert_eq!(scheme_of("x.com"), None);
+        assert_eq!(scheme_of("//x.com"), None);
+        assert_eq!(scheme_of("1http://x.com"), None);
+    }
+
+    #[test]
+    fn tenants_of_a_shared_hosting_platform_are_separate_sites() {
+        assert_eq!(
+            registrable_domain("myapp.vercel.app").as_deref(),
+            Some("myapp.vercel.app")
+        );
+        assert_eq!(
+            registrable_domain("https://preview-1.myapp.vercel.app").as_deref(),
+            Some("myapp.vercel.app")
+        );
+        assert!(!url_matches_origin(
+            "https://myapp.vercel.app",
+            "https://attacker.vercel.app"
+        ));
+        assert!(!url_matches_origin(
+            "https://alice.github.io/",
+            "https://mallory.github.io"
+        ));
+        assert!(!url_matches_origin(
+            "https://shop.herokuapp.com",
+            "https://evil.herokuapp.com"
+        ));
+        assert!(url_matches_origin(
+            "https://myapp.vercel.app/login",
+            "https://myapp.vercel.app"
+        ));
+    }
+
+    #[test]
+    fn a_bare_shared_hosting_suffix_has_no_registrable_domain() {
+        for host in [
+            "vercel.app",
+            "github.io",
+            "https://herokuapp.com/",
+            "web.core.windows.net",
+        ] {
+            assert_eq!(registrable_domain(host), None, "{host}");
+        }
+    }
+
+    #[test]
+    fn the_longest_known_suffix_wins() {
+        // `web.core.windows.net` (3 labels) beats nothing shorter being listed.
+        assert_eq!(
+            registrable_domain("mysite.web.core.windows.net").as_deref(),
+            Some("mysite.web.core.windows.net")
+        );
+        // `up.railway.app` beats `railway.app`.
+        assert_eq!(
+            registrable_domain("svc.up.railway.app").as_deref(),
+            Some("svc.up.railway.app")
+        );
+        assert_eq!(
+            registrable_domain("svc.railway.app").as_deref(),
+            Some("svc.railway.app")
+        );
+    }
+
+    #[test]
+    fn the_platforms_own_sites_are_unaffected() {
+        // The platform's apex domains are ordinary registrable domains.
+        assert_eq!(
+            registrable_domain("vercel.com").as_deref(),
+            Some("vercel.com")
+        );
+        assert_eq!(
+            registrable_domain("www.github.com").as_deref(),
+            Some("github.com")
+        );
+        assert!(url_matches_origin(
+            "https://github.com/login",
+            "https://gist.github.com"
+        ));
+    }
+
+    #[test]
+    fn suffix_matching_is_label_aligned() {
+        // `notvercel.app` must not be treated as under `vercel.app`.
+        assert_eq!(
+            registrable_domain("a.notvercel.app").as_deref(),
+            Some("notvercel.app")
+        );
     }
 }

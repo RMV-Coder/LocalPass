@@ -22,7 +22,7 @@
   import type { ItemView, TotpView, AttachmentView } from "../lib/types";
   import { MASK, typeLabel, fieldLabel, formatTimestamp, groupTotp, humanSize } from "../lib/format";
   import { formatDotenv, buildRunCommand } from "../lib/envset";
-  import { copyToClipboard } from "../lib/clipboard";
+  import { copySecret, copyToClipboard } from "../lib/clipboard";
   import { toast } from "../lib/toast";
   import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 
@@ -102,7 +102,7 @@
 
   async function copyEnvExport() {
     if (envExport === null) return;
-    const ok = await copyToClipboard(envExport);
+    const ok = await copySecret(envExport);
     toast(ok ? "Copied .env to clipboard" : "Copy failed", ok ? "ok" : "error");
   }
 
@@ -270,7 +270,7 @@
         return;
       }
     }
-    const ok = await copyToClipboard(value);
+    const ok = await copySecret(value);
     toast(ok ? "Copied to clipboard" : "Copy failed", ok ? "ok" : "error");
   }
 
@@ -300,7 +300,7 @@
 
   async function copyTotp() {
     if (!totp) return;
-    const ok = await copyToClipboard(totp.code);
+    const ok = await copySecret(totp.code);
     toast(ok ? "Code copied" : "Copy failed", ok ? "ok" : "error");
   }
 

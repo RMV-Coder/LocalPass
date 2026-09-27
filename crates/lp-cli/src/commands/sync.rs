@@ -231,8 +231,15 @@ fn status(session: &lp_vault::Session, vault_ref: &str, json_out: bool) -> Resul
 /// `localpass sync adopt` — join vaults shared to this device: scan the root
 /// for key blobs addressed to us, import + enroll each, then pull its items.
 fn adopt(session: &lp_vault::Session, dir: &Path) -> Result<()> {
-    let adopted =
-        engine::adopt(session, &root_str(dir), &FsStoreFactory).map_err(map_sync_error)?;
+    let report =
+        engine::adopt_report(session, &root_str(dir), &FsStoreFactory).map_err(map_sync_error)?;
+    for (vault_id, reason) in &report.rejected {
+        eprintln!(
+            "ALARM: refused a vault-key share for {}: {reason}",
+            vault_id.to_hyphenated()
+        );
+    }
+    let adopted = report.adopted;
     if adopted.is_empty() {
         println!(
             "no shared vaults addressed to this device under {}",

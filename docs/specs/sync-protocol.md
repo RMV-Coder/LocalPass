@@ -307,6 +307,8 @@ T13 for a zero-trust channel.
 - All live sync is **mutually authenticated** by those pinned static keys
   (Noise XX/IK, PRD §5.2/§6.4) — MITM (T4) is defeated by the pinning + SAS.
 - Only paired devices' `device_id`s are accepted as op authors (§5 step 1).
+- The same rule gates **vault-key shares** (§7.1 `keys/`): a share is signed by
+  the sharing device and accepted only from a pinned peer.
 - Team membership, roles, and revocation are **P2** (PRD §4.5); this MVP spec
   covers single-user multi-device only. Extension point: membership-change ops
   will be a new signed `op_kind` gated on admin keys — not defined here.
@@ -341,6 +343,27 @@ is fully untrusted (§5 protects it).
   attachments/
     <content_hash_hex>.blob              -- content-addressed encrypted attachment blob
 ```
+
+- **`keys/<device_id>-<vault_id>.wrapped`** — a vault-key share for the device
+  named in the file name. Format 2, the only one accepted:
+
+  ```text
+  "LPS2" || sender_device_id (16) || u32 LE len || sealed_key || u32 LE len ||
+  sealed_name || Ed25519 signature (64)
+  ```
+
+  `sealed_key` / `sealed_name` are sealed to the recipient's X25519 key (AADs
+  bind the vault id and the recipient). The signature, made with the sender's
+  device signing key under the context `localpass/v1/sign/vault-key-share`,
+  covers `vault_id || recipient_device_id || sender_device_id ||` both
+  length-prefixed sealed segments. On adopt the recipient **requires the sender
+  to be a pinned peer** (or itself) and verifies the signature **before**
+  unsealing; an unsigned (old-format) share, an unpinned sender, or a bad
+  signature is refused and reported as an alarm, and the blob is left in place.
+  One refused share never blocks adopting the others. Sealing alone
+  authenticates only the recipient, so without this check anyone able to write
+  the folder could plant a vault key of their choosing, or swap a genuine one
+  before adoption.
 
 - **`attachments/<content_hash_hex>.blob`** — the encrypted attachment bodies.
   Content-addressed by `BLAKE3(ciphertext)` (the same `content_hash` an
