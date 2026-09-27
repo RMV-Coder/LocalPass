@@ -32,22 +32,28 @@ pub const MCP_CHILD_ENV: &str = "LOCALPASS_MCP_CHILD";
 const LOCALPASS_BINARIES: &[&str] = &["localpass", "localpass-daemon", "localpass-native-host"];
 
 /// Whether `program` (as the agent wrote it: a bare name or a path) names a
-/// LocalPass executable. Compares the file stem case-insensitively, so
-/// `localpass`, `LocalPass.exe` and `C:\bin\localpass.exe` all match; also
-/// matches the running executable by canonical path, which catches a renamed
-/// copy invoked by path.
+/// LocalPass executable. Compares the base name without its extension,
+/// case-insensitively, so `localpass`, `LocalPass.exe` and
+/// `C:\bin\localpass.exe` all match; also matches the running executable by
+/// canonical path, which catches a renamed copy invoked by path.
 #[must_use]
 pub fn is_localpass_program(program: &str) -> bool {
-    let path = Path::new(program);
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if LOCALPASS_BINARIES.contains(&stem.as_str()) {
+    if LOCALPASS_BINARIES.contains(&program_stem(program).as_str()) {
         return true;
     }
-    same_file(path, std::env::current_exe().ok().as_deref())
+    same_file(Path::new(program), std::env::current_exe().ok().as_deref())
+}
+
+/// The lower-cased base name of `program` without its extension. Splits on
+/// BOTH `/` and `\` on every platform: `std::path` treats `\` as a separator
+/// only on Windows, but an agent may write either style anywhere.
+fn program_stem(program: &str) -> String {
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let stem = match name.rsplit_once('.') {
+        Some((stem, _ext)) if !stem.is_empty() => stem,
+        _ => name,
+    };
+    stem.to_ascii_lowercase()
 }
 
 fn same_file(candidate: &Path, current: Option<&Path>) -> bool {
@@ -104,6 +110,21 @@ mod tests {
         ] {
             assert!(is_localpass_program(p), "{p} must be refused");
         }
+    }
+
+    #[test]
+    fn stems_are_taken_across_both_separator_styles_on_every_platform() {
+        assert_eq!(
+            program_stem(r"C:\Users\me\.cargo\bin\localpass.exe"),
+            "localpass"
+        );
+        assert_eq!(program_stem("/usr/local/bin/localpass"), "localpass");
+        assert_eq!(
+            program_stem(r"bin/sub\LocalPass-Daemon.EXE"),
+            "localpass-daemon"
+        );
+        assert_eq!(program_stem("localpass"), "localpass");
+        assert_eq!(program_stem(".hidden"), ".hidden");
     }
 
     #[test]
