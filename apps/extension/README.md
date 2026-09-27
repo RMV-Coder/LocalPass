@@ -38,6 +38,12 @@ localpass browser register --chrome --extension-id <ID>
 > Note on the Firefox ID: Chrome derives the extension ID from the unpacked
 > folder, while Firefox uses the add-on ID from the manifest / signing. Register
 > with the ID your browser actually shows on its extensions page.
+>
+> **Firefox always needs `--extension-id`.** A Firefox add-on ID is declared by
+> the add-on itself, so there is no safe default to allowlist: any add-on could
+> claim a built-in one. `localpass browser register --firefox` without an ID is
+> refused, and a bare `localpass browser register` (all browsers) registers
+> Chrome and skips Firefox with a note.
 
 To undo: `localpass browser unregister --all`.
 

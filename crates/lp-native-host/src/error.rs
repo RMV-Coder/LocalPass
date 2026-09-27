@@ -26,6 +26,16 @@ pub enum Error {
     /// A Windows registry operation failed, carrying the OS error for diagnosis.
     #[error("registry error: {0}")]
     Registry(String),
+
+    /// No extension id was given for a browser that has no safe default.
+    /// Firefox add-on ids are self-declared in the add-on's own manifest, so a
+    /// built-in placeholder could be claimed by any add-on, which would then be
+    /// allowlisted to talk to the host.
+    #[error(
+        "{0} needs an explicit extension id (--extension-id <add-on id>): a Firefox add-on id \
+         is self-declared, so there is no safe default to allowlist"
+    )]
+    MissingExtensionId(&'static str),
 }
 
 /// The registration result alias.
