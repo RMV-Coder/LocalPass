@@ -1091,15 +1091,14 @@ unless --force."
         json: bool,
     },
     /// Share this vault's key to one of your other (trusted) devices via the
-    /// sync channel, so that device can open the vault after `sync pull`.
+    /// sync channel, so that device can open the vault after `sync adopt`.
     #[command(long_about = "Share a vault to another of your devices.\n\n\
 Seals this vault's key to the target device's public key and ships it through \
-the vault's sync directory (`keys/`); the peer imports it on `sync pull`. This \
+the vault's sync directory (`keys/`); the peer imports it with `sync adopt`. This \
 is single-user multi-device (PRD §4.5 team sharing is P2).\n\n\
-NOTE: in this build the sealed-key TRANSPORT + shipping are wired, but the \
-final unwrap step needs a key-transport primitive that is intentionally held \
-behind the crypto boundary; the command reports this clearly. Op sync and \
-device pairing are fully functional without it.")]
+The share is signed by this device, and the peer adopts it only if it has \
+trusted this device (`device trust`); a share from an untrusted device is \
+refused and reported.")]
     ShareToDevice {
         /// The target device id (from the peer's `device export-identity`).
         device_id: String,

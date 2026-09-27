@@ -9,7 +9,9 @@ A fully local, self-hosted password and secrets manager — an open-source alter
 The MVP feature set is implemented across eight crates/apps. See
 [docs/architecture.md](docs/architecture.md) for the full map and
 [docs/mvp-acceptance.md](docs/mvp-acceptance.md) for an honest, line-by-line
-status against the PRD (including what is still partial or deferred).
+status against the PRD (including what is still partial or deferred). What
+still stands between `main` and a 1.0 release is tracked in
+[docs/release-checklist.md](docs/release-checklist.md).
 
 | Component | Status |
 |-----------|--------|
