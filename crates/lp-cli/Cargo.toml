@@ -1,7 +1,7 @@
 [package]
 publish = false  # application crate; uses path deps, not published to crates.io
 name = "lp-cli"
-description = "LocalPass command-line interface (the `localpass` binary): account init, vault and item CRUD, generation, and password change — a fully local, direct-unlock CLI (no daemon yet)."
+description = "LocalPass command-line interface (the `localpass` binary): account, vaults and items, generation, secret injection (`run`/`env`), SSH agent, backup, import/export, sync, browser registration, and the MCP server — a fully local CLI that works directly or through the daemon."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

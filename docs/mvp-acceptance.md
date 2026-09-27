@@ -1,6 +1,6 @@
 # LocalPass MVP Acceptance Scorecard
 
-**Date:** 2026-07-04
+**Date:** 2026-07-04 · **Last reviewed:** 2026-09-28, against `main` at `fa174fa` (after #39–#44)
 **Scope:** an honest, line-by-line status of the PRD §9.1 "MVP (v1.0)" IN and OUT
 lists against what the code actually implements. This is the anti-overclaiming
 document: where something is a stub, partial, or a documented-but-unbuilt
@@ -11,7 +11,8 @@ Legend: ✅ **Done** · ◑ **Partial** · ⛔ **Deferred / not built**
 Cross-references: [PRD.md](../PRD.md) §9.1 (the checklist source), §4 (functional
 requirements), §11 (decision log); [docs/architecture.md](architecture.md);
 [SECURITY.md](../SECURITY.md); the format specs under [specs/](specs/); and
-[LESSONS.md](../LESSONS.md) (build history / decisions).
+[LESSONS.md](../LESSONS.md) (build history / decisions). The actionable list of
+what stands between here and a 1.0 release is [release-checklist.md](release-checklist.md).
 
 ---
 
@@ -40,13 +41,14 @@ requirements), §11 (decision log); [docs/architecture.md](architecture.md);
 | backup / restore / verify | ✅ | `localpass backup create/list/verify/restore` | SQLite Online Backup snapshot; verify checks hashes + integrity + (with password) recoverability; full and single-item restore. |
 | import / export | ✅ | `localpass import`, `localpass export`; `lp-porter` | Works for all MVP formats, including KDBX 4 (KeePass) — see §1.7. |
 | Daemon | ✅ | `localpass daemon start/stop/status`, `unlock`, `lock`; `lp-daemon` | Holds one unlocked `Session` behind same-user-only IPC; idle auto-lock (default 600s); zeroize on lock. CLI falls back to direct-unlock when no daemon / `--no-daemon`. |
+| MCP server for AI agents *(beyond PRD §9.1)* | ✅ | `localpass mcp`; `lp-cli/src/mcp/` | No tool returns a raw secret: item notes are masked, and `run_with_secrets` redacts injected values including JSON-, percent-, base64- and UTF-16-encoded echoes. It refuses to run LocalPass itself and marks children with `LOCALPASS_MCP_CHILD` (#40). **Stated limit:** a deliberately hostile same-user child can still reach an unlocked daemon — mcp-server.md §7; a daemon-side human-presence check is tracked in the release checklist. |
 
 ### 1.3 Desktop GUI (Win/macOS/Linux)
 
 | PRD MVP item | Status | Implemented in | Note |
 |--------------|--------|----------------|------|
-| Browse, search, CRUD-view, generator, TOTP, history, settings | ◑ | `apps/desktop` (Tauri 2 + Svelte 5) | Built as a **daemon-client shell**: unlock, browse vaults, search, masked item view, reveal/copy on gesture, live TOTP, local generator. See caveats below. |
-| Item **create/edit/delete** from the GUI | ⛔ | — | The daemon protocol *has* `CreateItem`/`UpdateItem`/`DeleteItem`/`RestoreVersion`, but the GUI command surface (`commands.rs`) exposes only read/search/reveal/totp/generate — no write commands are wired into the GUI. Item mutation is CLI-only today. |
+| Browse, search, CRUD, generator, TOTP, history, settings | ◑ | `apps/desktop` (Tauri 2 + Svelte 5) | A **daemon-client** app: account creation, unlock, browse vaults, search, full item CRUD (below), reveal/copy on gesture (secret copies kept out of clipboard history and cleared after 30 s, #42), live TOTP, generator, `.env` documents, encrypted attachments, trash + restore, device linking + sync, password health, and a Dev/agent-activity view. **Not in the GUI:** per-item **version history** browsing/restore (CLI `item history/restore` only) and a settings screen. |
+| Item **create/edit/delete** from the GUI | ✅ | `commands::create_item` / `update_item` / `delete_item` (+ `list_trash`, `untrash_item`); `ItemForm.svelte` | Wired end to end over the daemon protocol's `CreateItem`/`UpdateItem`/`DeleteItem`. Deleting moves an item to Trash; Trash lists and restores. |
 | Tray quick-search | ⛔ | — | Not implemented in the MVP GUI shell (README scopes the GUI to unlock/browse/search/view/generate). |
 | Keyboard-first + accessibility (WCAG 2.2 AA target) | ◑ | `apps/desktop` | Keyboard-operable list, semantic controls, `aria-live`, honors `prefers-color-scheme`/`prefers-reduced-motion`; formal WCAG AA validation not asserted. |
 
@@ -77,15 +79,15 @@ db credential) are reserved in the payload schema but not implemented
 | Device pairing | ◑ | `localpass device export-identity/trust`; `lp-sync` (`identity`) | Offline pairing groundwork only: exchange identity strings out-of-band, confirm the fingerprint by hand, then trust. Only trusted devices are accepted as op authors. |
 | **SAS** pairing (6-word phrase, mDNS discovery) | ⛔ | — | The spoken-SAS + mDNS live-pairing UX is a **documented later wave** (sync-protocol.md §6; CLI `sync`/`device` long-help both say so). Today it is manual fingerprint confirmation. |
 | **Direct LAN / overlay** live transport (Noise XX/IK, mDNS) | ⛔ | — | **Not built.** A documented extension point: the ingest verifier + merge are transport-agnostic and would be reused, but no Noise handshake / mDNS code exists (sync-protocol.md §7.4, §10). PRD §9.1 lists "direct LAN/overlay" as MVP — **this is a gap vs. the PRD** (see §3). |
-| Cross-device VaultKey sharing (single-user multi-device) | ◑ | `localpass vault share-to-device`, `sync adopt`; `lp-sync` (`share_vault_to_device`/`import_shared_key`) | Sealed-key transport + shipping are wired; the CLI reports that the **final unwrap step needs a key-transport primitive held behind the crypto boundary** (a documented `lp-crypto` `from_bytes`/`to_bytes` gap — see §3). Op sync + pairing are fully functional without it. |
+| Cross-device VaultKey sharing (single-user multi-device) | ✅ | `localpass vault share-to-device`, `sync adopt`; `lp-sync` (`share_vault_to_device`/`adopt_report`); `lp-vault` (`share_vault_key_to_peer`/`import_shared_vault_key`) | Sealed through `lp-crypto`'s typed key transport (`seal_key_for` → `SealingKeyPair::open_key`), so raw key bytes never surface. Since #43 shares are **signed** by the sending device (format `LPS2`, sync-protocol.md §7.1) and adopted **only from a pinned peer**; unsigned or untrusted shares are refused and reported as alarms. Covered by `lp-sync/tests/two_device.rs` and `key_share_auth.rs`. |
 
 ### 1.6 Browser extension (Chrome/Firefox): fill + save, native messaging
 
 | PRD MVP item | Status | Where | Note |
 |--------------|--------|-------|------|
 | Native-messaging **host** | ✅ | `localpass-native-host` (`lp-native-host`) | Built: native-endian u32-framed stdio, 1 MiB cap, fill-scoped (`Status`/`MatchLogins`/`FillLogin` only), holds no keys. |
-| Host **registration** | ✅ | `localpass browser register/unregister`; `lp-native-host/register.rs` | Writes the `com.localpass.host` manifest per-OS (+ Windows HKCU registry key); `allowed_origins`/`allowed_extensions` allowlist; placeholder extension id until a real one is published. |
-| Server-side origin re-validation | ✅ | `lp-daemon/origin.rs` (`registrable_domain`) | eTLD+1 match is the authoritative server-side check on `FillLogin`; lookalikes never match; bare suffixes/IP/localhost refused. **MVP limitation:** conservative heuristic, no full PSL (see §3). |
+| Host **registration** | ✅ | `localpass browser register/unregister`; `lp-native-host/register.rs` | Writes the `com.localpass.host` manifest per-OS (+ Windows HKCU registry key); `allowed_origins`/`allowed_extensions` allowlist. Chrome falls back to an unobtainable placeholder id; **Firefox requires `--extension-id`** (#44: add-on ids are self-declared, so there is no safe default). |
+| Server-side origin re-validation | ✅ | `lp-daemon/origin.rs` (`registrable_domain`) | eTLD+1 match is the authoritative server-side check on `FillLogin`; lookalikes never match; bare suffixes/IP/localhost refused. Since #41: an `https` login never fills an `http` page, and shared-hosting suffixes (`vercel.app`, `github.io`, …) are treated as public. **MVP limitation:** built-in suffix sets, not the full PSL (see §3). |
 | Browser **extension UI** (the WebExtension itself: fill on gesture, no auto-submit, no cross-origin iframe fill) | ◑ | `apps/extension/` | **Built** — MV3 extension talking to the native host. Enforces the PRD §4.7 rules: fill only on the user's click, never auto-submit, top-frame only (no cross-origin iframe fill), minimal permissions, no always-on content scripts. **Fill** works end-to-end; **inline save prompt is not built** (the host is fill-scoped — no save capability). Pending live in-browser verification (client-side, not covered by cargo CI). |
 
 ### 1.7 Import / Export
@@ -117,7 +119,7 @@ db credential) are reserved in the payload schema but not implemented
 | PRD MVP item | Status | Where | Note |
 |--------------|--------|-------|------|
 | Format specs published in-repo | ✅ | `docs/specs/{vault-format,search-index,sync-protocol}.md` | Ratified v1.0, implementation-grade. |
-| Signed releases for all platforms | ⛔ | `.github/workflows/ci.yml` (CI only) | **Not built.** A plain CI workflow (build/test/lint) exists, but there is **no** `cargo-dist` config, release/signing workflow, signing keys, SBOM, or provenance (the `lp-crypto` `sign` module reserves an Ed25519 `CONTEXT_RELEASE` context, but nothing produces or verifies a release signature). There are no releases at all (SECURITY.md: `main` only). Mark **deferred** — a pre-release engineering task, not a core code gap. |
+| Signed releases for all platforms | ⛔ | `.github/workflows/ci.yml` (CI); `.github/workflows/desktop-release.yml` | **Not built as specified.** `desktop-release.yml` builds the Windows MSI/NSIS bundles (not code-signed) and a signed Android APK. There is **no** macOS/Linux desktop build, notarization, minisign/Sigstore release signature, SBOM, provenance, or CLI release artifact (`lp-crypto` reserves `CONTEXT_RELEASE`, but nothing produces or verifies a release signature). There are no tagged releases (SECURITY.md: `main` only). |
 
 ---
 
@@ -211,41 +213,45 @@ tracked follow-ups. They are the real content of this document.
    (passphrase input is TTY-only), so a **one-time manual `age -d backup.age`
    check by a human is still worth doing before 1.0.**
 
-10. **Cross-device VaultKey unwrap primitive.** `vault share-to-device` ships a
-    sealed VaultKey but the final unwrap needs an `lp-crypto`
-    `SigningKeyPair`/`SealingKeyPair` `from_bytes`/`to_bytes` primitive that is
-    intentionally still behind the crypto boundary (also the reason device
-    identity keys are session-scoped rather than reconstructed from stored
-    wrapped seeds — lp-vault lib docs). Two small additive `lp-crypto` methods
-    close this with no schema change. Op sync + pairing work without it.
+10. **Cross-device VaultKey unwrap primitive. — RESOLVED.** Shares unwrap
+    through `lp-crypto`'s typed key transport (`seal_key_for` →
+    `SealingKeyPair::open_key`), and device identity keys persist as
+    AccountKey-wrapped seeds (`SigningKeyPair::secret_seed`/`from_seed`). Since
+    #43 shares are also signed and accepted only from pinned peers.
 
-11. **Signed releases / release engineering (PRD §9.1, §5.1, §6.9).** No release
-    pipeline, signing, SBOM, or provenance yet. Deferred until the audit and
-    format-freeze gates pass.
+11. **Signed releases / release engineering (PRD §9.1, §5.1, §6.9).** Only an
+    unsigned Windows bundle and a signed Android APK are built
+    (`desktop-release.yml`); no macOS/Linux builds, release signing, SBOM, or
+    provenance yet. Deferred until the audit and format-freeze gates pass.
 
 12. **Automatic backup scheduling (PRD §4.11).** The backup *mechanism* (create,
     rotate/`--keep`, verify, restore) is complete, but the "default daily"
     automatic scheduling is not implemented in-process; today it is on-demand or
     via an external scheduler.
 
-13. **GUI write path + tray quick-search (PRD §9.1).** The GUI shell is read /
-    search / reveal / totp / generate only; item create/edit/delete and tray
-    quick-search are not wired into the GUI (the daemon protocol supports the
-    writes; the GUI does not expose them). Item mutation is CLI-only.
+13. **GUI tray quick-search + version history (PRD §9.1).** The GUI write path
+    (create/edit/delete, trash/restore) is now built. Still missing: tray
+    quick-search, and browsing/restoring an item's version history from the GUI
+    (CLI `item history/restore` only).
 
 14. **Import file shredding (PRD §4.6).** Not implemented — import files are only
     read, never overwritten/deleted.
 
+15. **Fuzzing corpus and performance benchmarks (PRD §9.1 gates, §2.2).** Neither
+    exists yet: there is no fuzz harness for the importers, the sync op parser,
+    or the share-blob parser, and no benchmark measures the §2.2 targets
+    (unlock < 1.5 s and search < 50 ms p95 at 10k items; daemon < 50 MB RSS).
+    Both are acceptance gates.
+
+16. **Pre-1.0 security review follow-ups (2026-09).** An internal review found
+    and fixed seven issues (#40–#44). Its remaining follow-ups — a daemon-side
+    human-presence check for MCP sessions, five subsystems not yet reviewed,
+    dependency-policy failures in the desktop workspace, and hardening items —
+    are tracked in [release-checklist.md](release-checklist.md). Details of
+    unfixed items are held privately per SECURITY.md.
+
 ### Documentation discrepancies noted in passing
 
-- The [README.md](../README.md) "What exists today" table is **stale**: it lists
-  the daemon, `localpass run`, SSH agent, import/export, backup, file-based sync,
-  and pairing as "🔜 next / planned", but all of those are now built (this
-  scorecard supersedes it). GUI shell and the browser extension UI
-  (`apps/extension/`) are both built; extension fill is pending live in-browser
-  verification.
-- The `lp-cli` `Cargo.toml` package description still says "direct-unlock CLI
-  (no daemon yet)"; the daemon and daemon-client path are in fact built.
-
-These are documentation-only lags (no code impact) and are recorded here rather
-than fixed, per this task's constraints.
+- **Fixed (2026-09-28):** the README "What exists today" table is current; the
+  `lp-cli` package description no longer says "no daemon yet"; and the
+  `vault share-to-device` long help no longer claims the unwrap step is missing.
