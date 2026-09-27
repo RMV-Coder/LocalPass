@@ -102,6 +102,17 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 # --- plugin at all. A scan only fills the identity box — the out-of-band
 # --- fingerprint comparison still gates trusting (§3.3), exactly as for a
 # --- pasted string. There is no auto-trust path. ---
+# --- Desktop clipboard for SECRET copies (PRD §8 T9). Justification: the
+# --- webview's Clipboard API can neither keep a copied password out of the
+# --- OS clipboard history / cloud clipboard nor clear it afterwards. arboard
+# --- sets the platform exclusion formats (Windows: CanIncludeInClipboardHistory,
+# --- CanUploadToCloudClipboard, ExcludeClipboardContentFromMonitorProcessing;
+# --- Linux: the password-manager hint) and lets us clear the clipboard after
+# --- 30 s and on lock. `default-features = false` drops the `image` crate:
+# --- we only ever write text. Desktop-only: mobile keeps the webview path. ---
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+arboard = { version = "3", default-features = false }
+
 [target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
 tauri-plugin-barcode-scanner = "2"
 

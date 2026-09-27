@@ -252,13 +252,26 @@ pub fn create_account(mut password: String, mut confirm: String) -> Result<Creat
 }
 
 /// Lock the vault now (zeroizing key material in the daemon). Idempotent.
+/// Also clears the clipboard if it still holds a secret this app copied.
 #[tauri::command]
 pub fn lock() -> Result<SessionState, String> {
+    crate::clipboard::clear_on_lock();
     match daemon::call(&Request::Lock) {
         Ok(_) => Ok(status()),
         Err(DaemonError::NotRunning) => Ok(SessionState::NoDaemon),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Copy a SECRET the webview already holds (a revealed field, a TOTP code, a
+/// generated password, the Emergency Kit key) to the system clipboard,
+/// excluded from clipboard history and cloud sync, and cleared again after
+/// [`crate::clipboard::CLEAR_AFTER`] or on lock. See [`crate::clipboard`].
+/// Returns nothing: no value crosses back to the webview.
+#[tauri::command]
+pub fn copy_secret(text: String) -> Result<(), String> {
+    let text = zeroize::Zeroizing::new(text);
+    crate::clipboard::copy_secret(&text)
 }
 
 /// List the vaults for the sidebar. Requires an unlocked session.
