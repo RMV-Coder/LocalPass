@@ -39,6 +39,10 @@ pub enum SessionState {
         profile: String,
         /// Seconds until idle auto-lock (`None` if auto-lock disabled).
         idle_remaining_secs: Option<u64>,
+        /// An AI agent is connected, so changes and consent ask for the master
+        /// password (`mcp-server.md` §7). The UI shows a banner.
+        #[serde(default)]
+        agent_session: bool,
     },
     /// A daemon is running but no session is held — show the unlock screen.
     Locked {
@@ -539,11 +543,13 @@ pub fn session_state_from_status(resp: &Response) -> SessionState {
             profile,
             vault_count,
             idle_remaining_secs,
+            agent_session,
             ..
         } => SessionState::Unlocked {
             vault_count: vault_count.unwrap_or(0),
             profile: profile.clone(),
             idle_remaining_secs: *idle_remaining_secs,
+            agent_session: *agent_session,
         },
         Response::Status {
             state: LockState::Locked,
@@ -663,6 +669,7 @@ mod tests {
             ssh_identity_count: 0,
             pairing_mode_secs: None,
             agent_fill_secs: None,
+            agent_session: false,
         };
         let st = session_state_from_status(&resp);
         assert_eq!(
@@ -671,6 +678,7 @@ mod tests {
                 vault_count: 2,
                 profile: "/home/u/.local/share/localpass".into(),
                 idle_remaining_secs: Some(540),
+                agent_session: false,
             }
         );
     }
@@ -687,6 +695,7 @@ mod tests {
             ssh_identity_count: 0,
             pairing_mode_secs: None,
             agent_fill_secs: None,
+            agent_session: false,
         };
         assert_eq!(
             session_state_from_status(&resp),

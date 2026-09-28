@@ -28,9 +28,11 @@ use std::time::{Duration, Instant};
 use lp_crypto::SecretKey;
 use lp_sync::store::{FsStoreFactory, StoreFactory};
 use lp_vault::{AccountStore, Item, Session, Vault, VaultId};
+use zeroize::Zeroize;
 
 use crate::protocol::{
-    FillRefusal, FillReport, FillStatus, LockState, Request, Response, WireItem,
+    FillRefusal, FillReport, FillStatus, LockState, MAX_PRESENCE_FAILURES, PRESENCE_GRANT_SECS,
+    Request, Response, WireItem,
 };
 use crate::render;
 
@@ -51,6 +53,33 @@ const AGENT_FILL_WINDOW: Duration = Duration::from_secs(180);
 /// seconds, nested inside the arm window. Long enough for a page to settle,
 /// short enough that a forgotten intent is not redeemable later.
 const FILL_INTENT_TTL: Duration = Duration::from_secs(30);
+
+/// How many live presence grants the daemon keeps at once. Each confirming
+/// client (a GUI, a CLI run) holds its own; the oldest is dropped past this, so
+/// a loop of confirmations cannot grow the list without bound.
+const MAX_PRESENCE_GRANTS: usize = 8;
+
+/// One live presence grant (`mcp-server.md` §7): the random token handed to the
+/// client that confirmed, and when it stops counting.
+struct PresenceGrant {
+    token: [u8; 32],
+    expires_at: Instant,
+}
+
+/// Facts about a request that are not in the request itself: the connection it
+/// arrived on, and the presence grant the client attached to the envelope.
+///
+/// The in-process engine (the mobile app) never opens an agent session, so it
+/// passes [`RequestContext::default`] via [`handle`] and the presence check never
+/// fires there.
+#[derive(Default)]
+pub struct RequestContext {
+    /// This connection has already registered as an AI-agent session
+    /// ([`Request::BeginAgentSession`]).
+    pub agent_connection: bool,
+    /// The presence grant token from the request envelope, if any.
+    pub presence_grant: Option<String>,
+}
 
 /// The open agent-fill arm window and the per-item scope it covers.
 ///
@@ -127,6 +156,18 @@ pub struct State {
     /// How long a fresh fill intent stays redeemable. [`FILL_INTENT_TTL`] in
     /// production; see [`agent_fill_window`](Self::agent_fill_window).
     fill_intent_ttl: Duration,
+    /// How many connections have registered as AI-agent sessions and are still
+    /// open. While non-zero, consent and change requests need a presence grant.
+    /// The server decrements it when such a connection closes.
+    agent_sessions: usize,
+    /// Live presence grants. In memory only, and dropped on lock: a grant
+    /// vouches for a person at *this* unlock, never a later one.
+    presence_grants: Vec<PresenceGrant>,
+    /// Consecutive wrong passwords to [`Request::ConfirmPresence`].
+    presence_failures: u32,
+    /// How long a fresh grant lasts. [`PRESENCE_GRANT_SECS`] in production; a
+    /// test shortens it with [`set_presence_ttl`](Self::set_presence_ttl).
+    presence_ttl: Duration,
 }
 
 impl State {
@@ -164,6 +205,10 @@ impl State {
             pending_fill: None,
             agent_fill_window: AGENT_FILL_WINDOW,
             fill_intent_ttl: FILL_INTENT_TTL,
+            agent_sessions: 0,
+            presence_grants: Vec::new(),
+            presence_failures: 0,
+            presence_ttl: Duration::from_secs(PRESENCE_GRANT_SECS),
         }
     }
 
@@ -246,6 +291,58 @@ impl State {
         }
         self.agent_fill = None;
         self.pending_fill = None;
+        self.presence_grants.clear();
+        self.presence_failures = 0;
+    }
+
+    /// Whether any AI-agent session is open, so consent and change requests
+    /// need a person present (`mcp-server.md` §7).
+    #[must_use]
+    pub fn agent_session_active(&self) -> bool {
+        self.agent_sessions > 0
+    }
+
+    /// Close one agent session. The server calls this when a connection that
+    /// registered with [`Request::BeginAgentSession`] closes, however it closes.
+    pub fn end_agent_session(&mut self) {
+        self.agent_sessions = self.agent_sessions.saturating_sub(1);
+    }
+
+    /// Change how long a fresh presence grant lasts. Nothing in the daemon calls
+    /// this; it lets a test watch a grant lapse (see
+    /// [`set_agent_fill_timings`](Self::set_agent_fill_timings)).
+    #[doc(hidden)]
+    pub fn set_presence_ttl(&mut self, ttl: Duration) {
+        self.presence_ttl = ttl;
+    }
+
+    /// Mint a fresh grant and return its hex token and lifetime in seconds.
+    fn issue_presence_grant(&mut self) -> (String, u64) {
+        let now = Instant::now();
+        self.presence_grants.retain(|g| now < g.expires_at);
+        if self.presence_grants.len() >= MAX_PRESENCE_GRANTS {
+            self.presence_grants.remove(0);
+        }
+        let mut token = [0u8; 32];
+        getrandom::getrandom(&mut token).expect("the OS random source is unavailable");
+        self.presence_grants.push(PresenceGrant {
+            token,
+            expires_at: now + self.presence_ttl,
+        });
+        (hex_encode(&token), self.presence_ttl.as_secs())
+    }
+
+    /// Whether `token` names a live grant. Every live grant is compared in
+    /// constant time, so the answer's timing says nothing about near misses.
+    fn presence_granted(&mut self, token: Option<&str>) -> bool {
+        let now = Instant::now();
+        self.presence_grants.retain(|g| now < g.expires_at);
+        let Some(presented) = token.and_then(hex_decode_32) else {
+            return false;
+        };
+        self.presence_grants
+            .iter()
+            .fold(false, |hit, g| hit | ct_eq(&g.token, &presented))
     }
 
     /// If unlocked, auto-lock has a non-zero timeout, and the idle time has
@@ -627,6 +724,10 @@ pub struct Handled {
     pub response: Response,
     /// If true, the server should exit after sending `response`.
     pub shutdown: bool,
+    /// If true, this request registered its connection as an AI-agent session;
+    /// the server must call [`State::end_agent_session`] when the connection
+    /// closes.
+    pub began_agent_session: bool,
 }
 
 impl Handled {
@@ -634,6 +735,7 @@ impl Handled {
         Self {
             response,
             shutdown: false,
+            began_agent_session: false,
         }
     }
 }
@@ -664,12 +766,20 @@ fn load_secret_key(profile: &Path, supplied: Option<&str>) -> Result<SecretKey, 
     })
 }
 
+/// Handle one request against `state` (the caller holds the state mutex), with
+/// no connection context: the entry point for an in-process engine, which never
+/// has an agent session. See [`handle_with`].
+pub fn handle(state: &mut State, request: Request) -> Handled {
+    handle_with(state, request, &RequestContext::default())
+}
+
 /// Handle one request against `state` (the caller holds the state mutex).
 ///
 /// Performs **no** client IO — it only reads/writes `state` and the vault files.
-/// On success it resets the idle timer.
+/// On success it resets the idle timer. `ctx` carries what the server knows
+/// about the connection; it drives the human-presence check.
 #[allow(clippy::too_many_lines)]
-pub fn handle(state: &mut State, request: Request) -> Handled {
+pub fn handle_with(state: &mut State, request: Request, ctx: &RequestContext) -> Handled {
     // Ping and Shutdown are answered regardless of profile/lock.
     match &request {
         Request::Ping => return Handled::reply(Response::Pong),
@@ -680,6 +790,7 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
                     message: Some("shutting down".into()),
                 },
                 shutdown: true,
+                began_agent_session: false,
             };
         }
         _ => {}
@@ -700,6 +811,21 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
     // Sweep a lapsed agent-fill window before answering, so the arm record has a
     // matching disarm record and a lapsed window can never gate anything.
     sweep_agent_fill(state);
+
+    // Human presence (mcp-server.md §7): while an AI agent holds a session, a
+    // consent or change request needs a person to have confirmed with the
+    // master password. The agent's own connection never qualifies, grant or
+    // not. A locked daemon falls through and answers `Locked` as usual.
+    if request.needs_presence()
+        && state.agent_session_active()
+        && state.is_unlocked()
+        && (ctx.agent_connection || !state.presence_granted(ctx.presence_grant.as_deref()))
+    {
+        record_denied(state, &request, lp_vault::DenyReason::PresenceRequired);
+        return Handled::reply(Response::PresenceRequired {
+            action: request.kind().to_string(),
+        });
+    }
 
     // Whether the REQUEST is an active one at all (see `counts_as_activity`);
     // the response gets a veto further down.
@@ -732,7 +858,29 @@ pub fn handle(state: &mut State, request: Request) -> Handled {
                 ssh_identity_count,
                 pairing_mode_secs: state.pairing_mode_remaining_secs(),
                 agent_fill_secs: state.agent_fill_remaining_secs(),
+                agent_session: state.agent_session_active(),
             })
+        }
+
+        Request::BeginAgentSession { .. } => {
+            // Once per connection: a repeat on the same connection is a no-op,
+            // so one agent can never hold two counts it only releases once.
+            if !ctx.agent_connection {
+                state.agent_sessions += 1;
+            }
+            Handled {
+                response: Response::Ok {
+                    message: Some("agent session".into()),
+                },
+                shutdown: false,
+                began_agent_session: true,
+            }
+        }
+
+        Request::ConfirmPresence { mut password, .. } => {
+            let handled = handle_confirm_presence(state, &password, ctx.agent_connection);
+            password.zeroize();
+            handled
         }
 
         Request::Unlock {
@@ -1349,6 +1497,8 @@ fn counts_as_activity(request: &Request) -> bool {
         // keep-alive `Status` would be. The `ArmFillIntent` and
         // `ReportFillOutcome` around them are real work and do count.
         Request::TakeFillIntent { .. } | Request::PollFillOutcome { .. } => false,
+        // Registering is bookkeeping, not a person using the vault.
+        Request::BeginAgentSession { .. } => false,
         _ => true,
     }
 }
@@ -1374,53 +1524,7 @@ fn response_counts_as_activity(response: &Response) -> bool {
 
 /// The profile string carried by a request, if any.
 fn request_profile(request: &Request) -> Option<&str> {
-    match request {
-        Request::Status { profile, .. }
-        | Request::AuditList { profile, .. }
-        | Request::GetEnvSet { profile, .. }
-        | Request::Unlock { profile, .. }
-        | Request::CreateAccount { profile, .. }
-        | Request::ListVaults { profile }
-        | Request::CreateVault { profile, .. }
-        | Request::DeleteVault { profile, .. }
-        | Request::ListItems { profile, .. }
-        | Request::PasswordHealth { profile, .. }
-        | Request::GetItem { profile, .. }
-        | Request::History { profile, .. }
-        | Request::Search { profile, .. }
-        | Request::Totp { profile, .. }
-        | Request::ResolveField { profile, .. }
-        | Request::GetRawPayload { profile, .. }
-        | Request::CreateItem { profile, .. }
-        | Request::UpdateItem { profile, .. }
-        | Request::DeleteItem { profile, .. }
-        | Request::RestoreVersion { profile, .. }
-        | Request::ListTrash { profile, .. }
-        | Request::UntrashItem { profile, .. }
-        | Request::MatchLogins { profile, .. }
-        | Request::FillLogin { profile, .. }
-        | Request::ExportIdentity { profile }
-        | Request::ListPeers { profile }
-        | Request::TrustDevice { profile, .. }
-        | Request::SetPairingMode { profile, .. }
-        | Request::SetAgentFillMode { profile, .. }
-        | Request::ArmFillIntent { profile, .. }
-        | Request::TakeFillIntent { profile }
-        | Request::ReportFillOutcome { profile, .. }
-        | Request::PollFillOutcome { profile }
-        | Request::SyncSetup { profile, .. }
-        | Request::SyncPush { profile, .. }
-        | Request::SyncPull { profile, .. }
-        | Request::SyncStatus { profile, .. }
-        | Request::ShareVaultToDevice { profile, .. }
-        | Request::SyncAdopt { profile, .. }
-        | Request::ListPendingDevices { profile, .. }
-        | Request::AddAttachment { profile, .. }
-        | Request::ListAttachments { profile, .. }
-        | Request::GetAttachment { profile, .. }
-        | Request::DeleteAttachment { profile, .. } => Some(profile),
-        Request::Ping | Request::Lock | Request::Shutdown => None,
-    }
+    request.profile()
 }
 
 /// Run `f` against the held session, or return [`Response::Locked`] if locked.
@@ -1813,6 +1917,91 @@ fn handle_unlock(
         ))),
         Err(e) => Handled::reply(usage(format!("unlock failed: {e}"))),
     }
+}
+
+/// Handle [`Request::ConfirmPresence`]: check the master password against the
+/// account and, if it is right, mint a presence grant.
+///
+/// The check is a full, **quiet** unlock of the account store (the same KDF an
+/// unlock pays), whose session is dropped at once; the held session is not
+/// touched. Quiet, because this is not an unlock: a wrong password is recorded
+/// once, as the `AccessDenied` the generic refusal path writes for an auth
+/// failure, rather than also as an `UnlockFailure`. [`MAX_PRESENCE_FAILURES`]
+/// wrong answers in a row lock the vault, which ends the agent's access too and
+/// forces a real unlock.
+fn handle_confirm_presence(state: &mut State, password: &str, agent_connection: bool) -> Handled {
+    if agent_connection {
+        return Handled::reply(usage(
+            "an AI-agent session cannot confirm presence; a person confirms from the \
+             LocalPass app or CLI",
+        ));
+    }
+    if !state.is_unlocked() {
+        return Handled::reply(Response::Locked);
+    }
+    let profile = state.profile().to_path_buf();
+    let secret_key = match load_secret_key(&profile, None) {
+        Ok(k) => k,
+        Err(resp) => return Handled::reply(resp),
+    };
+    match AccountStore::unlock_quiet(&profile, password, &secret_key) {
+        Ok(check) => {
+            drop(check);
+            state.presence_failures = 0;
+            let (token, expires_in_secs) = state.issue_presence_grant();
+            Handled::reply(Response::PresenceGrant {
+                token,
+                expires_in_secs,
+            })
+        }
+        Err(lp_vault::Error::DecryptionFailed) => {
+            state.presence_failures += 1;
+            if state.presence_failures >= MAX_PRESENCE_FAILURES {
+                state.lock();
+                return Handled::reply(Response::Error {
+                    auth: true,
+                    message: "wrong master password, too many times: LocalPass locked the vault"
+                        .into(),
+                });
+            }
+            Handled::reply(Response::Error {
+                auth: true,
+                message: "wrong master password".into(),
+            })
+        }
+        Err(e) => Handled::reply(usage(format!("could not check the password: {e}"))),
+    }
+}
+
+/// Lowercase hex of `bytes`.
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
+}
+
+/// Parse exactly 64 hex characters into 32 bytes.
+fn hex_decode_32(s: &str) -> Option<[u8; 32]> {
+    let (pairs, rest) = s.as_bytes().as_chunks::<2>();
+    if pairs.len() != 32 || !rest.is_empty() {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (byte, [hi, lo]) in out.iter_mut().zip(pairs) {
+        let hi = char::from(*hi).to_digit(16)?;
+        let lo = char::from(*lo).to_digit(16)?;
+        *byte = u8::try_from(hi * 16 + lo).ok()?;
+    }
+    Some(out)
+}
+
+/// Compare two tokens without an early exit.
+fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// The default vault created at account creation. Mirrors the CLI's

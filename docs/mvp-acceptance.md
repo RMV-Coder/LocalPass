@@ -41,7 +41,7 @@ what stands between here and a 1.0 release is [release-checklist.md](release-che
 | backup / restore / verify | ✅ | `localpass backup create/list/verify/restore` | SQLite Online Backup snapshot; verify checks hashes + integrity + (with password) recoverability; full and single-item restore. |
 | import / export | ✅ | `localpass import`, `localpass export`; `lp-porter` | Works for all MVP formats, including KDBX 4 (KeePass) — see §1.7. |
 | Daemon | ✅ | `localpass daemon start/stop/status`, `unlock`, `lock`; `lp-daemon` | Holds one unlocked `Session` behind same-user-only IPC; idle auto-lock (default 600s); zeroize on lock. CLI falls back to direct-unlock when no daemon / `--no-daemon`. |
-| MCP server for AI agents *(beyond PRD §9.1)* | ✅ | `localpass mcp`; `lp-cli/src/mcp/` | No tool returns a raw secret: item notes are masked, and `run_with_secrets` redacts injected values including JSON-, percent-, base64- and UTF-16-encoded echoes. It refuses to run LocalPass itself and marks children with `LOCALPASS_MCP_CHILD` (#40). **Stated limit:** a deliberately hostile same-user child can still reach an unlocked daemon — mcp-server.md §7; a daemon-side human-presence check is tracked in the release checklist. |
+| MCP server for AI agents *(beyond PRD §9.1)* | ✅ | `localpass mcp`; `lp-cli/src/mcp/` | No tool returns a raw secret: item notes are masked, and `run_with_secrets` redacts injected values including JSON-, percent-, base64- and UTF-16-encoded echoes. It refuses to run LocalPass itself and marks children with `LOCALPASS_MCP_CHILD` (#40). While a server runs, the daemon asks a person for the master password before any consent or change (mcp-server.md §7.1). **Stated limit:** a deliberately hostile same-user child can still *read* through an unlocked daemon — mcp-server.md §7. |
 
 ### 1.3 Desktop GUI (Win/macOS/Linux)
 
@@ -244,8 +244,7 @@ tracked follow-ups. They are the real content of this document.
     Both are acceptance gates.
 
 16. **Pre-1.0 security review follow-ups (2026-09).** An internal review found
-    and fixed seven issues (#40–#44). Its remaining follow-ups — a daemon-side
-    human-presence check for MCP sessions, five subsystems not yet reviewed,
+    and fixed seven issues (#40–#44). Its remaining follow-ups — five subsystems not yet reviewed,
     dependency-policy failures in the desktop workspace, and hardening items —
     are tracked in [release-checklist.md](release-checklist.md). Details of
     unfixed items are held privately per SECURITY.md.

@@ -168,6 +168,10 @@ off permanently.)
 desktop daemon and the mobile in-process backend), not in the webview — a
 UI-only toggle would be decoration, and the CLI would bypass it.
 
+**While an AI agent is connected** (`mcp-server.md` §7.1), turning pairing mode
+on, trusting a device, and sharing a vault to a device each need the master
+password first, so a process the agent started cannot pair a device of its own.
+
 ### 4.1 What this is and is not
 
 **It is not** a defence against a remote attacker. Per §1.1 there is nothing to

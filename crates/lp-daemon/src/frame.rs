@@ -118,7 +118,8 @@ fn is_peer_disconnect(kind: io::ErrorKind) -> bool {
 /// The frame carries this process's own declared caller attribution
 /// ([`lp_vault::audit::current_origin`]) on the envelope, so the daemon can
 /// attribute anything it audits to the tool that asked. A process that never
-/// declared itself sends none rather than a guess.
+/// declared itself sends none rather than a guess. It also carries the process's
+/// live presence grant, if any ([`crate::presence`]).
 ///
 /// # Errors
 ///
@@ -132,6 +133,7 @@ pub fn write_request<W: Write>(w: &mut W, request: &Request) -> Result<()> {
         } else {
             Some(crate::protocol::WireOrigin::from_origin(&origin))
         },
+        presence_grant: crate::presence::current_grant(),
         // Borrowing would require lifetimes on the envelope; a clone of a
         // small request is fine and keeps the type simple.
         request: request.clone(),
@@ -140,16 +142,30 @@ pub fn write_request<W: Write>(w: &mut W, request: &Request) -> Result<()> {
     write_frame(w, &bytes)
 }
 
-/// One request as it arrived: the request itself plus the caller attribution the
-/// client self-reported on the envelope (`None` from a peer that sent none).
-/// `Debug` is derived from [`Request`]'s own kind-only impl, so it still never
-/// prints a password or a secret value.
-#[derive(Debug)]
+/// One request as it arrived: the request itself, the caller attribution the
+/// client self-reported on the envelope (`None` from a peer that sent none), and
+/// the presence grant it attached. `Debug` prints the request's kind-only render
+/// and never the grant, so it still prints no password, secret, or token.
 pub struct IncomingRequest {
     /// The decoded request.
     pub request: Request,
     /// Who says they sent it (see [`crate::protocol::WireOrigin`]).
     pub origin: Option<lp_vault::AuditOrigin>,
+    /// The presence grant token on the envelope, if any.
+    pub presence_grant: Option<String>,
+}
+
+impl std::fmt::Debug for IncomingRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IncomingRequest")
+            .field("request", &self.request)
+            .field("origin", &self.origin)
+            .field(
+                "presence_grant",
+                &self.presence_grant.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 /// Read a versioned [`Request`] frame, validating the protocol version.
@@ -175,6 +191,7 @@ pub fn read_request<R: Read>(r: &mut R) -> Result<Option<IncomingRequest>> {
             .caller
             .as_ref()
             .map(crate::protocol::WireOrigin::to_origin),
+        presence_grant: env.presence_grant,
     }))
 }
 
@@ -222,6 +239,35 @@ mod tests {
         let mut cur = Cursor::new(buf);
         let got = read_request(&mut cur).unwrap().unwrap();
         assert!(matches!(got.request, Request::Ping));
+    }
+
+    #[test]
+    fn presence_grant_rides_on_the_envelope_and_never_prints() {
+        let _slot = crate::presence::TEST_SLOT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let token = "ab".repeat(32);
+        crate::presence::set_grant(token.clone(), std::time::Duration::from_secs(60));
+        let mut buf = Vec::new();
+        // A request with fields of its own, flattened beside the grant.
+        let written = write_request(
+            &mut buf,
+            &Request::FillLogin {
+                profile: "/p".into(),
+                origin: "https://example.com".into(),
+                item_id: "x".into(),
+            },
+        );
+        crate::presence::clear_grant();
+        written.unwrap();
+        let got = read_request(&mut Cursor::new(buf)).unwrap().unwrap();
+        assert_eq!(got.presence_grant.as_deref(), Some(token.as_str()));
+        assert!(!format!("{got:?}").contains(&token));
+
+        // Without a grant the field is simply absent.
+        let mut buf = Vec::new();
+        write_request(&mut buf, &Request::Ping).unwrap();
+        assert!(!String::from_utf8_lossy(&buf).contains("presence_grant"));
     }
 
     #[test]

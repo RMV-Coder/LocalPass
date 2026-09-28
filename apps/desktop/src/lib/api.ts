@@ -11,7 +11,8 @@
 // explicit user gesture in the UI, and the returned value is held only in a
 // component-local variable, never a store, and cleared on navigation.
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { withPresence } from "./presence";
 import type {
   AttachmentSavedView,
   AttachmentView,
@@ -36,6 +37,20 @@ import type {
   TrashEntryView,
   VaultView,
 } from "./types";
+
+/** Every command goes through here. While an AI agent is connected, a change
+ *  or consent request needs the master password first (mcp-server.md §7);
+ *  `withPresence` shows the dialog and retries. Any other call is untouched. */
+function invoke<T>(cmd: string, args?: Parameters<typeof tauriInvoke>[1]): Promise<T> {
+  return withPresence(() => tauriInvoke<T>(cmd, args), confirmPresence);
+}
+
+/** Re-enter the master password to confirm a person is present while an AI
+ *  agent is connected. The password is not kept in JS; the grant it buys stays
+ *  in the Rust backend. Rejects with "wrong master password" on a miss. */
+export function confirmPresence(password: string): Promise<void> {
+  return tauriInvoke<void>("confirm_presence", { password });
+}
 
 /** Start the LocalPass background service if it isn't running, then report the
  *  session state. The UI calls this on launch so a first-run user never has to

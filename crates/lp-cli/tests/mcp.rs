@@ -37,6 +37,11 @@ struct McpServer {
     next_id: i64,
 }
 
+/// An endpoint user name no daemon listens on.
+fn isolated_endpoint() -> String {
+    format!("lpmcptest-{}", std::process::id())
+}
+
 impl McpServer {
     /// Spawn `localpass --profile <dir> mcp` with piped stdio.
     fn spawn(profile: &TestProfile) -> Self {
@@ -57,6 +62,12 @@ impl McpServer {
             .arg("--no-daemon") // hermetic: never touch a stray developer daemon
             .arg("mcp")
             .env("LOCALPASS_PASSWORD", TEST_PASSWORD)
+            // The server still registers an agent session with any daemon it
+            // can reach, even under --no-daemon (see `mcp::presence`). Point
+            // the endpoint at a name no daemon uses, so a developer's real
+            // daemon is never made stricter by a test run.
+            .env("USERNAME", isolated_endpoint())
+            .env("USER", isolated_endpoint())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

@@ -256,10 +256,43 @@ pub fn create_account(mut password: String, mut confirm: String) -> Result<Creat
 #[tauri::command]
 pub fn lock() -> Result<SessionState, String> {
     crate::clipboard::clear_on_lock();
+    // A presence grant vouches for a person at this unlock only.
+    lp_daemon::presence::clear_grant();
     match daemon::call(&Request::Lock) {
         Ok(_) => Ok(status()),
         Err(DaemonError::NotRunning) => Ok(SessionState::NoDaemon),
         Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Confirm a person is present by re-entering the master password, while an AI
+/// agent is connected (`mcp-server.md` §7). On success the daemon's short-lived
+/// grant is kept in this process's memory and rides on every later request, so
+/// the change the user was making can be retried. The password is dropped
+/// (zeroized) here and the grant never reaches the webview.
+///
+/// # Errors
+///
+/// `"wrong master password"` (and, after too many, the vault locks), or any
+/// other secret-free daemon or transport error.
+#[tauri::command]
+pub fn confirm_presence(password: String) -> Result<(), String> {
+    let profile = daemon::profile_string()?;
+    let mut request = Request::ConfirmPresence { profile, password };
+    let result = daemon::call(&request);
+    request.zeroize_secrets();
+    match result.map_err(|e| e.to_string())? {
+        Response::PresenceGrant {
+            token,
+            expires_in_secs,
+        } => {
+            lp_daemon::presence::set_grant(token, std::time::Duration::from_secs(expires_in_secs));
+            Ok(())
+        }
+        other => {
+            check_response_error(&other)?;
+            Err(format!("unexpected daemon response: {}", other.kind()))
+        }
     }
 }
 

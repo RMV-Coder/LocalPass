@@ -13,6 +13,7 @@
   import Unlock from "./components/Unlock.svelte";
   import Vault from "./components/Vault.svelte";
   import Onboarding from "./components/Onboarding.svelte";
+  import PresenceDialog from "./components/PresenceDialog.svelte";
   import { toasts } from "./lib/toast";
 
   let session = $state<SessionState | null>(null);
@@ -126,6 +127,11 @@
       <button class="btn btn-small" onclick={doLock}>Lock</button>
     </div>
   </header>
+  {#if session.agent_session}
+    <div class="agent-banner" role="status">
+      An AI agent is connected. Changes and approvals will ask for your master password.
+    </div>
+  {/if}
   <Vault onVaultsChanged={refresh} />
 {:else if session && session.state === "no_account"}
   <Onboarding onDone={onOnboarded} />
@@ -133,9 +139,21 @@
   <Unlock {session} {onUnlocked} onRefresh={refresh} />
 {/if}
 
+<PresenceDialog />
+
 <!-- aria-live region: copy/reveal feedback announced to screen readers. -->
 <div aria-live="polite" aria-atomic="true">
   {#each $toasts as t (t.id)}
     <div class="toast" role="status">{t.message}</div>
   {/each}
 </div>
+
+<style>
+  .agent-banner {
+    padding: 0.45rem 1rem;
+    font-size: 0.85rem;
+    background: var(--bg-hover);
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+  }
+</style>

@@ -227,6 +227,9 @@ pub enum DenyReason {
     /// Injection failed for a mechanical reason — a restricted page, or a tab
     /// torn down mid-fill.
     InjectionFailed,
+    /// An AI-agent session was open and the request needed a person to confirm
+    /// with the master password first (`mcp-server.md` §7).
+    PresenceRequired,
 }
 
 impl DenyReason {
@@ -248,6 +251,7 @@ impl DenyReason {
             DenyReason::NoLoginForm => 12,
             DenyReason::PageAccessDenied => 13,
             DenyReason::InjectionFailed => 14,
+            DenyReason::PresenceRequired => 15,
         }
     }
 
@@ -269,6 +273,7 @@ impl DenyReason {
             DenyReason::NoLoginForm => "no_login_form",
             DenyReason::PageAccessDenied => "page_access_denied",
             DenyReason::InjectionFailed => "injection_failed",
+            DenyReason::PresenceRequired => "presence_required",
         }
     }
 
@@ -290,6 +295,7 @@ impl DenyReason {
             12 => Some(DenyReason::NoLoginForm),
             13 => Some(DenyReason::PageAccessDenied),
             14 => Some(DenyReason::InjectionFailed),
+            15 => Some(DenyReason::PresenceRequired),
             _ => None,
         }
     }
@@ -1084,7 +1090,7 @@ mod tests {
     }
 
     /// Every [`DenyReason`], including the `agent-fill.md` §10 additions.
-    const ALL_DENY_REASONS: [DenyReason; 14] = [
+    const ALL_DENY_REASONS: [DenyReason; 15] = [
         DenyReason::Locked,
         DenyReason::WrongProfile,
         DenyReason::NotAuthorized,
@@ -1099,6 +1105,7 @@ mod tests {
         DenyReason::NoLoginForm,
         DenyReason::PageAccessDenied,
         DenyReason::InjectionFailed,
+        DenyReason::PresenceRequired,
     ];
 
     /// The agent-fill kinds are unit variants, exactly like the pairing-mode

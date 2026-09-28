@@ -35,6 +35,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # --- One error enum; no secret leakage in messages (workspace-pinned). ---
 thiserror = { workspace = true }
+# --- OS CSPRNG for presence-grant tokens (mcp-server.md §7). The same 0.2 line
+# --- lp-crypto already pins, so no second copy enters the tree. ---
+getrandom = "0.2"
 # --- Drop-zeroed transient buffers for the master password / secret-key display
 # --- string as they cross the (same-user-only) channel (workspace-pinned). ---
 zeroize = { workspace = true }

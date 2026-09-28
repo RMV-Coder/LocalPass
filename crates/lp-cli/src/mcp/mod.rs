@@ -62,12 +62,20 @@
 //! `LOCALPASS_PASSWORD` and `--password-stdin` — and serves until stdin EOF.
 //! There is no MCP tool to unlock, lock, create, edit, or delete anything: the
 //! surface is deliberately read-plus-inject only.
+//!
+//! # Human presence
+//!
+//! The server registers with the daemon as an AI-agent session ([`presence`]).
+//! While it runs, the daemon asks a person for the master password before any
+//! consent or change request, from any client, so a process the agent starts
+//! cannot turn on agent fill, trust a device, or rewrite the vault on its own.
 
 pub mod backend;
 pub mod child;
 pub mod exec;
 pub mod jsonrpc;
 pub mod mask;
+pub mod presence;
 pub mod redact;
 pub mod tools;
 
@@ -113,6 +121,9 @@ fn log(msg: &str) {
 /// mid-frame).
 pub fn run(profile_dir: &Path, src: PasswordSource, no_daemon: bool) -> Result<()> {
     let mut backend = Backend::acquire(profile_dir, src, no_daemon)?;
+    // Hold an agent session with any daemon for as long as this server runs,
+    // whichever route the tools use (see `presence`).
+    presence::spawn_sentinel(profile_dir.display().to_string(), log);
     log(&format!(
         "serving profile {} via {} route; protocol {PROTOCOL_VERSION}",
         profile_dir.display(),
