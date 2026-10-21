@@ -4,6 +4,36 @@ A fully local, self-hosted password and secrets manager — an open-source alter
 
 > **Work in progress.** LocalPass is under active development and is not yet ready for real secrets. The storage format may still change before the first release.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/vault-dark.png">
+  <img src="docs/screenshots/vault-light.png" alt="The LocalPass desktop app: a vault's items on the left and a GitHub login on the right, with its username, masked password and website.">
+</picture>
+
+## Screenshots
+
+All screenshots use made-up demo data.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/env-run.png" alt="A .env file stored as an item, one value revealed, with the localpass run command that starts a program with these variables."><br><b>.env files</b>: click a value to copy it, or run a program with all of them</td>
+    <td width="50%"><img src="docs/screenshots/ai-agents.png" alt="The Developer view: an AI agent connected over MCP, the command line, the browser extension and the SSH agent, each with when it was last used."><br><b>AI agents, CLI, browser, SSH</b>: what is using your vault right now</td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/activity-log.png" alt="The activity log: each row shows when, which source (app, CLI, MCP or browser), what happened and which item, including refused requests."><br><b>Activity log</b>: who touched which secret, and what was refused</td>
+    <td width="50%"><img src="docs/screenshots/devices-sync.png" alt="Devices and sync: this device, a phone with two changes to receive, and a desktop that is up to date."><br><b>Sync</b>: your own devices, through a folder you choose</td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/password-health.png" alt="Password health: passwords flagged as too short, weak, reused or common, weakest first."><br><b>Password health</b>: weak, reused and common passwords</td>
+    <td width="50%"><img src="docs/screenshots/windows-hello.png" alt="The lock screen with a master password field and an Unlock with Windows Hello button."><br><b>Windows Hello</b>: unlock with your PIN, fingerprint or face</td>
+  </tr>
+</table>
+
+<p>
+  <img src="docs/screenshots/android-vault.png" width="260" alt="The Android app: the Personal vault's items with a tab bar for Vault, Generator, Devices and More.">
+  &nbsp;
+  <img src="docs/screenshots/android-totp.png" width="260" alt="The Android app showing a live two-factor code for GitHub.">
+</p>
+
 ## What exists today
 
 The MVP feature set is implemented across eight crates/apps. See
