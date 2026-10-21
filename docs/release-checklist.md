@@ -83,11 +83,13 @@ unfixed are held privately, per [SECURITY.md](../SECURITY.md):
 
 ## 4. Release engineering (PRD §6.9)
 
-Today `desktop-release.yml` builds an unsigned Windows bundle and a signed
-Android APK, plus (once the updater key is in the repo secrets) a
-minisign-signed feed for the in-app updater ([updates.md](updates.md)). That
-signature protects the update channel; it is not Windows code signing, and
-nothing else below exists.
+Today `desktop-release.yml` builds the Windows bundle and a signed Android
+APK, plus (once the updater key is in the repo secrets) a minisign-signed feed
+for the in-app updater ([updates.md](updates.md)). Windows code signing through
+SignPath Foundation is wired into the workflow ([CODE_SIGNING.md](../CODE_SIGNING.md))
+but stays off until the project's SignPath application is approved and its
+secret and variables are set; until then the Windows installers ship unsigned.
+Nothing else below exists.
 
 - [ ] Release pipeline (`cargo-dist` or equivalent) for the CLI, daemon and
   native host on Windows, macOS (universal) and Linux (static musl).
