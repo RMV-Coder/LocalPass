@@ -33,6 +33,14 @@ ignore = [
     # and is not on any attack surface. We do not control age's build-dep tree;
     # tracked to drop when age updates its i18n stack.
     "RUSTSEC-2026-0173",
+    # RUSTSEC-2026-0374 — `basic-toml` is unmaintained (an unmaintained-crate
+    # advisory, NOT a vulnerability; no maintained release exists). Same
+    # build-time i18n stack as above: `age` → `i18n-embed-fl` / `i18n-embed-impl`
+    # → `i18n-config`, whose proc-macros use it at compile time to parse the
+    # `age` crate's own bundled `i18n.toml`. It never parses untrusted or user
+    # input, produces no runtime code in the shipped binary, and is not on any
+    # attack surface; tracked to drop when age updates its i18n stack.
+    "RUSTSEC-2026-0374",
 ]
 
 [licenses]

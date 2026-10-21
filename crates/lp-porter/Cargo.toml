@@ -22,7 +22,7 @@ age = { version = "0.11", default-features = false }
 # --- ZIP reader for the 1Password .1pux container (a ZIP holding export.data).
 # --- default-features off + only `deflate`: 1PUX uses store/deflate, so we skip
 # --- bzip2/zstd/lzma/aes C-and-Rust deps and keep the tree lean. ---
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 # --- LastPass and generic CSV parsing/writing (RFC 4180, quoting, embedded
 # --- newlines). Hand-rolling CSV quote handling is a footgun; `csv` is the
 # --- standard, well-fuzzed choice. ---
