@@ -391,7 +391,7 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
-            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            let opts = zip::write::SimpleFileOptions::default();
             zw.start_file(EXPORT_ENTRY, opts).unwrap();
             zw.write_all(json.as_bytes()).unwrap();
             zw.finish().unwrap();
@@ -451,7 +451,7 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
-            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            let opts = zip::write::SimpleFileOptions::default();
             zw.start_file("other.txt", opts).unwrap();
             zw.write_all(b"hi").unwrap();
             zw.finish().unwrap();
