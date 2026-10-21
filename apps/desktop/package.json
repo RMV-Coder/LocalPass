@@ -16,7 +16,8 @@
     "bundle": "node scripts/bump-version.mjs patch && node scripts/prepare-sidecar.mjs && tauri build",
     "bundle:minor": "node scripts/bump-version.mjs minor && node scripts/prepare-sidecar.mjs && tauri build",
     "bundle:major": "node scripts/bump-version.mjs major && node scripts/prepare-sidecar.mjs && tauri build",
-    "bundle:nobump": "node scripts/prepare-sidecar.mjs && tauri build"
+    "bundle:nobump": "node scripts/prepare-sidecar.mjs && tauri build",
+    "icons": "node scripts/make-icons.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1",

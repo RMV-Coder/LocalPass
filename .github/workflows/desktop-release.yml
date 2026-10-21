@@ -152,8 +152,10 @@ jobs:
           npm ci
           # gen/android is gitignored, so init from scratch and regenerate the
           # icons afterwards (tauri icon's android output does not persist).
+          # The manifest supplies the adaptive-icon layers (brass background,
+          # keyhole foreground, monochrome themed icon); see DESIGN.md.
           npx tauri android init
-          npx tauri icon app-icon.png
+          npx tauri icon brand/icon-manifest.json
           npx tauri android build --apk --target aarch64
 
       - name: Sign the APK with the release keystore
