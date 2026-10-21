@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 100 100">
+  <!-- LocalPass mark "Keyhole-L" (see DESIGN.md). Full-bleed tile: Windows, Linux, the extension. -->
+  <rect width="100" height="100" rx="23" fill="#D4A24C"/>
+  <g fill="#1A1917">
+    <circle cx="46" cy="41" r="13.5"/>
+    <path d="M40.5 41V71.2a2.8 2.8 0 0 0 2.8 2.8H64.7a2.8 2.8 0 0 0 2.8-2.8V65.8a2.8 2.8 0 0 0-2.8-2.8H51.5V41z"/>
+  </g>
+</svg>

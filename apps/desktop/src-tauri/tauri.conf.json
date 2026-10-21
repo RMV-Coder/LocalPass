@@ -29,7 +29,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "externalBin": ["binaries/localpass-daemon"],
+    "externalBin": [
+      "binaries/localpass-daemon"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -39,5 +41,16 @@
     ],
     "longDescription": "LocalPass desktop GUI — a fully local, offline password and secrets manager. Renders the vault via a thin daemon client; all secret handling stays in Rust.",
     "shortDescription": "LocalPass — local, offline password manager."
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDU2N0YyOTcxQzhFQUEwNTAKUldSUW9PckljU2wvVnVRdFNjclpjMG1leTBhOFNkUlhsNnVrak1HbFJRWFhZeGlwcFMxb0pwWkwK",
+      "endpoints": [
+        "https://github.com/RMV-Coder/LocalPass/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

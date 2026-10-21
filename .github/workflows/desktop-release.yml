@@ -1,7 +1,9 @@
 # Publish a GitHub release for the app whenever a new app version lands on
 # main: build the Windows bundle (MSI + NSIS) and the signed Android APK and
 # attach them under a `desktop-v<version>` tag (the tag prefix is historical;
-# the release covers every platform the app ships on).
+# the release covers every platform the app ships on). With the updater key in
+# the repo secrets it also publishes the signed `latest.json` feed the in-app
+# "Check for updates" reads.
 #
 # Trigger model: `npm run bundle` (or bundle:minor / bundle:major) bumps the
 # version locally; the bump merges through a PR like any other change; this
@@ -66,12 +68,29 @@ jobs:
         with:
           node-version: 22
 
+      # With the updater signing key present, the build also writes a minisign
+      # signature next to each installer (<installer>.sig) for the in-app
+      # updater (apps/desktop/src-tauri/src/updates.rs). Without it the release
+      # is built exactly as before and the app just finds no update feed.
+      # Secrets: TAURI_SIGNING_PRIVATE_KEY (the key file's contents) and
+      # TAURI_SIGNING_PRIVATE_KEY_PASSWORD; the public half is in tauri.conf.json.
       - name: Build the bundle (no version bump in CI)
         if: steps.gate.outputs.new == 'true'
         working-directory: apps/desktop
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           npm ci
-          npm run bundle:nobump
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($env:TAURI_SIGNING_PRIVATE_KEY) {
+            npm run bundle:nobump -- --config "$PWD/src-tauri/tauri.updater.conf.json"
+          } else {
+            Write-Host "TAURI_SIGNING_PRIVATE_KEY is not set: building without update signatures"
+            npm run bundle:nobump
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Tag and create the release
         if: steps.gate.outputs.new == 'true'
@@ -83,11 +102,47 @@ jobs:
           git tag $tag ${{ github.sha }}
           git push origin $tag
           $bundle = "apps/desktop/src-tauri/target/release/bundle"
-          $assets = @(Get-ChildItem "$bundle/msi/*.msi") + @(Get-ChildItem "$bundle/nsis/*-setup.exe")
+          $msi = @(Get-ChildItem "$bundle/msi/*.msi")
+          $nsis = @(Get-ChildItem "$bundle/nsis/*-setup.exe")
+          $assets = $msi + $nsis
           if ($assets.Count -eq 0) { throw "no installer artifacts found under $bundle" }
-          gh release create $tag @($assets.FullName) `
+          $sigs = @($assets | ForEach-Object { "$($_.FullName).sig" } | Where-Object { Test-Path $_ })
+          gh release create $tag @($assets.FullName + $sigs) `
             --title "LocalPass v${{ steps.version.outputs.version }}" `
             --generate-notes
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          # The in-app updater's feed (releases/latest/download/latest.json).
+          # Only when the installers were signed: an unsigned feed would be
+          # rejected by every app anyway. The app installed from the MSI looks
+          # up "windows-x86_64-msi" first, the NSIS one "windows-x86_64-nsis".
+          if ($sigs.Count -gt 0) {
+            $notes = (gh release view $tag --json body --jq .body) -join "`n"
+            $base = "https://github.com/${{ github.repository }}/releases/download/$tag"
+            function Entry($file) {
+              [ordered]@{
+                signature = (Get-Content "$($file.FullName).sig" -Raw).Trim()
+                url = "$base/$([uri]::EscapeDataString($file.Name))"
+              }
+            }
+            $platforms = [ordered]@{}
+            if ($msi.Count -eq 1 -and (Test-Path "$($msi[0].FullName).sig")) {
+              $platforms["windows-x86_64-msi"] = Entry $msi[0]
+              $platforms["windows-x86_64"] = Entry $msi[0]
+            }
+            if ($nsis.Count -eq 1 -and (Test-Path "$($nsis[0].FullName).sig")) {
+              $platforms["windows-x86_64-nsis"] = Entry $nsis[0]
+            }
+            $feed = [ordered]@{
+              version = "${{ steps.version.outputs.version }}"
+              notes = $notes
+              pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+              platforms = $platforms
+            }
+            $feed | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8NoBOM latest.json
+            gh release upload $tag latest.json
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
   # Build, sign, and attach the Android APK to the same release. Signing uses
   # the dedicated RELEASE keystore from repo secrets (ANDROID_KEYSTORE_B64,
@@ -152,8 +207,10 @@ jobs:
           npm ci
           # gen/android is gitignored, so init from scratch and regenerate the
           # icons afterwards (tauri icon's android output does not persist).
+          # The manifest supplies the adaptive-icon layers (brass background,
+          # keyhole foreground, monochrome themed icon); see DESIGN.md.
           npx tauri android init
-          npx tauri icon app-icon.png
+          npx tauri icon brand/icon-manifest.json
           npx tauri android build --apk --target aarch64
 
       - name: Sign the APK with the release keystore

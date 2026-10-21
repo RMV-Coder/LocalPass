@@ -95,6 +95,28 @@ zeroize = { version = "1.8", features = ["zeroize_derive"] }
 # --- `image`/`pic`, dragging in the whole `image` crate for raster output we do
 # --- not want — SVG-only keeps the dependency and audit surface minimal. ---
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+# --- Windows Hello unlock (src/hello.rs): HKDF-SHA256 turns a Hello key
+# --- signature into the key that seals the master password with
+# --- XChaCha20-Poly1305. These are the RustCrypto crates (and versions) the
+# --- AGPL core already depends on through lp-crypto, so they add nothing to the
+# --- dependency tree; the sealing code is platform-independent and unit-tested
+# --- everywhere, only the Hello binding below is Windows-only. ---
+sha2 = "0.10"
+hkdf = "0.12"
+chacha20poly1305 = "0.10"
+
+# --- Windows Hello key credentials (Windows.Security.Credentials) and the two
+# --- Win32 calls that bring the Hello prompt to the front. `windows` 0.61 is
+# --- already in the tree (Tauri/WebView2 depend on it); we only add features. ---
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+  "Foundation",
+  "Security_Credentials",
+  "Security_Cryptography",
+  "Storage_Streams",
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+] }
 
 # --- Mobile-only: the camera QR scanner used to pair a device
 # --- (device-pairing.md §3.4). Deliberately target-gated rather than a plain
@@ -112,6 +134,13 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 # --- we only ever write text. Desktop-only: mobile keeps the webview path. ---
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 arboard = { version = "3", default-features = false }
+# --- In-app updates (src/updates.rs). The official updater: it downloads the
+# --- release named in a signed feed on GitHub, VERIFIES its minisign signature
+# --- against the public key compiled into tauri.conf.json (PRD §8 T10, "update
+# --- signature verification"), runs the installer, and relaunches. It is the
+# --- app's only outbound request and runs only when the user asks or opted
+# --- in. Desktop-only: mobile installs come from the APK / store. ---
+tauri-plugin-updater = "2"
 
 [target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
 tauri-plugin-barcode-scanner = "2"

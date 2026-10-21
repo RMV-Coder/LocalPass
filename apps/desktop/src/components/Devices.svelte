@@ -48,6 +48,8 @@
   import { copyToClipboard } from "../lib/clipboard";
   import { formatTimestamp } from "../lib/format";
   import { toast } from "../lib/toast";
+  import { summarizeSync } from "../lib/syncsummary";
+  import Icon from "./Icon.svelte";
 
   interface Props {
     /** The vaults from the parent, so the user can pick which vault to sync. */
@@ -57,8 +59,10 @@
     /** Called after adopting shared vaults, so the parent can refresh its vault
      *  list and session-derived state (e.g. the header vault count). */
     onVaultsChanged?: () => void;
+    /** Called after any sync action, so the sidebar status can refresh. */
+    onSyncChanged?: () => void;
   }
-  let { vaults, selectedVault, onVaultsChanged }: Props = $props();
+  let { vaults, selectedVault, onVaultsChanged, onSyncChanged }: Props = $props();
 
   // This device's identity (public).
   let identity = $state<DeviceIdentityView | null>(null);
@@ -393,7 +397,8 @@
     syncResult = "";
     try {
       await syncSetup(syncVault, syncDir.trim());
-      syncResult = "Enrolled for sync.";
+      syncResult = "This vault now syncs through that folder.";
+      setupOpen = false;
       await refreshStatus();
       // Setup writes this device's announce and surfaces any peers already in
       // the folder as pending devices (device-pairing.md §5).
@@ -402,6 +407,7 @@
       syncError = typeof err === "string" ? err : "Setup failed.";
     } finally {
       syncBusy = false;
+      onSyncChanged?.();
     }
   }
 
@@ -412,7 +418,9 @@
     syncResult = "";
     try {
       const r = await syncPush(syncVault);
-      syncResult = `Pushed ${r.segments_written} segment(s); ${r.published} device chain(s).`;
+      syncResult = r.segments_written
+        ? `Sent ${r.segments_written} change set${r.segments_written === 1 ? "" : "s"}.`
+        : "Nothing new to send.";
       await refreshStatus();
       // A push refreshes this device's announce; re-scan for any new peers.
       await refreshPending();
@@ -420,6 +428,7 @@
       syncError = typeof err === "string" ? err : "Push failed.";
     } finally {
       syncBusy = false;
+      onSyncChanged?.();
     }
   }
 
@@ -432,14 +441,13 @@
     try {
       const r = await syncPull(syncVault);
       alarms = r.alarms;
-      const bits = [`Applied ${r.applied}`, `${r.pending} pending`];
-      if (r.key_imported) bits.push("imported a shared vault key");
-      syncResult = bits.join(", ") + ".";
+      syncResult = receivedLine(r.applied, r.pending, r.key_imported);
       await refreshStatus();
     } catch (err) {
       syncError = typeof err === "string" ? err : "Pull failed.";
     } finally {
       syncBusy = false;
+      onSyncChanged?.();
     }
   }
 
@@ -478,6 +486,10 @@
     try {
       status = await syncStatus(vaultId);
       alarms = status.alarms.length ? status.alarms : alarms;
+      if (status.enrolled && status.root && !syncDir.trim()) {
+        syncDir = status.root;
+        void refreshPending(status.root);
+      }
     } catch {
       status = null;
     }
@@ -520,6 +532,44 @@
     }
   }
 
+  /** "Received 3 changes." plus what is still waiting. */
+  function receivedLine(applied: number, waiting: number, keyImported: boolean): string {
+    const bits = [applied ? `Received ${applied} change${applied === 1 ? "" : "s"}` : "Nothing new to receive"];
+    if (waiting) bits.push(`${waiting} waiting for a vault key`);
+    if (keyImported) bits.push("imported a shared vault key");
+    return bits.join(", ") + ".";
+  }
+
+  /** Sync now: publish this device's changes, then merge everyone else's. */
+  async function doSyncNow() {
+    if (!syncVault || syncBusy) return;
+    syncBusy = true;
+    syncError = "";
+    syncResult = "";
+    alarms = [];
+    try {
+      const pushed = await syncPush(syncVault);
+      const pulled = await syncPull(syncVault);
+      alarms = pulled.alarms;
+      const sent = pushed.segments_written
+        ? `Sent ${pushed.segments_written} change set${pushed.segments_written === 1 ? "" : "s"}. `
+        : "";
+      syncResult = sent + receivedLine(pulled.applied, pulled.pending, pulled.key_imported);
+      await refreshStatus();
+      await refreshPending();
+    } catch (err) {
+      syncError = typeof err === "string" ? err : "Sync failed.";
+    } finally {
+      syncBusy = false;
+      onSyncChanged?.();
+    }
+  }
+
+  const summary = $derived(summarizeSync(status, peers));
+  const deviceSync = $derived(new Map(summary.devices.map((d) => [d.device_id, d])));
+  let setupOpen = $state(false);
+  let pairOpen = $state(false);
+
   // On mount: default the pickers to the parent's selected vault (or the first
   // vault), load this device's identity + the trusted peers, and read status.
   $effect(() => {
@@ -535,274 +585,283 @@
   });
 </script>
 
-<div class="detail devices">
-  <h2>Devices &amp; Sync</h2>
-  <p class="muted" style="margin-top:-0.4rem">
-    Link a second machine (or a friend) and sync a vault. Both machines watch the
-    same shared folder; LocalPass encrypts everything, so the folder itself is
-    untrusted.
-  </p>
+<div class="page devices">
+  <div class="page-head">
+    <div>
+      <h2>Devices and sync</h2>
+      <p class="sub">Your devices share an encrypted folder. The folder is never trusted.</p>
+    </div>
+    <div class="actions">
+      {#if vaults.length > 1}
+        <label class="sr-only" for="sync-vault">Vault</label>
+        <select id="sync-vault" class="vault-pick" bind:value={syncVault} onchange={() => refreshStatus()}>
+          {#each vaults as v (v.id)}
+            <option value={v.id}>{v.name}</option>
+          {/each}
+        </select>
+      {/if}
+      {#if status?.enrolled}
+        <button class="btn btn-primary" onclick={doSyncNow} disabled={syncBusy || !syncVault}>
+          <Icon name="sync" size={15} /> {syncBusy ? "Syncing…" : "Sync now"}
+        </button>
+      {/if}
+    </div>
+  </div>
 
-  <!-- This device -->
-  <section class="panel" aria-labelledby="this-device-h">
-    <h3 id="this-device-h">This device</h3>
-    {#if identityError}
-      <div class="error" role="alert">{identityError}</div>
-    {:else if identity}
-      <p class="muted">Share this identity with your other device, then trust it there.</p>
-      <div class="field-group">
-        <span class="label" id="id-str-label">Identity string</span>
-        <div class="gen-output">
-          <div class="val mono" aria-labelledby="id-str-label" style="user-select:all;word-break:break-all">
-            {identity.identity_string}
-          </div>
-          <button class="btn" onclick={copyIdentity} aria-label="Copy identity string">Copy</button>
-        </div>
+  {#if alarms.length}
+    <div class="callout danger" role="alert" aria-live="assertive">
+      <span class="icon"><Icon name="alert" size={16} /></span>
+      <div>
+        <strong>A device's history failed verification.</strong> Possible tampering or a
+        rollback. Its changes were quarantined, not applied. Do not ignore this.
+        <ul class="alarm-list">
+          {#each alarms as a (a)}<li class="mono">{a}</li>{/each}
+        </ul>
       </div>
-      <p class="hint">
-        Fingerprint: <strong class="mono fp">{identity.fingerprint}</strong>
-        <br />
-        The other device must show this <em>exact</em> fingerprint before you trust each other.
-      </p>
+    </div>
+  {/if}
 
+  <!-- ===================== Status ===================== -->
+  <section class="status-head" aria-live="polite">
+    <span class="dot big {summary.tone === 'ok' ? 'ok' : summary.tone === 'danger' ? 'danger' : summary.tone === 'warn' ? 'warn' : ''}"></span>
+    <div class="status-text">
+      <p class="headline">{status?.enrolled ? summary.headline : "This vault is not syncing yet"}</p>
+      {#if status?.enrolled}
+        <p class="detail-line">
+          Folder <code class="wrap-anywhere">{status.root ?? "(none)"}</code>{#if status.pending}
+            · {status.pending} waiting for a vault key{/if}
+        </p>
+      {:else}
+        <p class="detail-line">Pick a shared folder (Dropbox, OneDrive, Syncthing, a USB drive) to keep this vault in step across devices.</p>
+      {/if}
+      {#if syncResult}<p class="detail-line ok-line" role="status">{syncResult}</p>{/if}
+      {#if syncError}<div class="error" role="alert">{syncError}</div>{/if}
+    </div>
+    {#if !status?.enrolled}
+      <button class="btn" onclick={() => (setupOpen = true)}>Set up sync</button>
+    {/if}
+  </section>
+
+  <!-- ===================== Devices ===================== -->
+  <section class="section">
+    <div class="section-head">
+      <h3>Devices</h3>
+      <button class="btn btn-sm btn-quiet accent" onclick={() => (pairOpen = true)}>
+        <Icon name="plus" size={14} /> Add a device
+      </button>
+    </div>
+    {#if peersError}
+      <div class="error" role="alert">{peersError}</div>
+    {/if}
+    <ul class="plain-list device-list">
+      <li>
+        <span class="dev-ico"><Icon name="devices" size={18} /></span>
+        <span class="dev-main">
+          <span class="dev-name">This device</span>
+          {#if identity}<span class="dev-fp mono">{identity.fingerprint}</span>{/if}
+        </span>
+        <span class="badge">You</span>
+      </li>
+      {#each peers as p (p.device_id)}
+        {@const ds = deviceSync.get(p.device_id)}
+        <li>
+          <span class="dev-ico"><Icon name="devices" size={18} /></span>
+          <span class="dev-main">
+            <span class="dev-name">{p.label || "Unnamed device"}</span>
+            <span class="dev-fp mono">{p.fingerprint}</span>
+          </span>
+          {#if !status?.enrolled}
+            <span class="faint dev-when">Trusted {formatTimestamp(p.verified_at)}</span>
+          {:else if !ds}
+            <span class="badge" title="This device has not written to this vault's folder">Not in this folder</span>
+          {:else if ds.to_receive > 0}
+            <span class="badge warn">{ds.to_receive} to receive</span>
+          {:else}
+            <span class="badge ok">Up to date</span>
+          {/if}
+        </li>
+      {/each}
+      {#each summary.devices.filter((d) => !d.is_self && !d.trusted) as d (d.device_id)}
+        <li>
+          <span class="dev-ico"><Icon name="alert" size={18} /></span>
+          <span class="dev-main">
+            <span class="dev-name">Unknown device</span>
+            <span class="dev-fp mono">{d.device_id.slice(0, 12)}…</span>
+          </span>
+          <span class="badge danger">Untrusted</span>
+        </li>
+      {/each}
+    </ul>
+    {#if peers.length === 0}
+      <p class="hint">No other devices yet. Add one to sync or share a vault with it.</p>
+    {/if}
+  </section>
+
+  <!-- ===================== Add a device (pairing) ===================== -->
+  <details class="disclosure" bind:open={pairOpen}>
+    <summary>
+      <Icon name="qr" size={16} /> Add a device
+      {#if pairingActive}<span class="sum-meta">· pairing open <span class="mono">{formatCountdown(pairingSecs)}</span></span>{/if}
+      <span class="chev"><Icon name="chevron" size={14} /></span>
+    </summary>
+    <div class="body">
       <!-- Pairing mode (device-pairing.md §4): a deliberate, time-boxed (3-min)
            window that must be ON to trust a NEW device or to show this device's
            QR. Off by default; turning it off never affects an already-trusted
            device or any sync. The backend enforces it regardless of this UI. -->
-      <div class="pairing-row">
-        <span class="label" id="pairing-label" style="margin-bottom:0">Pairing mode</span>
-        {#if pairingActive}
-          <span class="pairing-badge on" aria-live="polite">
-            ON · <span class="mono">{formatCountdown(pairingSecs)}</span> left
-          </span>
-          <button class="btn btn-small" onclick={disablePairing} disabled={pairingBusy}>
-            {pairingBusy ? "…" : "Turn off"}
-          </button>
-        {:else}
-          <span class="pairing-badge off">OFF</span>
-          <button class="btn btn-small" onclick={enablePairing} disabled={pairingBusy}>
-            {pairingBusy ? "…" : "Enable pairing (3 min)"}
-          </button>
-        {/if}
-      </div>
-      {#if pairingError}
-        <div class="error" role="alert">{pairingError}</div>
-      {/if}
-      <p class="hint">
-        Must be on to trust a new device or show this device's QR. It turns itself
-        off after 3 minutes; an already-trusted device keeps syncing either way.
-      </p>
-
-      <!-- Pairing QR: scanning it off this screen in person is a far stronger
-           channel than pasting the string through a chat app, which an attacker
-           could tamper with (device-pairing.md §1.2). Gated on pairing mode (§4):
-           the QR is only offered while the window is open — the identity STRING
-           above stays visible always (it is public). -->
-      <button
-        class="btn btn-small"
-        onclick={toggleQr}
-        aria-expanded={showQr}
-        disabled={!pairingActive}
-      >
-        {showQr ? "Hide QR code" : "Show QR code"}
-      </button>
-      {#if !pairingActive}
-        <p class="hint">Enable pairing mode above to show this device's QR code.</p>
-      {/if}
-      {#if showQr && pairingActive}
-        {#if qrError}
-          <div class="error" role="alert">{qrError}</div>
-        {:else if qrDataUri}
-          <div class="qr-plate">
-            <img src={qrDataUri} alt="QR code containing this device's identity string" />
+      <ol class="steps">
+        <li>
+          <div class="step-head">
+            <span class="step-t">Open pairing on both devices</span>
+            {#if pairingActive}
+              <span class="badge accent">Open · <span class="mono">{formatCountdown(pairingSecs)}</span></span>
+              <button class="btn btn-sm btn-quiet" onclick={disablePairing} disabled={pairingBusy}>Close</button>
+            {:else}
+              <button class="btn btn-sm" onclick={enablePairing} disabled={pairingBusy}>
+                {pairingBusy ? "…" : "Open for 3 minutes"}
+              </button>
+            {/if}
           </div>
-          <p class="hint">
-            Scan this from your other device <strong>in person</strong>. Then check that it
-            shows the fingerprint <strong class="mono fp">{identity.fingerprint}</strong>
-            before trusting — scanning proves nothing on its own.
-          </p>
-        {:else}
-          <p class="muted">Rendering…</p>
-        {/if}
-      {/if}
-    {:else}
-      <p class="muted">Loading…</p>
-    {/if}
-  </section>
+          <p class="hint">New devices can only be trusted while it is open. It closes by itself.</p>
+          {#if pairingError}<div class="error" role="alert">{pairingError}</div>{/if}
+        </li>
 
-  <!-- Trust a device (security-critical) -->
-  <section class="panel" aria-labelledby="trust-h">
-    <h3 id="trust-h">Trust a device</h3>
-    <p class="muted">
-      Scan the other device's QR code, or paste its identity string.
-      Then compare the fingerprint
-      below against what that device shows — they must match <strong>exactly</strong>.
-      Confirm the match to enable Trust. Never trust a device whose fingerprint
-      you have not compared out-of-band.
-    </p>
-
-    {#if !pairingActive}
-      <div class="pairing-note" role="note">
-        Pairing mode is <strong>off</strong>. Enable it in “This device” above before
-        trusting a new device — the daemon refuses new trust while it is off.
-      </div>
-    {/if}
-
-    <!-- Scanning is a transport for the identity string — it fills the box below
-         exactly as a paste would, and re-arms the fingerprint confirmation. It
-         never trusts on its own (device-pairing.md §3.3). Mobile uses the native
-         camera plugin; desktop uses the webcam via getUserMedia. -->
-    <button type="button" class="btn" onclick={startScan} disabled={scanBusy}>
-      {scanBusy ? "Scanning…" : "Scan QR code"}
-    </button>
-    {#if scanError}
-      <div class="error" role="alert">{scanError}</div>
-    {/if}
-
-    <form onsubmit={submitTrust}>
-      <div class="field-group">
-        <label for="paste-id">Other device's identity string</label>
-        <textarea
-          id="paste-id"
-          rows="3"
-          bind:value={pasted}
-          placeholder="LPDEV1-…"
-          autocomplete="off"
-          spellcheck="false"
-          class="mono"
-          style="width:100%;resize:vertical"
-          aria-describedby="paste-id-fp"
-          aria-invalid={parsedInvalid ? "true" : undefined}
-        ></textarea>
-      </div>
-
-      <div id="paste-id-fp" aria-live="polite">
-        {#if parsedInvalid}
-          <div class="error" role="alert">
-            That is not a valid device identity string (check for a copy/paste error).
-          </div>
-        {:else if parsedFingerprint}
-          <div class="fp-compare">
-            <span class="label">Fingerprint to compare</span>
-            <strong class="mono fp big">{parsedFingerprint}</strong>
-          </div>
-          <label class="confirm">
-            <input type="checkbox" bind:checked={confirmed} />
-            This fingerprint <strong>matches exactly</strong> what the other device shows.
-          </label>
-        {/if}
-      </div>
-
-      <div class="field-group">
-        <label for="trust-label">Label (optional)</label>
-        <input
-          id="trust-label"
-          type="text"
-          bind:value={trustLabel}
-          placeholder="e.g. laptop"
-          autocomplete="off"
-          style="max-width:280px"
-        />
-      </div>
-
-      {#if trustError}
-        <div class="error" role="alert">{trustError}</div>
-      {/if}
-
-      <button class="btn btn-primary" type="submit" disabled={!canTrust}>
-        {trustBusy ? "Trusting…" : "Trust this device"}
-      </button>
-    </form>
-  </section>
-
-  <!-- Pending devices (device-pairing.md §5): the typing-free pairing path.
-       Devices that dropped an announce in the shared folder but are not trusted
-       yet. The announce channel is UNTRUSTED (§5.2) — a row proves nothing;
-       "Use for trust" only fills the identity box, and the fingerprint compare +
-       pairing-mode gate still apply before anything is pinned. -->
-  <section class="panel" aria-labelledby="pending-h">
-    <div class="pending-head">
-      <h3 id="pending-h">Pending devices</h3>
-      <button
-        class="btn btn-small"
-        onclick={() => refreshPending()}
-        disabled={pendingBusy || !syncDir.trim()}
-      >
-        {pendingBusy ? "…" : "Refresh"}
-      </button>
-    </div>
-    <p class="muted">
-      Devices that announced themselves in the shared sync folder but you have not
-      trusted yet. These are <strong>unconfirmed</strong>: the folder is untrusted, so a
-      listing here proves nothing on its own. Pick one to fill the trust box above,
-      then compare its fingerprint against that device's screen before trusting —
-      exactly as for a pasted string.
-    </p>
-    {#if !syncDir.trim()}
-      <p class="empty">Set a shared folder in “Sync a vault” below to see announced devices.</p>
-    {:else if pendingError}
-      <div class="error" role="alert">{pendingError}</div>
-    {:else if pending.length === 0}
-      <p class="empty">No untrusted devices have announced in that folder.</p>
-    {:else}
-      <ul class="peer-list">
-        {#each pending as d (d.device_id)}
-          <li>
-            <div class="peer-main">
-              <span class="mono fp">{d.fingerprint}</span>
-              <span class="muted peer-when">
-                <span class="mono">{d.device_id.slice(0, 8)}…</span>{#if d.label}
-                  · {d.label}{/if} · announced {formatTimestamp(d.announced_at)}
-              </span>
+        <li>
+          <div class="step-head"><span class="step-t">Show this device to the other one</span></div>
+          {#if identityError}
+            <div class="error" role="alert">{identityError}</div>
+          {:else if identity}
+            <!-- Pairing QR: scanning it in person is a far stronger channel than
+                 pasting the string through a chat app (device-pairing.md §1.2).
+                 Gated on pairing mode (§4); the string stays visible (public). -->
+            <div class="share-row">
+              {#if showQr && pairingActive && qrDataUri}
+                <div class="qr-plate">
+                  <img src={qrDataUri} alt="QR code containing this device's identity" />
+                </div>
+              {/if}
+              <div class="share-main">
+                <div class="toolbar">
+                  <button class="btn btn-sm" onclick={toggleQr} aria-expanded={showQr} disabled={!pairingActive}>
+                    <Icon name="qr" size={14} /> {showQr ? "Hide QR code" : "Show QR code"}
+                  </button>
+                  <button class="btn btn-sm" onclick={copyIdentity}><Icon name="copy" size={14} /> Copy identity</button>
+                </div>
+                {#if qrError}<div class="error" role="alert">{qrError}</div>{/if}
+                <p class="hint">
+                  The other device must show this fingerprint:
+                  <strong class="mono fp">{identity.fingerprint}</strong>
+                </p>
+                {#if !pairingActive}<p class="hint">Open pairing to show the QR code.</p>{/if}
+              </div>
             </div>
-            <button class="btn btn-small" onclick={() => usePendingForTrust(d.identity_string)}>
-              Use for trust
+          {:else}
+            <p class="muted">Loading…</p>
+          {/if}
+        </li>
+
+        <li>
+          <div class="step-head"><span class="step-t">Trust the other device</span></div>
+          <!-- Scanning only FILLS the identity box, exactly as a paste would, and
+               re-arms the fingerprint confirmation. It never trusts on its own
+               (device-pairing.md §3.3). -->
+          <div class="toolbar">
+            <button type="button" class="btn btn-sm" onclick={startScan} disabled={scanBusy}>
+              <Icon name="camera" size={14} /> {scanBusy ? "Scanning…" : "Scan its QR code"}
             </button>
-          </li>
-        {/each}
-      </ul>
-    {/if}
-  </section>
+            <span class="faint">or paste its identity below</span>
+          </div>
+          {#if scanError}<div class="error" role="alert">{scanError}</div>{/if}
 
-  <!-- Trusted devices -->
-  <section class="panel" aria-labelledby="trusted-h">
-    <h3 id="trusted-h">Trusted devices</h3>
-    {#if peersError}
-      <div class="error" role="alert">{peersError}</div>
-    {:else if peers.length === 0}
-      <p class="empty">No trusted devices yet.</p>
-    {:else}
-      <ul class="peer-list">
-        {#each peers as p (p.device_id)}
-          <li>
-            <div class="peer-main">
-              <span class="peer-label">{p.label || "(unlabeled)"}</span>
-              <span class="mono fp">{p.fingerprint}</span>
+          <form onsubmit={submitTrust} class="trust-form">
+            <label for="paste-id" class="label">Its identity</label>
+            <textarea
+              id="paste-id"
+              rows="2"
+              bind:value={pasted}
+              placeholder="LPDEV1-…"
+              autocomplete="off"
+              spellcheck="false"
+              class="mono"
+              aria-describedby="paste-id-fp"
+              aria-invalid={parsedInvalid ? "true" : undefined}
+            ></textarea>
+
+            <div id="paste-id-fp" aria-live="polite">
+              {#if parsedInvalid}
+                <div class="error" role="alert">That is not a device identity. Check for a copy or paste error.</div>
+              {:else if parsedFingerprint}
+                <div class="fp-compare">
+                  <span class="label">Compare with the other device's screen</span>
+                  <strong class="mono fp big">{parsedFingerprint}</strong>
+                </div>
+                <label class="check confirm">
+                  <input type="checkbox" bind:checked={confirmed} />
+                  <span>It matches <strong>exactly</strong> what the other device shows.</span>
+                </label>
+              {/if}
             </div>
-            <span class="muted peer-when">trusted {formatTimestamp(p.verified_at)}</span>
-          </li>
-        {/each}
-      </ul>
-    {/if}
-  </section>
 
-  <!-- Sync a vault -->
-  <section class="panel" aria-labelledby="sync-h">
-    <h3 id="sync-h">Sync a vault</h3>
-    <p class="muted">
-      Point this vault at a shared folder (e.g. a synced Dropbox/OneDrive folder,
-      or a USB drive). Setup once, then Push to publish and Pull to receive.
-    </p>
-    <div class="field-group">
-      <label for="sync-vault">Vault</label>
-      <select id="sync-vault" bind:value={syncVault} onchange={() => refreshStatus()}>
-        {#each vaults as v (v.id)}
-          <option value={v.id}>{v.name}</option>
-        {/each}
-      </select>
+            <div class="trust-row">
+              <div>
+                <label for="trust-label" class="label">Name (optional)</label>
+                <input id="trust-label" type="text" bind:value={trustLabel} placeholder="e.g. Pixel 8" autocomplete="off" />
+              </div>
+              <button class="btn btn-primary" type="submit" disabled={!canTrust}>
+                {trustBusy ? "Trusting…" : "Trust device"}
+              </button>
+            </div>
+            {#if !pairingActive && parsedFingerprint}
+              <p class="hint">Open pairing first; the service refuses new devices while it is closed.</p>
+            {/if}
+            {#if trustError}<div class="error" role="alert">{trustError}</div>{/if}
+          </form>
+
+          <!-- Pending devices (device-pairing.md §5): devices that announced
+               themselves in the shared folder. UNTRUSTED (§5.2): "Use" only
+               fills the identity box; the compare + pairing gate still apply. -->
+          {#if syncDir.trim() || pending.length}
+            <div class="pending">
+              <div class="section-head">
+                <span class="label" style="margin:0">Seen in the sync folder</span>
+                <button class="icon-btn sm" onclick={() => refreshPending()} disabled={pendingBusy || !syncDir.trim()} aria-label="Look again">
+                  <Icon name="refresh" size={14} />
+                </button>
+              </div>
+              {#if pendingError}
+                <div class="error" role="alert">{pendingError}</div>
+              {:else if pending.length === 0}
+                <p class="hint">No new devices have announced themselves there.</p>
+              {:else}
+                <ul class="plain-list">
+                  {#each pending as d (d.device_id)}
+                    <li>
+                      <span class="dev-main">
+                        <span class="dev-name">{d.label || `Device ${d.device_id.slice(0, 8)}`}</span>
+                        <span class="dev-fp mono">{d.fingerprint} · announced {formatTimestamp(d.announced_at)}</span>
+                      </span>
+                      <button class="btn btn-sm" onclick={() => usePendingForTrust(d.identity_string)}>Use</button>
+                    </li>
+                  {/each}
+                </ul>
+                <p class="hint">Listed here is not proof. You still compare the fingerprint.</p>
+              {/if}
+            </div>
+          {/if}
+        </li>
+      </ol>
     </div>
-    <div class="field-group">
-      <label for="sync-dir">{canPickDir ? "Shared folder" : "Shared folder path"}</label>
+  </details>
+
+  <!-- ===================== Sync folder ===================== -->
+  <details class="disclosure" bind:open={setupOpen}>
+    <summary>
+      <Icon name="folder" size={16} /> Sync folder
+      <span class="sum-meta">{status?.enrolled ? "· set up" : "· not set up"}</span>
+      <span class="chev"><Icon name="chevron" size={14} /></span>
+    </summary>
+    <div class="body">
+      <label for="sync-dir" class="label">{canPickDir ? "Shared folder" : "Shared folder path"}</label>
       <div class="dir-row">
         <input
           id="sync-dir"
@@ -815,112 +874,61 @@
           readonly={canPickDir}
         />
         {#if canPickDir}
-          <button class="btn" onclick={() => chooseFolder("sync")}>Choose folder…</button>
+          <button class="btn" onclick={() => chooseFolder("sync")}>Choose…</button>
+        {/if}
+      </div>
+      <div class="toolbar" style="margin-top:8px">
+        <button class="btn btn-primary" onclick={doSetup} disabled={syncBusy || !syncVault || !syncDir.trim()}>
+          Use this folder for {vaults.find((v) => v.id === syncVault)?.name ?? "this vault"}
+        </button>
+        {#if status?.enrolled}
+          <button class="btn btn-quiet" onclick={doPush} disabled={syncBusy || !syncVault} title="Publish this device's changes only">Send only</button>
+          <button class="btn btn-quiet" onclick={doPull} disabled={syncBusy || !syncVault} title="Receive other devices' changes only">Receive only</button>
         {/if}
       </div>
     </div>
-    <div class="btn-row">
-      <button class="btn" onclick={doSetup} disabled={syncBusy || !syncVault || !syncDir.trim()}>
-        Setup
-      </button>
-      <button class="btn btn-primary" onclick={doPush} disabled={syncBusy || !syncVault}>
-        Push
-      </button>
-      <button class="btn btn-primary" onclick={doPull} disabled={syncBusy || !syncVault}>
-        Pull
-      </button>
-    </div>
+  </details>
 
-    {#if syncError}
-      <div class="error" role="alert">{syncError}</div>
-    {/if}
-    {#if syncResult}
-      <p class="hint" role="status" aria-live="polite">{syncResult}</p>
-    {/if}
-
-    {#if alarms.length}
-      <div class="alarm" role="alert" aria-live="assertive">
-        <strong>⚠ Sync alarms — do not ignore.</strong>
-        A peer's history failed verification (possible tampering or rollback).
-        The offending device's changes were quarantined, not applied.
-        <ul>
-          {#each alarms as a (a)}
-            <li class="mono">{a}</li>
-          {/each}
-        </ul>
+  <!-- ===================== Share ===================== -->
+  <details class="disclosure">
+    <summary>
+      <Icon name="upload" size={16} /> Share a vault with a device
+      <span class="chev"><Icon name="chevron" size={14} /></span>
+    </summary>
+    <div class="body">
+      <p class="hint" style="margin-top:0">
+        Sends the vault's key, sealed to that device, through the sync folder. Set the folder up first.
+      </p>
+      <div class="share-grid">
+        <div>
+          <label for="share-vault" class="label">Vault</label>
+          <select id="share-vault" bind:value={shareVault}>
+            {#each vaults as v (v.id)}<option value={v.id}>{v.name}</option>{/each}
+          </select>
+        </div>
+        <div>
+          <label for="share-peer" class="label">Device</label>
+          <select id="share-peer" bind:value={sharePeer}>
+            <option value="" disabled>Choose a trusted device…</option>
+            {#each peers as p (p.device_id)}<option value={p.device_id}>{p.label || p.fingerprint}</option>{/each}
+          </select>
+        </div>
+        <button class="btn btn-primary" onclick={doShare} disabled={shareBusy || !shareVault || !sharePeer}>
+          {shareBusy ? "Sharing…" : "Share"}
+        </button>
       </div>
-    {/if}
-
-    {#if status && status.enrolled}
-      <div class="status-block">
-        <p class="hint">
-          Sync folder: <span class="mono">{status.root ?? "(none)"}</span> · Pending: {status.pending}
-        </p>
-        {#if status.devices.length}
-          <table class="sync-table">
-            <thead>
-              <tr><th>Device</th><th>Local</th><th>Channel</th><th>Trust</th></tr>
-            </thead>
-            <tbody>
-              {#each status.devices as d (d.device_id)}
-                <tr>
-                  <td class="mono">{d.device_id.slice(0, 8)}…</td>
-                  <td>{d.local_seq}</td>
-                  <td>{d.channel_seq}</td>
-                  <td>
-                    {#if d.is_self}this device{:else if d.trusted}trusted{:else}<span class="untrusted">UNTRUSTED</span>{/if}
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        {/if}
-      </div>
-    {/if}
-  </section>
-
-  <!-- Share a vault to a device -->
-  <section class="panel" aria-labelledby="share-h">
-    <h3 id="share-h">Share a vault to a device</h3>
-    <p class="muted">
-      Send this vault's key to a trusted device via the shared folder (set the
-      folder up in "Sync a vault" first). The key is sealed to the recipient — it
-      never leaves LocalPass in the clear.
-    </p>
-    <div class="field-group">
-      <label for="share-vault">Vault</label>
-      <select id="share-vault" bind:value={shareVault}>
-        {#each vaults as v (v.id)}
-          <option value={v.id}>{v.name}</option>
-        {/each}
-      </select>
+      {#if shareError}<div class="error" role="alert">{shareError}</div>{/if}
     </div>
-    <div class="field-group">
-      <label for="share-peer">Recipient device</label>
-      <select id="share-peer" bind:value={sharePeer}>
-        <option value="" disabled>Choose a trusted device…</option>
-        {#each peers as p (p.device_id)}
-          <option value={p.device_id}>{p.label || p.fingerprint}</option>
-        {/each}
-      </select>
-    </div>
-    {#if shareError}
-      <div class="error" role="alert">{shareError}</div>
-    {/if}
-    <button class="btn btn-primary" onclick={doShare} disabled={shareBusy || !shareVault || !sharePeer}>
-      {shareBusy ? "Sharing…" : "Share vault"}
-    </button>
-  </section>
+  </details>
 
-  <!-- Adopt shared vaults -->
-  <section class="panel" aria-labelledby="adopt-h">
-    <h3 id="adopt-h">Adopt shared vaults from a folder</h3>
-    <p class="muted">
-      On the receiving device: scan a shared folder for vaults shared to you,
-      import them, and pull their items.
-    </p>
-    <div class="field-group">
-      <label for="adopt-dir">{canPickDir ? "Shared folder" : "Shared folder path"}</label>
+  <!-- ===================== Adopt ===================== -->
+  <details class="disclosure">
+    <summary>
+      <Icon name="download" size={16} /> Receive vaults shared with this device
+      <span class="chev"><Icon name="chevron" size={14} /></span>
+    </summary>
+    <div class="body">
+      <label for="adopt-dir" class="label">{canPickDir ? "Shared folder" : "Shared folder path"}</label>
       <div class="dir-row">
         <input
           id="adopt-dir"
@@ -933,20 +941,16 @@
           readonly={canPickDir}
         />
         {#if canPickDir}
-          <button class="btn" onclick={() => chooseFolder("adopt")}>Choose folder…</button>
+          <button class="btn" onclick={() => chooseFolder("adopt")}>Choose…</button>
         {/if}
+        <button class="btn btn-primary" onclick={doAdopt} disabled={adoptBusy || !adoptDir.trim()}>
+          {adoptBusy ? "Looking…" : "Receive"}
+        </button>
       </div>
+      {#if adoptError}<div class="error" role="alert">{adoptError}</div>{/if}
+      {#if adoptResult}<p class="hint" role="status">{adoptResult}</p>{/if}
     </div>
-    {#if adoptError}
-      <div class="error" role="alert">{adoptError}</div>
-    {/if}
-    {#if adoptResult}
-      <p class="hint" role="status" aria-live="polite">{adoptResult}</p>
-    {/if}
-    <button class="btn btn-primary" onclick={doAdopt} disabled={adoptBusy || !adoptDir.trim()}>
-      {adoptBusy ? "Adopting…" : "Adopt shared vaults"}
-    </button>
-  </section>
+  </details>
 </div>
 
 <!-- Desktop webcam scanner. Decoding fills the identity box; it never trusts. -->
@@ -955,184 +959,179 @@
 {/if}
 
 <style>
-  .panel {
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 1rem 1.1rem;
-    margin: 1rem 0;
+  .devices {
+    max-width: 760px;
   }
-  .panel h3 {
-    margin: 0 0 0.5rem;
+  .vault-pick {
+    width: auto;
+    max-width: 180px;
   }
-  .label {
-    display: block;
-    font-size: 0.85rem;
+  .alarm-list {
+    margin: 6px 0 0;
+    padding-left: 18px;
+  }
+  .status-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    padding: 16px 18px;
+    border-radius: var(--radius-lg);
+    background: var(--bg-hover);
+  }
+  .dot.big {
+    width: 10px;
+    height: 10px;
+    margin-top: 7px;
+  }
+  .status-text {
+    flex: 1;
+    min-width: 0;
+  }
+  .headline {
+    font-family: var(--font-display);
+    font-size: 16px;
     font-weight: 600;
-    margin-bottom: 0.3rem;
+  }
+  .detail-line {
+    margin-top: 3px;
+    font-size: 12.5px;
+    color: var(--text-muted);
+  }
+  .detail-line code {
+    font-size: 12px;
+  }
+  .ok-line {
+    color: var(--success);
+  }
+  .device-list .dev-ico {
+    color: var(--text-muted);
+  }
+  .dev-main {
+    flex: 1;
+    min-width: 0;
+    display: grid;
+  }
+  .dev-name {
+    font-weight: 600;
+    overflow-wrap: anywhere;
+  }
+  .dev-fp {
+    font-size: 12px;
+    color: var(--text-muted);
+    overflow-wrap: anywhere;
+  }
+  .dev-when {
+    font-size: 12px;
+    white-space: nowrap;
   }
   .fp {
     letter-spacing: 0.04em;
   }
   .fp.big {
-    font-size: 1.1rem;
+    display: block;
+    font-size: 17px;
+    margin-top: 2px;
   }
-  /* Pairing-mode control row: the ON/OFF badge + its toggle button, sitting
-     inline under the fingerprint. */
-  .pairing-row {
+  .steps {
+    margin: 0;
+    padding-left: 20px;
+    display: grid;
+    gap: 18px;
+  }
+  .steps > li::marker {
+    color: var(--text-faint);
+    font-weight: 600;
+  }
+  .step-head {
     display: flex;
     align-items: center;
-    gap: 0.6rem;
+    gap: 8px;
     flex-wrap: wrap;
-    margin: 0.9rem 0 0.3rem;
+    min-height: 28px;
   }
-  .pairing-badge {
-    font-weight: 700;
-    font-size: 0.85rem;
-    padding: 0.1rem 0.5rem;
-    border-radius: 6px;
+  .step-t {
+    font-weight: 600;
+    margin-right: 4px;
   }
-  .pairing-badge.on {
-    color: var(--ok, #1a7f37);
-    background: color-mix(in srgb, var(--ok, #1a7f37) 12%, transparent);
+  .share-row {
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    margin-top: 6px;
   }
-  .pairing-badge.off {
-    color: var(--muted, #6b7280);
-    background: var(--bg-hover);
-  }
-  /* The "enable pairing mode first" note in the Trust panel — advisory, not an
-     error (the backend enforces the gate regardless). */
-  .pairing-note {
-    border: 1px solid var(--border);
-    background: var(--bg-hover);
-    border-radius: 8px;
-    padding: 0.6rem 0.8rem;
-    margin: 0.5rem 0 0.8rem;
-    font-size: 0.9rem;
+  .share-main {
+    flex: 1;
+    min-width: 220px;
   }
   /* The QR plate stays light in every theme on purpose: a scanner needs the
      quiet zone light to detect the symbol at all, so we never invert it. */
   .qr-plate {
-    display: inline-block;
-    margin-top: 0.75rem;
-    padding: 12px;
+    padding: 10px;
     background: #fff;
-    border: 1px solid var(--border);
     border-radius: 8px;
+    border: 1px solid var(--border);
   }
   .qr-plate img {
     display: block;
-    width: 240px;
+    width: 200px;
     height: auto;
     max-width: 100%;
   }
+  .trust-form {
+    margin-top: 10px;
+  }
   .fp-compare {
-    background: var(--bg-hover);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 0.6rem 0.8rem;
-    margin: 0.5rem 0;
+    margin: 10px 0 6px;
+    padding: 10px 12px;
+    border-radius: var(--radius);
+    background: var(--accent-tint);
+  }
+  .fp-compare .label {
+    margin: 0;
   }
   .confirm {
+    margin: 6px 0 10px;
+  }
+  .trust-row {
     display: flex;
-    align-items: flex-start;
-    gap: 0.5em;
-    font-weight: 400;
-    margin: 0.5rem 0 0.8rem;
-  }
-  /* "Pending devices" header row: the title with its Refresh button pushed to
-     the right. */
-  .pending-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.6rem;
-  }
-  .pending-head h3 {
-    margin: 0;
-  }
-  .peer-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
-  .peer-list li {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    padding: 0.5rem 0;
-    border-bottom: 1px solid var(--border);
-  }
-  .peer-list li:last-child {
-    border-bottom: none;
-  }
-  .peer-main {
-    display: flex;
-    flex-direction: column;
-    gap: 0.15rem;
-  }
-  .peer-label {
-    font-weight: 600;
-  }
-  .peer-when {
-    font-size: 0.8rem;
-    white-space: nowrap;
-  }
-  .btn-row {
-    display: flex;
-    gap: 0.5rem;
+    align-items: flex-end;
+    gap: 8px;
+    margin-top: 10px;
     flex-wrap: wrap;
-    margin-top: 0.3rem;
   }
-  /* Folder field + its (Android-only) picker button. The input keeps the
-     remaining width; without min-width:0 a long content:// URI would push the
-     button off a narrow phone screen. */
+  .trust-row > div {
+    flex: 1 1 200px;
+  }
+  .pending {
+    margin-top: 16px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+  }
   .dir-row {
     display: flex;
-    gap: 0.5rem;
+    gap: 6px;
     align-items: center;
   }
   .dir-row input {
     flex: 1;
     min-width: 0;
   }
-  .dir-row .btn {
-    flex: none;
-    white-space: nowrap;
+  .share-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: end;
   }
-  .alarm {
-    border: 1px solid var(--danger);
-    background: color-mix(in srgb, var(--danger) 10%, transparent);
-    border-radius: 8px;
-    padding: 0.7rem 0.9rem;
-    margin: 0.8rem 0;
-  }
-  .alarm ul {
-    margin: 0.4rem 0 0;
-    padding-left: 1.2rem;
-  }
-  .status-block {
-    margin-top: 0.8rem;
-  }
-  .sync-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.85rem;
-    margin-top: 0.4rem;
-  }
-  .sync-table th,
-  .sync-table td {
-    text-align: left;
-    padding: 0.3rem 0.5rem;
-    border-bottom: 1px solid var(--border);
-  }
-  .untrusted {
-    color: var(--danger);
-    font-weight: 700;
-  }
-  textarea.mono,
-  input.mono,
-  .val.mono {
-    font-family: var(--mono, ui-monospace, monospace);
+  @media (max-width: 719px) {
+    .share-grid {
+      grid-template-columns: 1fr;
+    }
+    .dir-row {
+      flex-wrap: wrap;
+    }
+    .status-head {
+      flex-wrap: wrap;
+    }
   }
 </style>

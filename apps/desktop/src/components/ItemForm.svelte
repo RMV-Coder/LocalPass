@@ -23,6 +23,7 @@
   import { createItem, updateItem, generatePassword, parseDotenv, revealField } from "../lib/api";
   import type { ItemView, NewItemInput, CustomFieldInput, EnvEntryInput } from "../lib/types";
   import { toast } from "../lib/toast";
+  import Icon, { typeIcon } from "./Icon.svelte";
 
   interface Props {
     vault: string;
@@ -125,6 +126,7 @@
   // values; the user can set a new value or leave blank to preserve.
   let customFields = $state<CustomFieldInput[]>([]);
 
+  let showSecret = $state(false);
   let genLen = $state(20);
   let genSymbols = $state(true);
   let busy = $state(false);
@@ -315,122 +317,135 @@
   });
 </script>
 
-<div class="detail">
-  <h2>{isEdit ? "Edit item" : "New item"}</h2>
+<div class="page form-page">
+  <div class="page-head">
+    <div>
+      <h2>{isEdit ? `Edit ${seed?.title ?? "item"}` : "New item"}</h2>
+      {#if isEdit}<p class="sub">Secret fields you leave blank keep their current value.</p>{/if}
+    </div>
+  </div>
 
   <form onsubmit={submit} novalidate>
     {#if !isEdit}
       <div class="field-group">
-        <label for="if-type">Type</label>
-        <select id="if-type" bind:value={type_str}>
+        <span class="label" id="if-type-label">Type</span>
+        <div class="type-pick" role="radiogroup" aria-labelledby="if-type-label">
           {#each TYPES as t (t.value)}
-            <option value={t.value}>{t.label}</option>
+            <label class="type-opt" class:on={type_str === t.value}>
+              <input type="radio" name="if-type" value={t.value} bind:group={type_str} />
+              <Icon name={typeIcon(t.value)} size={16} />
+              <span>{t.label}</span>
+            </label>
           {/each}
-        </select>
+        </div>
       </div>
     {/if}
 
     <div class="field-group">
       <label for="if-title">Title</label>
-      <input id="if-title" type="text" bind:value={title} autocomplete="off" required />
+      <!-- svelte-ignore a11y_autofocus -->
+      <input id="if-title" type="text" bind:value={title} autocomplete="off" required autofocus={!isEdit} />
     </div>
 
     {#if type_str === "login" || type_str === "api_key"}
       {#if type_str === "api_key"}
         <div class="field-group">
-          <label for="if-apikey">Key / identifier</label>
-          <input id="if-apikey" type="text" autocomplete="off" bind:value={apiKey} />
+          <label for="if-apikey">Key ID</label>
+          <input id="if-apikey" type="text" class="mono" autocomplete="off" spellcheck="false" bind:value={apiKey} />
         </div>
       {:else}
         <div class="field-group">
           <label for="if-username">Username</label>
-          <input id="if-username" type="text" autocomplete="off" bind:value={username} />
+          <input id="if-username" type="text" autocomplete="off" spellcheck="false" bind:value={username} />
         </div>
       {/if}
 
       <div class="field-group">
         <label for="if-password">{type_str === "api_key" ? "Secret" : "Password"}</label>
-        {#if isEdit}
-          <p class="hint" style="margin-top:0">
-            Leave blank to keep the current secret (•••• unchanged).
-          </p>
-        {/if}
-        <div class="gen-output" style="margin-top:0">
-          <input
-            id="if-password"
-            class="val"
-            type="text"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder={isEdit ? "•••• (unchanged)" : ""}
-            bind:value={password}
-            style="user-select:text"
-          />
-          <button class="btn" type="button" onclick={generate}>Generate</button>
+        <div class="pw-row">
+          <div class="input-affix">
+            <input
+              id="if-password"
+              class="mono"
+              type={showSecret ? "text" : "password"}
+              autocomplete="new-password"
+              spellcheck="false"
+              placeholder={isEdit ? "Unchanged" : ""}
+              bind:value={password}
+            />
+            <button
+              type="button"
+              class="icon-btn"
+              aria-label={showSecret ? "Hide" : "Show"}
+              aria-pressed={showSecret}
+              onclick={() => (showSecret = !showSecret)}
+            >
+              <Icon name={showSecret ? "eye-off" : "eye"} size={17} />
+            </button>
+          </div>
+          <button class="btn" type="button" onclick={() => { generate(); showSecret = true; }}>
+            <Icon name="generator" size={15} /> Generate
+          </button>
         </div>
-        <div class="toolbar" style="margin-top:0.4rem">
-          <label style="display:flex;align-items:center;gap:0.4em;font-weight:400;margin:0">
-            Length {genLen}
-            <input type="range" min="8" max="64" bind:value={genLen} style="width:120px" />
+        <div class="gen-opts">
+          <label class="len">
+            <span>Length</span>
+            <input type="range" min="8" max="64" bind:value={genLen} aria-label="Generated length" />
+            <span class="num">{genLen}</span>
           </label>
-          <label style="display:flex;align-items:center;gap:0.4em;font-weight:400;margin:0">
-            <input type="checkbox" bind:checked={genSymbols} /> Symbols
-          </label>
+          <label class="check"><input type="checkbox" bind:checked={genSymbols} /> <span>Symbols</span></label>
         </div>
       </div>
 
       <div class="field-group">
         <label for="if-url">{type_str === "api_key" ? "Endpoint" : "URL"}</label>
-        <input id="if-url" type="text" autocomplete="off" bind:value={url} />
+        <input id="if-url" type="text" autocomplete="off" spellcheck="false" placeholder="https://" bind:value={url} />
       </div>
     {/if}
 
     {#if type_str === "ssh_key"}
-      <div class="field-group">
-        <label for="if-ssh-algo">Algorithm</label>
-        <input id="if-ssh-algo" type="text" autocomplete="off" bind:value={sshAlgo} placeholder="ed25519" />
+      <div class="row2">
+        <div class="field-group">
+          <label for="if-ssh-algo">Algorithm</label>
+          <input id="if-ssh-algo" type="text" class="mono" autocomplete="off" bind:value={sshAlgo} placeholder="ed25519" />
+        </div>
+        <div class="field-group">
+          <label for="if-ssh-fp">Fingerprint</label>
+          <input id="if-ssh-fp" type="text" class="mono" autocomplete="off" bind:value={sshFingerprint} />
+        </div>
       </div>
       <div class="field-group">
         <label for="if-ssh-public">Public key (OpenSSH)</label>
-        <input id="if-ssh-public" type="text" autocomplete="off" bind:value={sshPublic} />
+        <input id="if-ssh-public" type="text" class="mono" autocomplete="off" spellcheck="false" bind:value={sshPublic} />
       </div>
       <div class="field-group">
         <label for="if-ssh-private">Private key (PEM)</label>
-        {#if isEdit}
-          <p class="hint" style="margin-top:0">Leave blank to keep the current private key.</p>
-        {/if}
         <textarea
           id="if-ssh-private"
+          class="mono"
           bind:value={sshPrivate}
           rows="4"
           spellcheck="false"
-          placeholder={isEdit ? "•••• (unchanged)" : ""}
-          style="width:100%;font-family:var(--mono);padding:0.55em 0.7em;border:1px solid var(--border);border-radius:6px;background:var(--bg-panel);color:var(--text)"
+          placeholder={isEdit ? "Unchanged" : "Paste the private key (PEM or OpenSSH format)"}
         ></textarea>
-      </div>
-      <div class="field-group">
-        <label for="if-ssh-fp">Fingerprint</label>
-        <input id="if-ssh-fp" type="text" autocomplete="off" bind:value={sshFingerprint} />
       </div>
     {/if}
 
     {#if type_str === "totp"}
       <div class="field-group">
-        <label for="if-totp-secret">Base32 secret</label>
-        {#if isEdit}
-          <p class="hint" style="margin-top:0">Leave blank to keep the current secret.</p>
-        {/if}
+        <label for="if-totp-secret">Setup key (Base32)</label>
         <input
           id="if-totp-secret"
           type="text"
+          class="mono"
           autocomplete="off"
           spellcheck="false"
           bind:value={totpSecret}
-          placeholder={isEdit ? "•••• (unchanged)" : ""}
+          placeholder={isEdit ? "Unchanged" : ""}
         />
       </div>
-      <div class="toolbar">
-        <div class="field-group" style="flex:1">
+      <div class="row3">
+        <div class="field-group">
           <label for="if-totp-algo">Algorithm</label>
           <select id="if-totp-algo" bind:value={totpAlgo}>
             <option value="SHA1">SHA1</option>
@@ -447,162 +462,263 @@
           <input id="if-totp-period" type="number" min="10" max="120" bind:value={totpPeriod} />
         </div>
       </div>
-      <div class="field-group">
-        <label for="if-totp-issuer">Issuer</label>
-        <input id="if-totp-issuer" type="text" autocomplete="off" bind:value={totpIssuer} />
-      </div>
-      <div class="field-group">
-        <label for="if-totp-account">Account</label>
-        <input id="if-totp-account" type="text" autocomplete="off" bind:value={totpAccount} />
+      <div class="row2">
+        <div class="field-group">
+          <label for="if-totp-issuer">Issuer</label>
+          <input id="if-totp-issuer" type="text" autocomplete="off" bind:value={totpIssuer} />
+        </div>
+        <div class="field-group">
+          <label for="if-totp-account">Account</label>
+          <input id="if-totp-account" type="text" autocomplete="off" bind:value={totpAccount} />
+        </div>
       </div>
     {/if}
 
     {#if type_str === "env_set"}
-      <div class="field-group">
-        <button
-          class="btn btn-small"
-          type="button"
-          onclick={() => (showPasteEnv = !showPasteEnv)}
-          aria-expanded={showPasteEnv}
-          aria-controls="paste-env-area"
-        >
-          {showPasteEnv ? "Hide paste .env" : "Paste .env"}
-        </button>
+      <div class="field-group" role="group" aria-labelledby="env-h">
+        <div class="section-head">
+          <h3 id="env-h">Variables</h3>
+          <button
+            class="btn btn-sm btn-quiet"
+            type="button"
+            onclick={() => (showPasteEnv = !showPasteEnv)}
+            aria-expanded={showPasteEnv}
+            aria-controls="paste-env-area"
+          >
+            {showPasteEnv ? "Close paste" : "Paste .env"}
+          </button>
+        </div>
         {#if showPasteEnv}
-          <div id="paste-env-area" style="margin-top:0.5rem">
-            <label for="if-paste-env" class="hint" style="display:block;margin:0 0 0.35em">
-              Paste raw <code>.env</code> content, then choose how to merge it. Blank lines
-              and <code>#</code> comments are ignored; a leading <code>export</code> is fine.
-            </label>
+          <div id="paste-env-area" class="paste-env">
+            <label for="if-paste-env" class="sr-only">Raw .env content</label>
             <textarea
               id="if-paste-env"
+              class="mono"
               bind:value={pasteEnvText}
               rows="5"
               spellcheck="false"
               autocomplete="off"
               placeholder={"# paste .env here\nDATABASE_URL=postgres://localhost/db\nexport API_KEY=abc123"}
-              style="width:100%;font-family:var(--mono);padding:0.55em 0.7em;border:1px solid var(--border);border-radius:6px;background:var(--bg-panel);color:var(--text)"
             ></textarea>
-            <div class="toolbar" style="margin-top:0.4rem">
+            <div class="toolbar" style="margin-top:6px">
               <button
-                class="btn btn-small btn-primary"
+                class="btn btn-sm btn-primary"
                 type="button"
                 onclick={() => importEnv("append")}
                 disabled={pasteBusy || pasteEnvText.trim().length === 0}
               >
-                {pasteBusy ? "Importing…" : "Append"}
+                {pasteBusy ? "Importing…" : "Add to list"}
               </button>
               <button
-                class="btn btn-small"
+                class="btn btn-sm"
                 type="button"
                 onclick={() => importEnv("replace")}
                 disabled={pasteBusy || pasteEnvText.trim().length === 0}
               >
-                Replace all
+                Replace list
               </button>
+              <span class="hint" style="margin:0">Comments and <code>export</code> are fine; a repeated key keeps the last value.</span>
             </div>
-            <p class="hint" style="margin:0.35em 0 0">
-              Duplicate keys use last-wins (matching dotenv). The pasted text is cleared
-              after import.
-            </p>
           </div>
         {/if}
-      </div>
-      <div class="field-group" role="group" aria-label="Environment variables">
-        <p class="field-name" style="margin:0 0 0.35em">Environment variables</p>
         {#if envLoading}
-          <p class="hint" style="margin:0 0 0.4rem" role="status">Loading existing variables…</p>
+          <p class="hint" role="status">Loading existing variables…</p>
         {:else if envLoadError}
-          <div class="error" role="alert" style="margin:0 0 0.4rem">
-            {envLoadError} You can add new variables, but adding them without the
-            existing ones loaded would replace them — cancel and retry instead.
+          <div class="error" role="alert">
+            {envLoadError} Adding variables now would replace the ones that did not load, so cancel and retry instead.
           </div>
         {/if}
-        {#each envEntries as entry, i (i)}
-          <div class="toolbar" style="margin-bottom:0.4rem">
-            <input
-              type="text"
-              placeholder="KEY"
-              autocomplete="off"
-              bind:value={entry.key}
-              style="flex:1"
-              aria-label={`Env key ${i + 1}`}
-            />
-            <input
-              type="text"
-              placeholder="value"
-              autocomplete="off"
-              bind:value={entry.value}
-              style="flex:2"
-              aria-label={`Env value ${i + 1}`}
-            />
-            <button class="btn btn-small btn-ghost" type="button" onclick={() => removeEnv(i)}>
-              Remove
-            </button>
-          </div>
-        {/each}
-        <button class="btn btn-small" type="button" onclick={addEnv}>+ Add variable</button>
+        <div class="kv-list">
+          {#each envEntries as entry, i (i)}
+            <div class="kv">
+              <input type="text" class="mono" placeholder="KEY" autocomplete="off" spellcheck="false" bind:value={entry.key} aria-label={`Variable ${i + 1} name`} />
+              <input type="text" class="mono" placeholder="value" autocomplete="off" spellcheck="false" bind:value={entry.value} aria-label={`Variable ${i + 1} value`} />
+              <button class="icon-btn" type="button" onclick={() => removeEnv(i)} aria-label={`Remove variable ${i + 1}`}><Icon name="x" size={15} /></button>
+            </div>
+          {/each}
+        </div>
+        <button class="btn btn-sm btn-quiet accent" type="button" onclick={addEnv}><Icon name="plus" size={14} /> Add variable</button>
       </div>
     {/if}
 
-    <!-- Notes (all types). -->
     <div class="field-group">
       <label for="if-notes">Notes</label>
-      <textarea
-        id="if-notes"
-        bind:value={notes}
-        rows="3"
-        style="width:100%;padding:0.55em 0.7em;border:1px solid var(--border);border-radius:6px;background:var(--bg-panel);color:var(--text);font:inherit"
-      ></textarea>
+      <textarea id="if-notes" bind:value={notes} rows="3"></textarea>
     </div>
 
-    <!-- Tags. -->
-    <div class="field-group">
-      <label for="if-tags">Tags</label>
-      <input id="if-tags" type="text" autocomplete="off" bind:value={tagsText} placeholder="comma, separated" />
+    <div class="row2">
+      <div class="field-group">
+        <label for="if-tags">Tags</label>
+        <input id="if-tags" type="text" autocomplete="off" bind:value={tagsText} placeholder="work, billing" />
+      </div>
+      <div class="field-group fav">
+        <label class="check"><input type="checkbox" bind:checked={favorite} /> <span>Favorite</span></label>
+      </div>
     </div>
 
-    <!-- Custom fields. -->
-    <div class="field-group" role="group" aria-label="Custom fields">
-      <p class="field-name" style="margin:0 0 0.35em">Custom fields</p>
-      {#each customFields as cf, i (i)}
-        <div class="toolbar" style="margin-bottom:0.4rem">
-          <input
-            type="text"
-            placeholder="name"
-            autocomplete="off"
-            bind:value={cf.name}
-            style="flex:1"
-            aria-label={`Custom field name ${i + 1}`}
-          />
-          <input
-            type={cf.secret ? "password" : "text"}
-            placeholder={isEdit && cf.secret ? "•••• (unchanged)" : "value"}
-            autocomplete="off"
-            bind:value={cf.value}
-            style="flex:2"
-            aria-label={`Custom field value ${i + 1}`}
-          />
-          <label style="display:flex;align-items:center;gap:0.3em;font-weight:400;margin:0;white-space:nowrap">
-            <input type="checkbox" bind:checked={cf.secret} /> Secret
-          </label>
-          <button class="btn btn-small btn-ghost" type="button" onclick={() => removeCustom(i)}>
-            Remove
-          </button>
-        </div>
-      {/each}
-      <button class="btn btn-small" type="button" onclick={addCustom}>+ Add field</button>
+    <div class="field-group" role="group" aria-labelledby="cf-h">
+      <div class="section-head">
+        <h3 id="cf-h">Custom fields</h3>
+      </div>
+      <div class="kv-list">
+        {#each customFields as cf, i (i)}
+          <div class="kv custom">
+            <input type="text" placeholder="Name" autocomplete="off" bind:value={cf.name} aria-label={`Custom field ${i + 1} name`} />
+            <input
+              type={cf.secret ? "password" : "text"}
+              class:mono={cf.secret}
+              placeholder={isEdit && cf.secret ? "Unchanged" : "Value"}
+              autocomplete="off"
+              bind:value={cf.value}
+              aria-label={`Custom field ${i + 1} value`}
+            />
+            <label class="check secret"><input type="checkbox" bind:checked={cf.secret} /> <span>Secret</span></label>
+            <button class="icon-btn" type="button" onclick={() => removeCustom(i)} aria-label={`Remove custom field ${i + 1}`}><Icon name="x" size={15} /></button>
+          </div>
+        {/each}
+      </div>
+      <button class="btn btn-sm btn-quiet accent" type="button" onclick={addCustom}><Icon name="plus" size={14} /> Add field</button>
     </div>
 
     {#if error}
       <div class="error" role="alert" aria-live="assertive">{error}</div>
     {/if}
 
-    <div class="toolbar" style="margin-top:1rem">
-      <button class="btn btn-primary" type="submit" disabled={busy}>
-        {busy ? "Saving…" : isEdit ? "Save changes" : "Create item"}
-      </button>
+    <div class="form-actions">
       <button class="btn" type="button" onclick={onCancel} disabled={busy}>Cancel</button>
+      <button class="btn btn-primary" type="submit" disabled={busy}>
+        {busy ? "Saving…" : isEdit ? "Save changes" : "Save item"}
+      </button>
     </div>
   </form>
 </div>
+
+<style>
+  .form-page {
+    max-width: 680px;
+  }
+  .type-pick {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .type-opt {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    height: 32px;
+    padding: 0 11px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+  .type-opt input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .type-opt:has(input:focus-visible) {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+  .type-opt.on {
+    border-color: var(--accent);
+    background: var(--accent-tint);
+    color: var(--text);
+    font-weight: 600;
+  }
+  .type-opt.on :global(.icon) {
+    color: var(--accent);
+  }
+  .pw-row {
+    display: flex;
+    gap: 6px;
+  }
+  .pw-row .input-affix {
+    flex: 1;
+  }
+  .gen-opts {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 16px;
+    margin-top: 8px;
+    font-size: 12.5px;
+    color: var(--text-muted);
+  }
+  .len {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .len input {
+    width: 140px;
+  }
+  .len .num {
+    min-width: 2ch;
+    color: var(--text);
+  }
+  .row2 {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0 12px;
+  }
+  .row3 {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0 12px;
+  }
+  .fav {
+    align-self: end;
+    padding-bottom: 8px;
+  }
+  .paste-env {
+    margin-bottom: 10px;
+  }
+  .kv-list {
+    display: grid;
+    gap: 6px;
+    margin-bottom: 6px;
+  }
+  .kv {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(0, 3fr) auto;
+    gap: 6px;
+    align-items: center;
+  }
+  .kv.custom {
+    grid-template-columns: minmax(0, 2fr) minmax(0, 3fr) auto auto;
+  }
+  .kv .secret {
+    font-size: 12.5px;
+    color: var(--text-muted);
+    align-items: center;
+  }
+  .form-actions {
+    position: sticky;
+    bottom: 0;
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 12px 0 4px;
+    margin-top: 8px;
+    background: var(--bg-content);
+    border-top: 1px solid var(--border);
+  }
+  @media (max-width: 719px) {
+    .row2,
+    .row3 {
+      grid-template-columns: 1fr;
+    }
+    .kv,
+    .kv.custom {
+      grid-template-columns: minmax(0, 1fr) auto;
+    }
+    .kv.custom .secret {
+      grid-column: 1;
+    }
+  }
+</style>

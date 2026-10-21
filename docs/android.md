@@ -208,19 +208,20 @@ adb install -r aligned.apk
 
 ## App icon (all platforms from one source)
 
-The canonical logo is `apps/desktop/app-icon.png` (1024² padlock). Regenerate
-every platform's icons — desktop `.ico`/`.png`, the `.exe`/`.msi` installer, iOS
-AppIcons, and the Android launcher mipmaps — with one command:
+The mark is drawn once, as SVG, in `apps/desktop/brand/` (the "Keyhole-L"; see
+`DESIGN.md`). Regenerate every platform's icons — desktop `.ico`/`.png`, the
+macOS `.icns` (inset to Apple's grid), iOS AppIcons, the browser extension, the
+1024² `app-icon.png`, and the Android adaptive launcher icon — with one command:
 
 ```sh
-cd apps/desktop && npx tauri icon app-icon.png
+cd apps/desktop && npm run icons
 ```
 
 `icons/` is tracked; the Android mipmaps land in the **gitignored** `gen/android`
-tree, so re-run `tauri icon` after `android init`. The Android adaptive-icon
-background color (`gen/.../res/values/ic_launcher_background.xml`) is set to the
-logo's navy `#0F2A2E` so the padlock sits seamlessly under the launcher mask
-(the default `#fff` shows white slivers at the mask edge).
+tree, so re-run it (or `npx tauri icon brand/icon-manifest.json`) after
+`android init`. The manifest gives Android real adaptive-icon layers — a plain
+brass background, the keyhole as the foreground inside the 66dp safe zone, and a
+monochrome layer for themed icons — so no launcher mask ever cuts the glyph.
 
 ## Windows build gotchas
 

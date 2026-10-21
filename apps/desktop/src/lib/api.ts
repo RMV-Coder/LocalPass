@@ -13,7 +13,9 @@
 
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { withPresence } from "./presence";
+import { notifyActivity } from "./activity";
 import type {
+  AppInfoView,
   AttachmentSavedView,
   AttachmentView,
   AuditRecordView,
@@ -35,14 +37,43 @@ import type {
   SyncStatusView,
   TotpView,
   TrashEntryView,
+  UpdateInfoView,
+  HelloStatusView,
   VaultView,
 } from "./types";
 
+/** Commands that never reach the daemon as an *active* request, so they cannot
+ *  have moved the idle auto-lock deadline: the passive status reads, and the
+ *  purely local helpers. Everything else does reset the timer server-side. */
+const PASSIVE = new Set([
+  "status",
+  "ensure_service",
+  "pairing_mode_secs",
+  "agent_fill_secs",
+  "is_mobile",
+  "sync_dir_picker_available",
+  "copy_secret",
+  "preview_fingerprint",
+  "generate_password",
+  "generate_passphrase",
+  "parse_dotenv",
+  "app_info",
+  "hello_status",
+  "update_check",
+  "lock",
+  "unlock",
+  "hello_unlock",
+]);
+
 /** Every command goes through here. While an AI agent is connected, a change
  *  or consent request needs the master password first (mcp-server.md §7);
- *  `withPresence` shows the dialog and retries. Any other call is untouched. */
-function invoke<T>(cmd: string, args?: Parameters<typeof tauriInvoke>[1]): Promise<T> {
-  return withPresence(() => tauriInvoke<T>(cmd, args), confirmPresence);
+ *  `withPresence` shows the dialog and retries. After an active request the
+ *  app is told, so it can re-read the passive status and keep the auto-lock
+ *  countdown accurate. */
+async function invoke<T>(cmd: string, args?: Parameters<typeof tauriInvoke>[1]): Promise<T> {
+  const result = await withPresence(() => tauriInvoke<T>(cmd, args), confirmPresence);
+  if (!PASSIVE.has(cmd)) notifyActivity();
+  return result;
 }
 
 /** Re-enter the master password to confirm a person is present while an AI
@@ -408,4 +439,49 @@ export function getAttachment(
 /** Remove one attachment by id. */
 export function deleteAttachment(vault: string, item: string, id: string): Promise<void> {
   return invoke<void>("delete_attachment", { vault, item, id });
+}
+
+// --- App, unlock method, updates ----------------------------------------
+
+/** The running app's version, platform and profile path (display only). */
+export function appInfo(): Promise<AppInfoView> {
+  return invoke<AppInfoView>("app_info");
+}
+
+/** Whether this device can unlock with Windows Hello, and whether it is set
+ *  up for this profile. Local; never touches the vault. */
+export function helloStatus(): Promise<HelloStatusView> {
+  return invoke<HelloStatusView>("hello_status");
+}
+
+/** Turn on Windows Hello unlock. The master password is checked by the
+ *  service first, then sealed on this device under a key Windows Hello guards
+ *  (TPM-backed). It never returns to the webview. Shows the Hello prompt. */
+export function helloEnable(password: string): Promise<void> {
+  return invoke<void>("hello_enable", { password });
+}
+
+/** Turn off Windows Hello unlock and delete the sealed password. */
+export function helloDisable(): Promise<void> {
+  return invoke<void>("hello_disable");
+}
+
+/** Unlock with Windows Hello (PIN, fingerprint or face). The backend unseals
+ *  the master password and unlocks; the password never enters the webview.
+ *  Rejects with "cancelled" when the user dismisses the prompt. */
+export function helloUnlock(): Promise<SessionState> {
+  return invoke<SessionState>("hello_unlock");
+}
+
+/** Ask GitHub whether a newer signed release exists. One HTTPS request; only
+ *  runs when the user asks (or opted in to a check at start-up). */
+export function updateCheck(): Promise<UpdateInfoView | null> {
+  return invoke<UpdateInfoView | null>("update_check");
+}
+
+/** Download the update found by `updateCheck`, verify its signature, stop the
+ *  background service (so its files can be replaced), install, and restart.
+ *  Resolves only if the platform installer returns control. */
+export function updateInstall(): Promise<void> {
+  return invoke<void>("update_install");
 }

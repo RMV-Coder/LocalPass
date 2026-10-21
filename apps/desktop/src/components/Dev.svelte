@@ -50,6 +50,10 @@
   } from "../lib/audit";
   import { copyToClipboard } from "../lib/clipboard";
   import { toast } from "../lib/toast";
+  import { lastSeenBySource } from "../lib/activity";
+  import { formatAgo } from "../lib/format";
+  import Icon from "./Icon.svelte";
+  import CopyRow from "./CopyRow.svelte";
 
   interface Props {
     /** Every vault the unlocked session can see — used to resolve audit ids to
@@ -58,8 +62,12 @@
     /** The currently selected vault id, used in the example commands so they
      *  are copy-and-run rather than copy-and-edit. */
     selectedVault?: string;
+    /** An AI agent session is open right now (from the passive status). */
+    agentConnected?: boolean;
+    /** SSH identities the built-in agent serves right now. */
+    sshIdentities?: number;
   }
-  let { vaults, selectedVault = "" }: Props = $props();
+  let { vaults, selectedVault = "", agentConnected = false, sshIdentities = 0 }: Props = $props();
 
   // --- Environment (paths quoted by the guides) ---
   let profile = $state("");
@@ -156,6 +164,52 @@
       2,
     ),
   );
+
+  // --- What is using the vault (derived from the audit log) ---
+  const lastSeen = $derived(lastSeenBySource(records));
+  function lastSeenText(source: string): string {
+    const t = lastSeen.get(source);
+    if (!records.length) return loading ? "Reading activity…" : "No activity read yet";
+    return t ? `Last used ${formatAgo(t)}` : `No use in the last ${records.length} records`;
+  }
+  /** Used in the last 10 minutes. */
+  function recentlyActive(source: string): boolean {
+    const t = lastSeen.get(source);
+    return t !== undefined && Date.now() - t < 10 * 60_000;
+  }
+
+  // --- Activity filters ---
+  const SOURCES = [
+    { id: "all", label: "All" },
+    { id: "gui", label: "App" },
+    { id: "cli", label: "CLI" },
+    { id: "mcp", label: "MCP" },
+    { id: "native_host", label: "Browser" },
+    { id: "ssh_agent", label: "SSH" },
+  ];
+  let sourceFilter = $state("all");
+  let logQuery = $state("");
+  const visible = $derived(
+    records.filter((r) => {
+      if (sourceFilter !== "all" && (r.source ?? "unknown") !== sourceFilter) return false;
+      const q = logQuery.trim().toLowerCase();
+      if (!q) return true;
+      const hay = [
+        operationLabel(r),
+        sourceLabel(r.source),
+        callerLabel(r),
+        resolveItemTitle(r.item_id, titles),
+        r.vault_id ? (vaultNames.get(r.vault_id) ?? "") : "",
+      ]
+        .join(" ")
+        .toLowerCase();
+      return hay.includes(q);
+    }),
+  );
+
+  async function copyPlain(text: string): Promise<"native" | "webview" | null> {
+    return (await copyToClipboard(text)) ? "webview" : null;
+  }
 
   async function copy(text: string, what: string) {
     const ok = await copyToClipboard(text);
@@ -306,325 +360,155 @@
   });
 </script>
 
-<div class="detail dev">
-  <h2>Dev tools</h2>
-  <p class="muted" style="margin-top:0">
-    Drive this vault from a terminal or an AI coding agent — and see exactly what
-    they did.
-  </p>
+<div class="page dev">
+  <div class="page-head">
+    <div>
+      <h2>Developer</h2>
+      <p class="sub">The CLI, AI agents and the browser extension use this vault through the same local service.</p>
+    </div>
+    <div class="actions">
+      <button class="btn btn-sm" type="button" onclick={refresh} disabled={loading}>
+        <Icon name="refresh" size={14} /> {loading ? "Loading…" : "Refresh"}
+      </button>
+    </div>
+  </div>
 
-  <!-- ================= CLI ================= -->
-  <section class="field-group dev-section" aria-labelledby="dev-cli-h">
-    <div class="field-name" id="dev-cli-h">Command line</div>
-    <p class="hint" style="margin-top:0.35rem">
-      {#if localpassPath}
-        The CLI is at <code class="mono dev-path">{localpassPath}</code>.
+  <!-- ================= What is using the vault ================= -->
+  <section class="surfaces" aria-label="What is using this vault">
+    <div class="set-row">
+      <div class="surf">
+        <span class="surf-ico"><Icon name="agent" size={18} /></span>
+        <span>
+          <span class="t">AI agents (MCP)</span>
+          <span class="d">{lastSeenText("mcp")}</span>
+        </span>
+      </div>
+      {#if agentConnected}
+        <span class="badge accent"><i class="dot accent"></i> Connected now</span>
       {:else}
-        Install the CLI as <code class="mono">localpass</code> on your
-        <code class="mono">PATH</code>.
+        <span class="badge">Not connected</span>
       {/if}
-      {#if profile}
-        It shares this app's profile: <code class="mono dev-path">{profile}</code>.
+    </div>
+    <div class="set-row">
+      <div class="surf">
+        <span class="surf-ico"><Icon name="dev" size={18} /></span>
+        <span>
+          <span class="t">Command line</span>
+          <span class="d">{lastSeenText("cli")}</span>
+        </span>
+      </div>
+      {#if recentlyActive("cli")}<span class="badge ok">Active</span>{/if}
+    </div>
+    <div class="set-row">
+      <div class="surf">
+        <span class="surf-ico"><Icon name="external" size={18} /></span>
+        <span>
+          <span class="t">Browser extension</span>
+          <span class="d">{lastSeenText("native_host")}</span>
+        </span>
+      </div>
+      {#if armed}
+        <span class="badge warn">Agent fill armed</span>
+      {:else if recentlyActive("native_host")}
+        <span class="badge ok">Active</span>
       {/if}
-    </p>
-    <p class="hint">
-      Unlock once with <code class="mono">localpass unlock</code> and the running
-      service holds the session — later commands need no password, and the GUI and
-      CLI see the same vault.
-    </p>
-
-    <div class="dev-sub">Inject secrets into a process</div>
-    <p class="hint" style="margin-top:0.2rem">
-      The pattern that keeps secrets off disk entirely: references are resolved at
-      spawn and handed to the child's environment. Nothing is written anywhere.
-    </p>
-    <div class="gen-output dev-snippet">
-      <span class="val">{injectExample}</span>
-      <button class="btn btn-small" type="button" onclick={() => copy(injectExample, "Command")}>
-        Copy
-      </button>
     </div>
-    <ul class="dev-list">
-      <li>
-        <code class="mono">localpass://&lt;vault&gt;/&lt;item&gt;/&lt;field&gt;</code>
-        — vault is a name or id, item a title or id, field a field name (or an
-        env-set key). <code class="mono">op://</code> is an accepted alias.
-      </li>
-      <li>
-        <code class="mono">--no-input</code> is global: it forbids interactive
-        prompts, so a script fails instead of hanging on one.
-      </li>
-      <li>
-        <code class="mono">-e KEY=REF</code> is repeatable and wins over
-        <code class="mono">--env-set &lt;item&gt;</code> and
-        <code class="mono">--env-file &lt;path&gt;</code>. Everything after
-        <code class="mono">--</code> is the command to run.
-      </li>
-    </ul>
-
-    <div class="dev-sub">Add and edit items</div>
-    <ul class="dev-list">
-      <li>
-        <code class="mono">localpass item add --type login --title "Prod DB" --username alice</code>
-        — types are <code class="mono">login</code>, <code class="mono">note</code>,
-        <code class="mono">api_key</code>, <code class="mono">env_set</code>,
-        <code class="mono">ssh_key</code>, <code class="mono">totp</code>.
-      </li>
-      <li>
-        <code class="mono">localpass item edit "Prod DB" --username bob</code> —
-        the first argument is a title or id; the supplied flags overlay the
-        current payload.
-      </li>
-      <li>
-        <code class="mono">localpass generate --length 24</code> prints a password
-        to <strong>stdout</strong> (its entropy goes to stderr), so it pipes
-        cleanly. Add <code class="mono">--words 6</code> for a passphrase.
-      </li>
-    </ul>
-
-    <!-- The gotcha the owner asked to call out explicitly. -->
-    <div class="error dev-warn" role="note">
-      <strong><code class="mono">item add --generate</code> prints the generated
-      password to stdout.</strong>
-      That line lands in your terminal scrollback, your shell transcript, and any
-      CI log capturing the run. It is fine for a human at a terminal who wants to
-      see the value once — it is the wrong tool inside a script.
-    </div>
-    <p class="hint" style="margin-top:0.2rem">
-      The safe pattern is to generate and pipe the value straight into an edit, so
-      it never reaches stdout. <code class="mono">--password -</code> reads the
-      value from stdin:
-    </p>
-    <div class="gen-output dev-snippet">
-      <span class="val">{rotateExample}</span>
-      <button class="btn btn-small" type="button" onclick={() => copy(rotateExample, "Command")}>
-        Copy
-      </button>
-    </div>
-    <p class="hint">
-      This needs an <strong>unlocked service</strong> (run
-      <code class="mono">localpass unlock</code> first, or keep this window
-      unlocked). The pipe occupies stdin, so the CLI has no terminal left to
-      prompt for a master password on — with a held session it never needs to ask.
-    </p>
-  </section>
-
-  <!-- ================= MCP ================= -->
-  <section class="field-group dev-section" aria-labelledby="dev-mcp-h">
-    <div class="field-name" id="dev-mcp-h">MCP server (for AI agents)</div>
-    <p class="hint" style="margin-top:0.35rem">
-      <code class="mono">localpass mcp</code> speaks the Model Context Protocol on
-      stdin/stdout, so an AI coding agent can <em>spend</em> a secret without ever
-      receiving a copy of it. It is an ordinary daemon client — no network
-      listener, no new storage, no new trust boundary.
-    </p>
-
-    <div class="dev-guarantee" role="note">
-      <p style="margin:0 0 0.25rem"><strong>No secret ever enters the transcript.</strong></p>
-      <p class="hint" style="margin:0">
-        Every tool result is copied verbatim into the agent's context — logged,
-        replayed, and for a hosted model sent to a third party. So no tool returns
-        a secret value: items come back masked at the source <em>and</em> through a
-        masking choke point, and <code class="mono">run_with_secrets</code> scrubs
-        every injected value out of the child's captured output and refuses to
-        return the output at all if any survived. There are also no write tools —
-        a confused or prompt-injected agent cannot create, edit, delete or export
-        anything through this surface.
-      </p>
-    </div>
-
-    <div class="dev-sub">Register it with your MCP client</div>
-    <p class="hint" style="margin-top:0.2rem">
-      Most clients take a JSON server map. Paste this into your client's MCP
-      configuration:
-    </p>
-    <div class="dev-snippet">
-      <pre class="dev-code" aria-label="MCP registration snippet">{mcpSnippet}</pre>
-      <div class="toolbar" style="margin-top:0.4rem">
-        <button class="btn btn-small" type="button" onclick={() => copy(mcpSnippet, "Snippet")}>
-          Copy snippet
-        </button>
+    <div class="set-row">
+      <div class="surf">
+        <span class="surf-ico"><Icon name="type-ssh_key" size={18} /></span>
+        <span>
+          <span class="t">SSH agent</span>
+          <span class="d">
+            {sshIdentities ? `Serving ${sshIdentities} key${sshIdentities === 1 ? "" : "s"}` : "No SSH keys loaded"} · {lastSeenText("ssh_agent")}
+          </span>
+        </span>
       </div>
     </div>
-    {#if !localpassPath}
-      <p class="hint">
-        No <code class="mono">localpass</code> executable was found beside this app
-        or on <code class="mono">PATH</code>, so the snippet uses the bare name —
-        replace it with an absolute path if your MCP client does not inherit your
-        shell's <code class="mono">PATH</code>.
-      </p>
-    {/if}
-    <p class="hint">
-      Run <code class="mono">localpass unlock</code> before starting the agent. The
-      server then takes the daemon route and holds no key material of its own; it
-      serves until its client closes stdin, and idles out with the same auto-lock
-      as everything else.
-    </p>
-
-    <div class="dev-sub">Tools it exposes</div>
-    <div role="list" aria-label="MCP tools">
-      {#each MCP_TOOLS as t (t.name)}
-        <div class="dev-tool" role="listitem">
-          <code class="mono dev-tool-name">{t.name}</code>
-          <span class="hint" style="margin:0">{t.blurb}</span>
-        </div>
-      {/each}
-    </div>
-    <p class="hint">
-      Every action an agent takes through these tools is recorded below with
-      <span class="badge">MCP</span> as its source.
-    </p>
   </section>
 
   <!-- ================= Agent fill (agent-fill.md) ================= -->
-  <section class="field-group dev-section" aria-labelledby="dev-fill-h">
-    <div class="field-name" id="dev-fill-h">Agent autofill in the browser</div>
-    <p class="hint" style="margin-top:0.35rem">
-      The browser extension normally fills a login only when you click
-      <strong>Fill</strong> in its popup. Arming removes that click: for three
-      minutes, an AI agent using this vault can have the extension fill the
-      logins you tick below, without asking you again.
+  <section class="section" aria-labelledby="dev-fill-h">
+    <div class="section-head">
+      <h3 id="dev-fill-h">Let an agent fill logins</h3>
+      {#if armed}
+        <span class="badge warn">Armed · <span class="mono">{formatArmCountdown(armSecs)}</span></span>
+      {/if}
+    </div>
+    <p class="hint" style="margin-top:0">
+      Normally the browser extension fills a login only when you click <strong>Fill</strong>.
+      Arming removes that click for three minutes, for the logins you tick, so an AI agent
+      using this vault can sign in for you.
     </p>
 
     <!-- The consent text. This control is the entire security delta of the
          feature (agent-fill.md §4), so the trade is stated here rather than
-         implied — including the part LocalPass cannot enforce (§3). -->
-    <div class="dev-consent" role="note">
-      <p style="margin:0 0 0.3rem"><strong>What you are agreeing to</strong></p>
-      <ul class="dev-list" style="margin:0">
-        <li>
-          <strong>These logins, for three minutes.</strong> Nothing else in the
-          vault is in scope, and the window closes itself — you do not have to
-          remember to.
-        </li>
-        <li>
-          <strong>Matching sites only.</strong> A credential is released only to
-          a page whose site matches that item's saved URL. The service re-checks
-          that itself, so the agent cannot ask its way past it.
-        </li>
-        <li>
-          <strong>The agent fills by reference, but the value does land in the
-          page.</strong>
-          It names the item and the tab and is told only whether the field was
-          empty and whether the fill landed — the tools never hand it the
-          password. An agent that runs its own JavaScript in that page can still
-          read what was typed there. LocalPass cannot prevent that and does not
-          claim to. Arm this for an agent you would trust with the account
-          itself.
-        </li>
-        <li>
-          <strong>Nothing is silent.</strong> Every fill raises a notification
-          and lands in the activity log below — as two rows: the agent's request,
-          sourced <span class="badge">MCP</span>, and the credential going to the
-          extension, sourced <span class="badge">Browser</span>.
-        </li>
-      </ul>
-    </div>
-
-    <div class="dev-sub" id="dev-fill-pick-h">
-      Logins the agent may fill{fillVaultName ? ` — ${fillVaultName}` : ""}
-    </div>
-    <p class="hint" style="margin-top:0.2rem">
-      Only login items can be armed: a fill needs a username, a password, and a
-      saved URL to check the page against.
-    </p>
+         implied, including the part LocalPass cannot enforce (§3). -->
+    <ul class="consent">
+      <li><strong>Only these logins, only for three minutes.</strong> The window closes itself.</li>
+      <li><strong>Only matching sites.</strong> The service checks the page against each login's saved website; the agent cannot ask its way past that.</li>
+      <li>
+        <strong>The value does land in the page.</strong> The agent never receives the password,
+        but an agent that runs its own JavaScript in that page could read what was typed. Arm
+        this only for an agent you would trust with the account.
+      </li>
+      <li><strong>Nothing is silent.</strong> Every fill shows a notification and two rows in the activity log below (the request from <span class="badge">MCP</span>, the fill from <span class="badge">Browser</span>).</li>
+    </ul>
 
     {#if targetsError}
       <div class="error" role="alert">{targetsError}</div>
     {:else if targets.length === 0}
-      <p class="empty">No logins in this vault yet.</p>
+      <p class="hint">No logins in {fillVaultName || "this vault"} yet. Only logins with a website can be armed.</p>
     {:else}
-      <div class="dev-picker" role="group" aria-labelledby="dev-fill-pick-h">
+      <div class="picker" role="group" aria-labelledby="dev-fill-h">
         {#each targets as t (t.id)}
-          <label class="dev-pick">
-            <input
-              type="checkbox"
-              value={t.id}
-              bind:group={selected}
-              disabled={armed || armBusy}
-            />
+          <label class="check pick">
+            <input type="checkbox" value={t.id} bind:group={selected} disabled={armed || armBusy} />
             <span>{t.title}</span>
           </label>
         {/each}
       </div>
     {/if}
 
-    <div class="dev-arm-row">
-      <span class="label" style="margin-bottom:0">Agent fill</span>
+    <div class="arm-row">
       {#if armed}
-        <span class="dev-arm-badge on">
-          ARMED · <span class="mono">{formatArmCountdown(armSecs)}</span> left
-          {#if armedScope}· {armedScope}{/if}
-        </span>
-        <button class="btn btn-small" type="button" onclick={disarm} disabled={armBusy}>
-          {armBusy ? "…" : "Turn off"}
-        </button>
+        <button class="btn" type="button" onclick={disarm} disabled={armBusy}>{armBusy ? "…" : "Turn off now"}</button>
+        <span class="hint" style="margin:0">{armedScope ? `Covers ${armedScope}.` : ""} Locking the vault also ends it.</span>
       {:else}
-        <span class="dev-arm-badge off">OFF</span>
-        <button
-          class="btn btn-small"
-          type="button"
-          onclick={arm}
-          disabled={armBusy || scope.length === 0}
-        >
-          {armBusy ? "…" : "Arm for 3 minutes"}
+        <button class="btn btn-primary" type="button" onclick={arm} disabled={armBusy || scope.length === 0}>
+          {armBusy ? "…" : scope.length ? `Arm ${scope.length} login${scope.length === 1 ? "" : "s"} for 3 minutes` : "Arm for 3 minutes"}
         </button>
+        {#if scope.length === 0 && targets.length}<span class="hint" style="margin:0">Tick at least one login.</span>{/if}
       {/if}
-      <!-- Speaks once per state change (including the window lapsing on its
-           own); the countdown above is not a live region on purpose. -->
+      <!-- Speaks once per state change; the countdown is not a live region. -->
       <span class="sr-only" role="status">{armAnnouncement}</span>
     </div>
-
-    {#if armError}
-      <div class="error" role="alert">{armError}</div>
-    {/if}
-
-    {#if armed}
-      <p class="hint">
-        To change what the window covers, turn it off and arm again. It also
-        closes on its own at 0:00, and locking this vault ends it immediately.
-      </p>
-    {:else if scope.length === 0}
-      <p class="hint">
-        Tick at least one login to arm — a window has to name what it covers.
-      </p>
-    {:else}
-      <p class="hint">
-        Arms for <strong>{scopeSummary(scope, targets)}</strong>
-        ({scope.length} login{scope.length === 1 ? "" : "s"}).
-      </p>
-    {/if}
-
-    <p class="hint">
-      This needs the LocalPass browser extension installed and this vault
-      unlocked. Turning it off never affects the extension's ordinary
-      click-to-fill, which keeps its click.
-    </p>
+    {#if armError}<div class="error" role="alert">{armError}</div>{/if}
   </section>
 
-  <!-- ================= Audit log ================= -->
-  <section class="field-group dev-section" aria-labelledby="dev-audit-h">
-    <div class="dev-audit-head">
-      <div class="field-name" id="dev-audit-h">Recent activity</div>
+  <!-- ================= Activity log ================= -->
+  <section class="section" aria-labelledby="dev-audit-h">
+    <div class="section-head">
+      <h3 id="dev-audit-h">Activity</h3>
       <div class="toolbar">
-        <label class="sr-only" for="dev-audit-limit">Records to show</label>
-        <select id="dev-audit-limit" bind:value={limit} onchange={refresh} disabled={loading}>
-          {#each LIMITS as n (n)}
-            <option value={n}>last {n}</option>
-          {/each}
+        <label class="sr-only" for="dev-audit-limit">Records to read</label>
+        <select id="dev-audit-limit" class="limit" bind:value={limit} onchange={refresh} disabled={loading}>
+          {#each LIMITS as n (n)}<option value={n}>Last {n}</option>{/each}
         </select>
-        <button class="btn btn-small" type="button" onclick={refresh} disabled={loading}>
-          {loading ? "Loading…" : "Refresh"}
-        </button>
       </div>
     </div>
-    <p class="hint" style="margin-top:0.2rem">
-      This device's local audit log — what the CLI, this window, an MCP agent, the
-      browser extension, and the SSH agent each did. Metadata only: the log
-      records <strong>ids, never names</strong>, because it is plaintext on disk
-      while your titles are encrypted. Titles below are resolved here, in this
-      window, from your unlocked vaults.
-    </p>
+
+    <div class="log-filters">
+      <div class="seg" role="group" aria-label="Filter by source">
+        {#each SOURCES as s (s.id)}
+          <button aria-pressed={sourceFilter === s.id} onclick={() => (sourceFilter = s.id)}>{s.label}</button>
+        {/each}
+      </div>
+      <div class="search-box">
+        <Icon name="search" size={14} />
+        <label class="sr-only" for="dev-log-q">Filter activity</label>
+        <input id="dev-log-q" type="search" placeholder="Filter" bind:value={logQuery} autocomplete="off" spellcheck="false" />
+      </div>
+    </div>
 
     {#if error}
       <div class="error" role="alert">{error}</div>
@@ -632,270 +516,314 @@
       <p class="empty">Loading…</p>
     {:else if records.length === 0}
       <p class="empty">No activity recorded yet.</p>
+    {:else if visible.length === 0}
+      <p class="empty">Nothing matches that filter.</p>
     {:else}
-      <div class="dev-log" role="table" aria-label="Recent activity">
-        <div class="dev-log-row dev-log-head" role="row">
+      <div class="log" role="table" aria-label="Activity">
+        <div class="log-row log-head" role="row">
           <span role="columnheader">When</span>
           <span role="columnheader">Source</span>
-          <span role="columnheader">Caller</span>
-          <span role="columnheader">Operation</span>
+          <span role="columnheader">What</span>
           <span role="columnheader">Item</span>
         </div>
-        {#each records as r (r.seq)}
-          <div class="dev-log-row" class:alarm={isAlarming(r.kind)} role="row">
-            <span role="cell" class="dev-when">{formatAuditTime(r.timestamp)}</span>
+        {#each visible as r (r.seq)}
+          <div class="log-row" class:alarm={isAlarming(r.kind)} role="row">
+            <span role="cell" class="when" title={formatAuditTime(r.timestamp)}>{formatAgo(r.timestamp)}</span>
             <span role="cell">
-              <span class="badge dev-src {r.source ?? 'unknown'}">{sourceLabel(r.source)}</span>
+              <span class="badge src {r.source ?? 'unknown'}" title={callerLabel(r)}>{sourceLabel(r.source)}</span>
             </span>
-            <span role="cell" class="dev-caller mono">{callerLabel(r)}</span>
-            <span role="cell">{operationLabel(r)}</span>
-            <span role="cell" class="dev-item">
+            <span role="cell" class="op">
+              {#if isAlarming(r.kind)}<Icon name="alert" size={13} />{/if}
+              {operationLabel(r)}
+            </span>
+            <span role="cell" class="item">
               {#if isResolved(r.item_id, titles)}
                 {resolveItemTitle(r.item_id, titles)}
               {:else if r.item_id}
-                <span class="mono muted" title="This item is no longer in an unlocked vault">
-                  {shortId(r.item_id)}
-                </span>
+                <span class="mono faint" title="This item is not in an unlocked vault">{shortId(r.item_id)}</span>
               {:else if r.vault_id}
-                <span class="muted">
-                  vault {vaultNames.get(r.vault_id) ?? shortId(r.vault_id)}
-                </span>
+                <span class="faint">vault {vaultNames.get(r.vault_id) ?? shortId(r.vault_id)}</span>
               {:else}
-                <span class="muted">—</span>
+                <span class="faint">—</span>
               {/if}
             </span>
           </div>
         {/each}
       </div>
       <p class="hint">
-        Showing the most recent {records.length}
-        record{records.length === 1 ? "" : "s"}{loadedAt
-          ? ` · read ${formatAuditTime(loadedAt)}`
-          : ""}. The full, tamper-evident log is on disk — read it with
-        <code class="mono">localpass audit</code>.
+        {visible.length} of {records.length} records from this device's log{loadedAt ? `, read ${formatAuditTime(loadedAt)}` : ""}.
+        The log stores ids only (it is plaintext on disk); titles are resolved here. The full,
+        tamper-evident log: <code>localpass audit</code>.
       </p>
     {/if}
+  </section>
+
+  <!-- ================= Guides ================= -->
+  <section class="section guides">
+    <details class="disclosure">
+      <summary>
+        <Icon name="dev" size={16} /> Use from the command line
+        <span class="chev"><Icon name="chevron" size={14} /></span>
+      </summary>
+      <div class="body">
+        <p class="hint" style="margin-top:0">
+          {#if localpassPath}
+            The CLI is at <code class="wrap-anywhere">{localpassPath}</code>.
+          {:else}
+            Install the CLI as <code>localpass</code> on your <code>PATH</code>.
+          {/if}
+          Unlock once with <code>localpass unlock</code>; later commands use the running service and need no password.
+        </p>
+
+        <h4>Inject secrets into a process</h4>
+        <p class="hint">References are resolved at start and handed to the child's environment. Nothing is written to disk.</p>
+        <div class="snippet"><CopyRow label="Command" display={injectExample} copy={() => copyPlain(injectExample)} /></div>
+        <ul class="ref">
+          <li><code>localpass://&lt;vault&gt;/&lt;item&gt;/&lt;field&gt;</code>: names or ids; <code>op://</code> works too.</li>
+          <li><code>--no-input</code> makes a script fail instead of waiting on a prompt.</li>
+          <li><code>-e KEY=REF</code> repeats and wins over <code>--env-set</code> / <code>--env-file</code>. Everything after <code>--</code> runs.</li>
+        </ul>
+
+        <h4>Rotate a password without printing it</h4>
+        <div class="callout warn" role="note">
+          <span class="icon"><Icon name="alert" size={15} /></span>
+          <span><code>item add --generate</code> prints the new password to stdout, so it lands in scrollback and CI logs. In scripts, pipe it straight into an edit:</span>
+        </div>
+        <div class="snippet"><CopyRow label="Command" display={rotateExample} copy={() => copyPlain(rotateExample)} /></div>
+        <p class="hint"><code>--password -</code> reads stdin, so this needs an unlocked service (no terminal is left to prompt on).</p>
+      </div>
+    </details>
+
+    <details class="disclosure">
+      <summary>
+        <Icon name="agent" size={16} /> Connect an AI agent (MCP)
+        <span class="chev"><Icon name="chevron" size={14} /></span>
+      </summary>
+      <div class="body">
+        <div class="callout ok" role="note">
+          <span class="icon"><Icon name="security" size={15} /></span>
+          <span>
+            <strong>No secret ever enters the agent's transcript.</strong> Items come back masked,
+            <code>run_with_secrets</code> scrubs injected values from captured output, and there are no
+            write tools. While an agent is connected, changes in this app ask for your master password.
+          </span>
+        </div>
+        <p class="hint">Add this to your MCP client's configuration, then run <code>localpass unlock</code> before starting the agent:</p>
+        <div class="code-block">
+          <pre class="scroll" aria-label="MCP registration snippet">{mcpSnippet}</pre>
+          <button class="icon-btn" type="button" onclick={() => copy(mcpSnippet, "Snippet")} aria-label="Copy snippet"><Icon name="copy" size={16} /></button>
+        </div>
+        {#if !localpassPath}
+          <p class="hint">No <code>localpass</code> executable was found, so the snippet uses the bare name. Use an absolute path if your client does not inherit your shell's <code>PATH</code>.</p>
+        {/if}
+        <h4>Tools it exposes</h4>
+        <ul class="plain-list tools-list" aria-label="MCP tools">
+          {#each MCP_TOOLS as t (t.name)}
+            <li><code class="tool-name">{t.name}</code><span class="hint" style="margin:0">{t.blurb}</span></li>
+          {/each}
+        </ul>
+      </div>
+    </details>
   </section>
 </div>
 
 <style>
   .dev {
-    max-width: 720px;
+    max-width: 820px;
   }
-  .dev-section {
-    margin-top: 1.5rem;
-    padding-top: 1.25rem;
-    border-top: 1px solid var(--border);
-  }
-  .dev-section:first-of-type {
-    border-top: none;
-    padding-top: 0;
-  }
-  .dev-sub {
-    margin-top: 1rem;
-    font-weight: 600;
-  }
-  .dev-list {
-    margin: 0.35rem 0 0;
-    padding-left: 1.2rem;
-    line-height: 1.6;
-    color: var(--text-muted);
-    font-size: 0.85em;
-  }
-  .dev-list li {
-    margin-bottom: 0.35rem;
-  }
-  /* Long absolute paths must wrap rather than widen the pane. */
-  .dev-path {
-    overflow-wrap: anywhere;
-  }
-  .dev-snippet {
-    margin-top: 0.5rem;
-  }
-  .dev-snippet .val {
-    white-space: pre-wrap;
-  }
-  .dev-code {
-    margin: 0;
-    padding: 0.6em 0.7em;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bg-panel);
-    font-family: var(--mono);
-    font-size: 0.85em;
-    line-height: 1.5;
-    /* A wide snippet scrolls inside its own box; the pane never scrolls
-       sideways. */
-    overflow-x: auto;
-    user-select: all;
-  }
-  /* A note, not an error: reuse `.error`'s box but neutral colours, exactly as
-     Help.svelte and ItemDetail.svelte do for their advisories. */
-  .dev-warn {
-    color: var(--text);
+  .surfaces {
+    border-radius: var(--radius-lg);
     background: var(--bg-hover);
-    border-color: var(--border);
-    border-left: 3px solid var(--danger);
-    margin: 0.75rem 0 0.35rem;
+    padding: 2px 16px;
   }
-  .dev-guarantee {
-    margin: 0.75rem 0;
-    padding: 0.8rem 0.9rem;
-    border: 1px solid var(--border);
-    border-left: 3px solid var(--ok);
-    border-radius: 6px;
-    background: var(--bg-panel);
+  .surfaces .set-row + .set-row {
+    border-top-color: var(--border-strong);
   }
-  .dev-tool {
+  .surf {
     display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 0.5rem;
-    padding: 0.4rem 0;
-    border-bottom: 1px solid var(--border);
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
   }
-  .dev-tool-name {
-    font-weight: 600;
-    min-width: 9.5rem;
+  .surf > span:last-child {
+    display: grid;
+    min-width: 0;
   }
-
-  /* --- Agent fill (agent-fill.md §7) --- */
-  /* The consent box. Deliberately NOT `.dev-guarantee`'s accent rule: that box
-     states something LocalPass enforces, this one states a trade the user is
-     accepting, part of which LocalPass cannot enforce (§3). Neutral rather than
-     alarming — this is a capability, not a mistake. */
-  .dev-consent {
-    margin: 0.75rem 0;
-    padding: 0.8rem 0.9rem;
-    border: 1px solid var(--border);
-    border-left: 3px solid var(--text-muted);
-    border-radius: 6px;
-    background: var(--bg-panel);
+  .surf-ico {
+    color: var(--text-muted);
   }
-  .dev-picker {
-    margin-top: 0.5rem;
-    padding: 0.35rem 0.6rem;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    /* A long vault scrolls inside its own box rather than pushing the arm
-       control off-screen. */
+  .consent {
+    margin: 10px 0 12px;
+    padding-left: 18px;
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--text-muted);
+  }
+  .consent li + li {
+    margin-top: 4px;
+  }
+  .consent strong {
+    color: var(--text);
+  }
+  .picker {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 4px 16px;
     max-height: 12rem;
     overflow-y: auto;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
   }
-  .dev-pick {
-    display: flex;
+  .pick {
     align-items: center;
-    gap: 0.5rem;
-    padding: 0.25rem 0;
-    font-weight: 400;
-    margin: 0;
-    cursor: pointer;
+    padding: 4px 0;
   }
-  .dev-pick span {
+  .pick span {
     overflow-wrap: anywhere;
     min-width: 0;
   }
-  .dev-pick input:disabled {
-    cursor: not-allowed;
-  }
-  .dev-arm-row {
+  .arm-row {
     display: flex;
     align-items: center;
-    gap: 0.6rem;
+    gap: 10px;
     flex-wrap: wrap;
-    margin: 0.9rem 0 0.3rem;
+    margin-top: 12px;
   }
-  .dev-arm-badge {
-    font-weight: 700;
-    font-size: 0.85rem;
-    padding: 0.1rem 0.5rem;
-    border-radius: 6px;
+  .limit {
+    width: auto;
+    height: 28px;
+    font-size: 12.5px;
   }
-  .dev-arm-badge.on {
-    color: var(--ok);
-    background: color-mix(in srgb, var(--ok) 12%, transparent);
+  .log-filters {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-bottom: 8px;
   }
-  .dev-arm-badge.off {
-    color: var(--text-muted);
-    background: var(--bg-hover);
+  .log-filters .seg {
+    flex-wrap: wrap;
   }
-
-  /* --- Audit log table --- */
-  .dev-audit-head {
+  .search-box {
+    flex: 1 1 160px;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 0.75rem;
-    flex-wrap: wrap;
+    gap: 6px;
+    height: 32px;
+    padding: 0 8px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    color: var(--text-faint);
+    background: var(--bg-content);
   }
-  .dev-log {
-    margin-top: 0.6rem;
+  .search-box:focus-within {
+    outline: 2px solid var(--focus);
+    border-color: transparent;
+  }
+  .search-box input {
+    border: 0;
+    height: 100%;
+    padding: 0;
+    background: transparent;
+    outline: none;
+  }
+  .log {
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius);
     overflow: hidden;
-    /* The stacked fallback below keys off THIS box, not the viewport: the log
-       lives in the detail pane, which is ~520px wide inside a 1250px window,
-       so a viewport media query would keep the five-column grid long after it
-       stopped fitting (columns clipped off the pane's right edge). */
+    /* Stacks by its own width, not the viewport: the log sits in a pane. */
     container-type: inline-size;
   }
-  .dev-log-row {
+  .log-row {
     display: grid;
-    grid-template-columns: 6.5rem 5rem 9rem 1fr 1fr;
-    gap: 0.6rem;
-    align-items: baseline;
-    padding: 0.45rem 0.7rem;
-    border-bottom: 1px solid var(--border);
-    font-size: 0.85em;
+    grid-template-columns: 6rem 5.5rem minmax(0, 1fr) minmax(0, 1fr);
+    gap: 10px;
+    align-items: center;
+    padding: 7px 12px;
+    font-size: 13px;
   }
-  .dev-log-row:last-child {
-    border-bottom: none;
+  .log-row + .log-row {
+    border-top: 1px solid var(--border);
   }
-  .dev-log-head {
-    background: var(--bg-panel);
+  .log-head {
+    background: var(--bg-hover);
     color: var(--text-muted);
-    font-size: 0.72em;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    font-weight: 700;
+    font-size: 12px;
+    font-weight: 500;
   }
-  .dev-log-row.alarm {
-    background: var(--danger-bg);
+  .log-row.alarm {
+    background: var(--danger-tint);
   }
-  .dev-when,
-  .dev-caller {
+  .when {
     color: var(--text-muted);
-    font-size: 0.95em;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
   }
-  .dev-caller,
-  .dev-item {
-    overflow-wrap: anywhere;
+  .op {
+    display: flex;
+    align-items: center;
+    gap: 5px;
     min-width: 0;
   }
-  .dev-src.gui {
-    border-color: var(--accent);
+  .alarm .op {
+    color: var(--danger);
   }
-  .dev-src.mcp,
-  .dev-src.native_host {
-    border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  .item {
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
-
-  /* Narrow panes (and the mobile single-screen layout): the five-column grid
-     stops working long before the text does, so each record becomes a stacked
-     card with its columns labelled by position rather than by a header row.
-     Keyed to the log's own inline size, so it fires whenever the PANE is
-     narrow — on a phone and in the desktop three-pane layout alike. */
-  @container (max-width: 720px) {
-    .dev-log-head {
+  .src.mcp {
+    background: var(--accent-tint);
+    color: var(--accent);
+  }
+  @container (max-width: 560px) {
+    .log-head {
       display: none;
     }
-    .dev-log-row {
-      grid-template-columns: 1fr;
-      gap: 0.15rem;
-      padding: 0.6rem 0.7rem;
+    .log-row {
+      grid-template-columns: auto minmax(0, 1fr);
+      grid-template-areas: "src op" "when item";
+      row-gap: 2px;
     }
-    .dev-log-row > :global(*) {
-      min-width: 0;
+    .log-row > :nth-child(1) {
+      grid-area: when;
     }
+    .log-row > :nth-child(2) {
+      grid-area: src;
+    }
+    .log-row > :nth-child(3) {
+      grid-area: op;
+    }
+    .log-row > :nth-child(4) {
+      grid-area: item;
+      color: var(--text-muted);
+    }
+  }
+  .guides {
+    margin-top: 30px;
+  }
+  .guides h4 {
+    font-size: 13px;
+    margin: 16px 0 4px;
+  }
+  .snippet {
+    margin: 6px -10px;
+  }
+  .ref {
+    margin: 6px 0 0;
+    padding-left: 18px;
+    font-size: 12.5px;
+    color: var(--text-muted);
+    line-height: 1.6;
+  }
+  .tools-list li {
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 12px;
+  }
+  .tool-name {
+    min-width: 9rem;
+    font-weight: 600;
   }
 </style>

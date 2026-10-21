@@ -2,11 +2,12 @@
   SPDX-License-Identifier: MPL-2.0
   This file is part of the LocalPass desktop GUI. See ../../LICENSE.
 
-  Item detail. Secret fields render masked by default; per-field Reveal/Copy
-  buttons call reveal_field on an explicit click. Revealed values live only in
-  the component-local `revealed` map, which is RESET whenever the item changes
-  (see the $effect) — never a persisted store. TOTP items show a live code with
-  a seconds-remaining ring.
+  Item detail. Every field row is its own copy button (CopyRow); secret rows
+  add an eye that reveals the value in place. Secret values are fetched only on
+  an explicit gesture (reveal_field) and live only in the component-local
+  `revealed` map, which is RESET whenever the item changes (see load()) and
+  each value re-masks after REMASK_MS — never a persisted store. TOTP items
+  show a live code with a seconds-remaining ring.
 -->
 <script lang="ts">
   import {
@@ -20,11 +21,13 @@
     deleteAttachment,
   } from "../lib/api";
   import type { ItemView, TotpView, AttachmentView } from "../lib/types";
-  import { MASK, typeLabel, fieldLabel, formatTimestamp, groupTotp, humanSize } from "../lib/format";
+  import { MASK, typeLabel, fieldLabel, formatTimestamp, formatAgo, groupTotp, humanSize } from "../lib/format";
   import { formatDotenv, buildRunCommand } from "../lib/envset";
-  import { copySecret, copyToClipboard } from "../lib/clipboard";
+  import { copySecret, copySecretVia, copyToClipboard } from "../lib/clipboard";
   import { toast } from "../lib/toast";
   import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+  import Icon, { typeIcon } from "./Icon.svelte";
+  import CopyRow from "./CopyRow.svelte";
 
   interface Props {
     vault: string;
@@ -38,11 +41,15 @@
   }
   let { vault, vaultName = "", itemId, onEdit, onDeleted }: Props = $props();
 
+  /** A revealed value goes back behind the mask after this long. */
+  const REMASK_MS = 30_000;
+
   let item = $state<ItemView | null>(null);
   let error = $state("");
   let loading = $state(false);
 
-  // Delete confirmation dialog state.
+  // Overflow menu + delete confirmation.
+  let menuOpen = $state(false);
   let confirmingDelete = $state(false);
   let deleting = $state(false);
 
@@ -64,6 +71,13 @@
   // Revealed secret values, keyed by field name. Component-local only.
   let revealed = $state<Record<string, string>>({});
   let revealBusy = $state<Record<string, boolean>>({});
+  const remaskTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  function clearRevealed() {
+    for (const t of remaskTimers.values()) clearTimeout(t);
+    remaskTimers.clear();
+    revealed = {};
+  }
 
   // TOTP live state.
   let totp = $state<TotpView | null>(null);
@@ -95,11 +109,6 @@
     }
   }
 
-  function hideEnvExport() {
-    // Clear the assembled secret text from component-local state.
-    envExport = null;
-  }
-
   async function copyEnvExport() {
     if (envExport === null) return;
     const ok = await copySecret(envExport);
@@ -110,28 +119,17 @@
   // Contains NO secret — only the item title, the vault name, and the user's
   // own dev command. Not gated.
   let devCommand = $state("");
-  const runCommand = $derived(
-    item ? buildRunCommand(item.title, vaultName, devCommand) : "",
-  );
-
-  async function copyRunCommand() {
-    const ok = await copyToClipboard(runCommand);
-    toast(ok ? "Command copied" : "Copy failed", ok ? "ok" : "error");
-  }
+  const runCommand = $derived(item ? buildRunCommand(item.title, vaultName, devCommand) : "");
 
   // --- Attachments ------------------------------------------------------
-  // The attachment list is NON-SECRET metadata (id / filename / size). Crucially
-  // the attachment PLAINTEXT never enters the webview: attaching passes the OS
+  // The attachment list is NON-SECRET metadata (id / filename / size). The
+  // attachment PLAINTEXT never enters the webview: attaching passes the OS
   // file-picker's SOURCE path to the daemon (which reads it), and saving passes
-  // a native save-dialog DEST path to the daemon (which writes it). Only paths +
-  // metadata cross the command bridge — a stronger boundary than reveal_field.
-  // We still reset this list on item change (below, in load()) to stay tidy.
+  // a native save-dialog DEST path to the daemon (which writes it).
   let attachments = $state<AttachmentView[]>([]);
   let attachmentsError = $state("");
   let attaching = $state(false);
-  // Per-attachment busy flags (Save / Remove), keyed by attachment id.
   let attachBusy = $state<Record<string, boolean>>({});
-  // Remove-confirmation: the attachment id awaiting a confirm, or null.
   let confirmingRemove = $state<string | null>(null);
 
   async function loadAttachments() {
@@ -146,7 +144,6 @@
 
   async function attachFile() {
     if (attaching) return;
-    // Native OPEN dialog → returns the picked SOURCE path (a string) or null.
     let picked: string | null;
     try {
       const result = await openDialog({ multiple: false, directory: false, title: "Choose a file to attach" });
@@ -169,25 +166,26 @@
     }
   }
 
-  async function saveAttachment(att: AttachmentView) {
-    if (attachBusy[att.id]) return;
-    // Native SAVE dialog → returns the chosen DEST path (a string) or null.
+  async function saveAttachment(att: AttachmentView): Promise<"webview" | null | undefined> {
+    if (attachBusy[att.id]) return undefined;
     let dest: string | null;
     try {
       dest = await saveDialog({ defaultPath: att.filename, title: "Save attachment as" });
     } catch (err) {
       toast(typeof err === "string" ? err : "Could not open the save dialog", "error");
-      return;
+      return null;
     }
-    if (!dest) return; // user cancelled
+    if (!dest) return undefined; // user cancelled
     attachBusy = { ...attachBusy, [att.id]: true };
     try {
       // The daemon decrypts and writes to `dest` itself — plaintext never in JS.
       // The native save dialog already confirmed any overwrite, so force = true.
       const saved = await getAttachment(vault, itemId, att.id, dest, true);
-      toast(`Saved ${saved.filename} to ${dest}`, "ok");
+      toast(`Saved ${saved.filename}`, "ok");
+      return "webview";
     } catch (err) {
       toast(typeof err === "string" ? err : "Save failed", "error");
+      return null;
     } finally {
       attachBusy = { ...attachBusy, [att.id]: false };
     }
@@ -212,25 +210,23 @@
     loading = true;
     error = "";
     // Clear any previously revealed secrets before showing a new item.
-    revealed = {};
-    // Clear the assembled .env export (secret) and the transient dev command.
+    clearRevealed();
     envExport = null;
     devCommand = "";
     totp = null;
     stopTotp();
-    // Clear attachment list state on item change (non-secret metadata, but keep
-    // it tidy — same discipline as the other per-item state above).
     attachments = [];
     attachmentsError = "";
     attachBusy = {};
     confirmingRemove = null;
+    menuOpen = false;
+    confirmingDelete = false;
     try {
       const it = await getItem(vault, itemId);
       item = it;
       if (it.type_str === "totp") {
         await startTotp();
       }
-      // Attachments hang off any item type; load them once the item is known.
       await loadAttachments();
     } catch (err) {
       item = null;
@@ -240,12 +236,18 @@
     }
   }
 
-  async function reveal(name: string) {
+  async function toggleReveal(name: string) {
+    if (revealed[name] !== undefined) {
+      hide(name);
+      return;
+    }
     if (revealBusy[name]) return;
     revealBusy = { ...revealBusy, [name]: true };
     try {
       const value = await revealField(vault, itemId, name);
       revealed = { ...revealed, [name]: value };
+      clearTimeout(remaskTimers.get(name));
+      remaskTimers.set(name, setTimeout(() => hide(name), REMASK_MS));
     } catch (err) {
       toast(typeof err === "string" ? err : "Reveal failed", "error");
     } finally {
@@ -254,29 +256,30 @@
   }
 
   function hide(name: string) {
+    clearTimeout(remaskTimers.get(name));
+    remaskTimers.delete(name);
     const next = { ...revealed };
     delete next[name];
     revealed = next;
   }
 
-  async function copyField(name: string) {
-    // Reveal on demand if not already revealed, then copy — one gesture.
+  /** Copy a secret field: reveal on demand (one gesture), copy, never keep it
+   *  revealed as a side effect. */
+  async function copySecretField(name: string): Promise<"native" | "webview" | null> {
     let value = revealed[name];
     if (value === undefined) {
       try {
         value = await revealField(vault, itemId, name);
       } catch (err) {
         toast(typeof err === "string" ? err : "Copy failed", "error");
-        return;
+        return null;
       }
     }
-    const ok = await copySecret(value);
-    toast(ok ? "Copied to clipboard" : "Copy failed", ok ? "ok" : "error");
+    return copySecretVia(value);
   }
 
-  async function copyPlain(value: string) {
-    const ok = await copyToClipboard(value);
-    toast(ok ? "Copied to clipboard" : "Copy failed", ok ? "ok" : "error");
+  async function copyPlain(value: string): Promise<"native" | "webview" | null> {
+    return (await copyToClipboard(value)) ? "webview" : null;
   }
 
   async function startTotp() {
@@ -298,307 +301,401 @@
     }
   }
 
-  async function copyTotp() {
-    if (!totp) return;
-    const ok = await copySecret(totp.code);
-    toast(ok ? "Code copied" : "Copy failed", ok ? "ok" : "error");
+  async function copyTotp(): Promise<"native" | "webview" | null> {
+    if (!totp) return null;
+    return copySecretVia(totp.code);
   }
 
-  // Reload whenever the selected item changes; clean up the TOTP timer on
-  // teardown. Reading itemId/vault registers the dependency.
+  // Reload whenever the selected item changes; clean up timers on teardown.
   $effect(() => {
-    // Touch reactive deps so the effect re-runs on change.
     void itemId;
     void vault;
     load();
-    return () => stopTotp();
+    return () => {
+      stopTotp();
+      clearRevealed();
+    };
+  });
+
+  // Close the overflow menu on any outside click.
+  $effect(() => {
+    if (!menuOpen) return;
+    const close = () => (menuOpen = false);
+    const t = setTimeout(() => window.addEventListener("click", close, { once: true }));
+    return () => {
+      clearTimeout(t);
+      window.removeEventListener("click", close);
+    };
   });
 
   function ringPct(t: TotpView): number {
-    return Math.max(0, Math.min(100, (t.seconds_remaining / t.period) * 100));
+    return Math.max(0, Math.min(1, t.seconds_remaining / t.period));
   }
+  const RING = 2 * Math.PI * 15;
 </script>
 
 {#if loading && !item}
   <div class="empty">Loading…</div>
 {:else if error && !item}
-  <div class="detail">
+  <div class="page">
     <div class="error" role="alert">{error}</div>
   </div>
 {:else if item}
-  <div class="detail">
-    <div class="detail-head">
-      <h2>{item.title}</h2>
-      <div class="field-actions">
-        <button class="btn btn-small" onclick={() => onEdit?.(itemId)}>Edit</button>
-        <button class="btn btn-small btn-danger-outline" onclick={() => (confirmingDelete = true)}>
-          Delete
-        </button>
-      </div>
-    </div>
-    <p class="row-meta detail-meta">
-      <span class="badge">{typeLabel(item.type_str)}</span>
-      {#if item.favorite}<span class="badge">★ Favorite</span>{/if}
-      {#each item.tags as tag (tag)}<span class="badge badge-tag">#{tag}</span>{/each}
-      <span>Updated {formatTimestamp(item.updated_at)} · v{item.version}</span>
-    </p>
-
-    {#if confirmingDelete}
-      <div class="error" role="alertdialog" aria-labelledby="del-title" style="color:var(--text);background:var(--bg-hover);border-color:var(--border)">
-        <p id="del-title" style="margin:0 0 0.6rem">
-          Move <strong>{item.title}</strong> to the trash? It is recoverable for
-          30 days.
+  <article class="page detail">
+    <header class="d-head">
+      <span class="type-glyph" aria-hidden="true"><Icon name={typeIcon(item.type_str)} size={20} /></span>
+      <div class="d-title">
+        <h2>{item.title}</h2>
+        <p class="d-meta">
+          <span>{typeLabel(item.type_str)}</span>
+          <span aria-hidden="true">·</span>
+          <time title={formatTimestamp(item.updated_at)}>Updated {formatAgo(item.updated_at)}</time>
+          {#if item.favorite}<span class="badge"><Icon name="star" size={11} /> Favorite</span>{/if}
+          {#each item.tags as tag (tag)}<span class="tag">{tag}</span>{/each}
         </p>
-        <div class="toolbar">
-          <button
-            class="btn btn-small btn-danger-outline"
-            onclick={doDelete}
-            disabled={deleting}
-          >
-            {deleting ? "Deleting…" : "Delete"}
-          </button>
-          <button
-            class="btn btn-small"
-            onclick={() => (confirmingDelete = false)}
-            disabled={deleting}
-          >
-            Cancel
-          </button>
-        </div>
       </div>
-    {/if}
-
-    {#if item.type_str === "totp"}
-      <div class="field" style="grid-template-columns:1fr auto">
-        <div class="totp">
-          {#if totp}
-            <span class="totp-code" aria-label={`Current code ${groupTotp(totp.code)}`}>
-              {groupTotp(totp.code)}
-            </span>
-            <div
-              class="ring"
-              style={`--pct:${ringPct(totp)}`}
-              role="img"
-              aria-label={`${totp.seconds_remaining} seconds remaining`}
-            >
-              <span aria-hidden="true">{totp.seconds_remaining}</span>
+      <div class="d-actions">
+        <button class="btn btn-sm" onclick={() => onEdit?.(itemId)}><Icon name="edit" size={14} /> Edit</button>
+        <div class="menu-anchor">
+          <button
+            class="icon-btn"
+            aria-label="More actions"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            onclick={(e) => { e.stopPropagation(); menuOpen = !menuOpen; }}
+          >
+            <Icon name="more" size={18} />
+          </button>
+          {#if menuOpen}
+            <div class="menu" role="menu" style="right:0;top:36px">
+              <button role="menuitem" onclick={() => { menuOpen = false; attachFile(); }} disabled={attaching}>
+                <Icon name="paperclip" size={15} /> Attach a file…
+              </button>
+              <hr />
+              <button role="menuitem" class="danger" onclick={() => { menuOpen = false; confirmingDelete = true; }}>
+                <Icon name="trash" size={15} /> Move to trash…
+              </button>
             </div>
-          {:else}
-            <span class="muted">Computing…</span>
           {/if}
         </div>
-        <div class="field-actions">
-          <button class="btn btn-small" onclick={copyTotp} disabled={!totp}>Copy</button>
-        </div>
       </div>
+    </header>
+
+    {#if error}
+      <div class="error" role="alert">{error}</div>
     {/if}
 
-    {#if item.fields.length}
-      <div role="list" aria-label="Item fields" style="margin-top:0.5rem">
-        {#each item.fields as f (f.name)}
-          <div class="field" role="listitem">
-            <div class="field-name" id={`fld-${f.name}`}>{fieldLabel(f.name, item.type_str)}</div>
-            <div class="field-value" aria-labelledby={`fld-${f.name}`}>
-              {#if f.secret}
-                {#if revealed[f.name] !== undefined}
-                  <span style="user-select:all">{revealed[f.name]}</span>
-                {:else}
-                  <span aria-hidden="true">{MASK}</span>
-                  <span class="sr-only">hidden secret</span>
-                {/if}
-              {:else}
-                <span style="user-select:text">{f.value || "—"}</span>
+    <div class="copy-rows fields" role="list" aria-label="Fields">
+      {#if item.type_str === "totp"}
+        <div role="listitem">
+          <CopyRow label="One-time code" display={totp ? groupTotp(totp.code) : "…"} secret copy={copyTotp}>
+            {#snippet value()}
+              <span class="totp-code" aria-label={totp ? `Current code ${groupTotp(totp.code)}` : "Computing"}>
+                {totp ? groupTotp(totp.code) : "··· ···"}
+              </span>
+            {/snippet}
+            {#snippet trailing()}
+              {#if totp}
+                <svg class="ring" viewBox="0 0 36 36" role="img" aria-label={`${totp.seconds_remaining} seconds remaining`}>
+                  <circle cx="18" cy="18" r="15" class="track" />
+                  <circle
+                    cx="18"
+                    cy="18"
+                    r="15"
+                    class="fill"
+                    stroke-dasharray={RING}
+                    stroke-dashoffset={RING * (1 - ringPct(totp))}
+                    class:low={totp.seconds_remaining <= 5}
+                  />
+                  <text x="18" y="22" text-anchor="middle">{totp.seconds_remaining}</text>
+                </svg>
               {/if}
-            </div>
-            <div class="field-actions">
-              {#if f.secret}
-                {#if revealed[f.name] !== undefined}
-                  <button class="btn btn-small btn-ghost" onclick={() => hide(f.name)}>
-                    Hide
-                  </button>
-                {:else}
-                  <button
-                    class="btn btn-small"
-                    onclick={() => reveal(f.name)}
-                    disabled={revealBusy[f.name]}
-                    aria-label={`Reveal ${fieldLabel(f.name, item.type_str)}`}
-                  >
-                    {revealBusy[f.name] ? "…" : "Reveal"}
-                  </button>
-                {/if}
-                <button
-                  class="btn btn-small"
-                  onclick={() => copyField(f.name)}
-                  aria-label={`Copy ${fieldLabel(f.name, item.type_str)}`}
-                >
-                  Copy
-                </button>
-              {:else if f.value}
-                <button
-                  class="btn btn-small"
-                  onclick={() => copyPlain(f.value)}
-                  aria-label={`Copy ${fieldLabel(f.name, item.type_str)}`}
-                >
-                  Copy
-                </button>
-              {/if}
-            </div>
+            {/snippet}
+          </CopyRow>
+        </div>
+      {/if}
+
+      {#each item.fields as f (f.name)}
+        {#if f.secret || f.value}
+          <div role="listitem">
+            {#if f.secret}
+              <CopyRow
+                label={fieldLabel(f.name, item.type_str)}
+                display={revealed[f.name] ?? MASK}
+                secret
+                revealed={revealed[f.name] !== undefined}
+                revealBusy={revealBusy[f.name]}
+                copy={() => copySecretField(f.name)}
+                onToggleReveal={() => toggleReveal(f.name)}
+              />
+            {:else}
+              <CopyRow label={fieldLabel(f.name, item.type_str)} display={f.value} copy={() => copyPlain(f.value)} />
+            {/if}
           </div>
-        {/each}
-      </div>
-    {:else if !item.notes && item.type_str !== "totp"}
-      <p class="muted" style="margin-top:1rem">This item has no fields.</p>
+        {/if}
+      {/each}
+    </div>
+
+    {#if item.fields.length === 0 && !item.notes && item.type_str !== "totp"}
+      <p class="muted" style="margin-top:16px">This item has no fields.</p>
     {/if}
 
     {#if item.notes}
-      <div class="notes">
-        <div class="field-name">Notes</div>
-        <div class="notes-body">{item.notes}</div>
-      </div>
+      <section class="section">
+        <h3 class="sub-h">Notes</h3>
+        <p class="notes-body">{item.notes}</p>
+      </section>
     {/if}
 
     {#if item.type_str === "env_set"}
-      <!-- Use in your dev server: the run command (no secret). -->
-      <div class="field-group" style="margin-top:1.5rem;border-top:1px solid var(--border);padding-top:1rem">
-        <div class="field-name">Use in your dev server</div>
-        <p class="hint" style="margin:0.25rem 0 0.6rem">
-          Runs your command with these variables injected into its environment —
-          nothing is written to disk. <code>op://</code> works as an alias for
-          <code>localpass://</code> too.
+      <section class="section">
+        <h3 class="sub-h">Run with these variables</h3>
+        <p class="hint" style="margin:0 0 8px">
+          Injected into the process at start; nothing is written to disk.
         </p>
         <label for="dev-cmd" class="sr-only">Your dev command</label>
-        <input
-          id="dev-cmd"
-          type="text"
-          autocomplete="off"
-          spellcheck="false"
-          placeholder="npm run dev"
-          bind:value={devCommand}
-        />
-        <div
-          class="gen-output"
-          style="margin-top:0.5rem;font-family:var(--mono);align-items:center"
-        >
-          <span class="val" style="user-select:all;white-space:pre-wrap;word-break:break-all">{runCommand}</span>
-          <button class="btn btn-small" type="button" onclick={copyRunCommand}>Copy</button>
+        <input id="dev-cmd" type="text" class="mono" autocomplete="off" spellcheck="false" placeholder="npm run dev" bind:value={devCommand} />
+        <div style="margin-top:6px">
+          <CopyRow label="Command" display={runCommand} copy={() => copyPlain(runCommand)} />
         </div>
-      </div>
+      </section>
 
-      <!-- Export as .env (reveals every entry; secret). -->
-      <div class="field-group" style="margin-top:1.25rem">
-        <div class="field-name">Export as .env</div>
-        {#if envExport === null}
-          <p class="hint" style="margin:0.25rem 0 0.6rem">
-            Reveals every variable and assembles a <code>.env</code> you can copy.
-          </p>
-          <button
-            class="btn btn-small"
-            type="button"
-            onclick={exportEnv}
-            disabled={exporting || item.fields.length === 0}
-          >
-            {exporting ? "Revealing…" : "Export as .env"}
-          </button>
-        {:else}
-          <div
-            class="error"
-            role="note"
-            style="color:var(--text);background:var(--bg-hover);border-color:var(--border);margin:0.4rem 0"
-          >
-            <strong>Contains secret values.</strong> This block holds the real variable
-            values. It is cleared when you hide it or leave this item.
+      <section class="section">
+        <div class="section-head">
+          <h3>Export as .env</h3>
+          {#if envExport === null}
+            <button class="btn btn-sm" type="button" onclick={exportEnv} disabled={exporting || item.fields.length === 0}>
+              {exporting ? "Revealing…" : "Reveal all as .env"}
+            </button>
+          {:else}
+            <div class="toolbar">
+              <button class="btn btn-sm" type="button" onclick={copyEnvExport}><Icon name="copy" size={14} /> Copy</button>
+              <button class="btn btn-sm btn-quiet" type="button" onclick={() => (envExport = null)}>Hide</button>
+            </div>
+          {/if}
+        </div>
+        {#if envExport !== null}
+          <div class="callout warn" role="note">
+            <span class="icon"><Icon name="alert" size={15} /></span>
+            <span>These are the real values. They clear when you hide them or leave this item.</span>
           </div>
-          <textarea
-            readonly
-            aria-label="Assembled .env content (secret)"
-            rows={Math.min(12, Math.max(3, (envExport.match(/\n/g)?.length ?? 0) + 1))}
-            style="width:100%;font-family:var(--mono);padding:0.55em 0.7em;border:1px solid var(--border);border-radius:6px;background:var(--bg-panel);color:var(--text);user-select:all">{envExport}</textarea>
-          <div class="toolbar" style="margin-top:0.4rem">
-            <button class="btn btn-small" type="button" onclick={copyEnvExport}>Copy</button>
-            <button class="btn btn-small btn-ghost" type="button" onclick={hideEnvExport}>Hide</button>
+          <div class="code-block">
+            <pre aria-label="Assembled .env content (secret)">{envExport}</pre>
           </div>
         {/if}
-      </div>
+      </section>
     {/if}
 
     <!--
-      Attachments (available on ALL item types). SECURITY: the attachment
-      plaintext NEVER enters this webview. "Attach file" hands the daemon the OS
-      picker's SOURCE path (the daemon reads it); "Save" hands the daemon a
-      native save-dialog DEST path (the daemon writes it). Only paths + metadata
-      (id / filename / size) cross the bridge — a stronger boundary than the
-      per-field reveal, whose value does reach JS.
+      Attachments (all item types). SECURITY: the plaintext NEVER enters this
+      webview. Attaching hands the daemon the OS picker's SOURCE path; saving
+      hands it a native save-dialog DEST path. Only paths + metadata cross.
     -->
-    <div class="field-group" style="margin-top:1.5rem;border-top:1px solid var(--border);padding-top:1rem">
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:0.5rem">
-        <div class="field-name">Attachments</div>
-        <button class="btn btn-small" type="button" onclick={attachFile} disabled={attaching}>
-          {attaching ? "Attaching…" : "+ Attach file"}
+    <section class="section">
+      <div class="section-head">
+        <h3>Attachments</h3>
+        <button class="btn btn-sm btn-quiet" type="button" onclick={attachFile} disabled={attaching}>
+          <Icon name="paperclip" size={14} /> {attaching ? "Attaching…" : "Attach file"}
         </button>
       </div>
-      <p class="hint" style="margin:0.25rem 0 0.6rem">
-        Files are stored encrypted. Downloads are written straight to the file
-        you choose — the contents never pass through this window.
-      </p>
-
       {#if attachmentsError}
-        <div class="error" role="alert" aria-live="polite">{attachmentsError}</div>
+        <div class="error" role="alert">{attachmentsError}</div>
       {/if}
-
       <div aria-live="polite">
         {#if attachments.length}
-          <div role="list" aria-label="Attachments">
+          <div class="copy-rows" role="list" aria-label="Attachments">
             {#each attachments as att (att.id)}
-              <div class="field" role="listitem" style="grid-template-columns:1fr auto">
-                <div>
-                  <span style="user-select:text">{att.filename}</span>
-                  <span class="muted" style="margin-left:0.5rem">{humanSize(att.size)}</span>
-                </div>
+              <div role="listitem" class="att">
                 {#if confirmingRemove === att.id}
-                  <div class="field-actions">
-                    <span class="sr-only" role="status">Confirm removing {att.filename}</span>
-                    <span aria-hidden="true" class="muted" style="align-self:center">Remove?</span>
-                    <button
-                      class="btn btn-small btn-danger-outline"
-                      onclick={() => removeAttachment(att)}
-                      disabled={attachBusy[att.id]}
-                    >
-                      {attachBusy[att.id] ? "Removing…" : "Remove"}
-                    </button>
-                    <button
-                      class="btn btn-small btn-ghost"
-                      onclick={() => (confirmingRemove = null)}
-                      disabled={attachBusy[att.id]}
-                    >
-                      Cancel
-                    </button>
+                  <div class="att-confirm">
+                    <span class="ellipsis">Remove <strong>{att.filename}</strong>?</span>
+                    <div class="toolbar">
+                      <button class="btn btn-sm btn-danger" onclick={() => removeAttachment(att)} disabled={attachBusy[att.id]}>
+                        {attachBusy[att.id] ? "Removing…" : "Remove"}
+                      </button>
+                      <button class="btn btn-sm btn-quiet" onclick={() => (confirmingRemove = null)} disabled={attachBusy[att.id]}>
+                        Cancel
+                      </button>
+                    </div>
                   </div>
                 {:else}
-                  <div class="field-actions">
-                    <button
-                      class="btn btn-small"
-                      onclick={() => saveAttachment(att)}
-                      disabled={attachBusy[att.id]}
-                      aria-label={`Save ${att.filename}`}
-                    >
-                      {attachBusy[att.id] ? "…" : "Save"}
-                    </button>
-                    <button
-                      class="btn btn-small btn-ghost"
-                      onclick={() => (confirmingRemove = att.id)}
-                      aria-label={`Remove ${att.filename}`}
-                    >
-                      Remove
-                    </button>
-                  </div>
+                  <CopyRow label="File" display={att.filename} meta={humanSize(att.size)} plain hint="Click to save" done="Saved" copy={() => saveAttachment(att)}>
+                    {#snippet trailing()}
+                      <button
+                        type="button"
+                        class="icon-btn"
+                        aria-label={`Remove ${att.filename}`}
+                        title="Remove"
+                        onclick={(e) => { e.stopPropagation(); confirmingRemove = att.id; }}
+                        onkeydown={(e) => e.stopPropagation()}
+                      >
+                        <Icon name="trash" size={16} />
+                      </button>
+                    {/snippet}
+                  </CopyRow>
                 {/if}
               </div>
             {/each}
           </div>
         {:else if !attachmentsError}
-          <p class="muted" style="margin:0">No attachments.</p>
+          <p class="faint att-empty">Files you attach are stored encrypted with this item.</p>
         {/if}
+      </div>
+    </section>
+
+    <p class="foot faint">Version {item.version} · created {formatTimestamp(item.created_at)}</p>
+  </article>
+{/if}
+
+{#if confirmingDelete && item}
+  <div
+    class="modal-overlay"
+    role="button"
+    tabindex="-1"
+    aria-label="Cancel"
+    onclick={() => (confirmingDelete = false)}
+    onkeydown={(e) => { if (e.key === "Escape") confirmingDelete = false; }}
+  >
+    <div
+      class="modal-card"
+      role="alertdialog"
+      tabindex="-1"
+      aria-modal="true"
+      aria-labelledby="del-title"
+      onclick={(e) => e.stopPropagation()}
+      onkeydown={(e) => { if (e.key === "Escape") confirmingDelete = false; }}
+    >
+      <h2 id="del-title" class="modal-title">Move “{item.title}” to the trash?</h2>
+      <p class="muted">You can restore it from the trash for 30 days.</p>
+      <div class="modal-actions">
+        <button class="btn" onclick={() => (confirmingDelete = false)} disabled={deleting}>Cancel</button>
+        <!-- svelte-ignore a11y_autofocus -->
+        <button class="btn btn-danger" onclick={doDelete} disabled={deleting} autofocus>
+          {deleting ? "Moving…" : "Move to trash"}
+        </button>
       </div>
     </div>
   </div>
 {/if}
+
+<style>
+  .detail {
+    max-width: 760px;
+  }
+  .d-head {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+  .type-glyph {
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    margin-top: 1px;
+    border-radius: 8px;
+    background: var(--bg-hover);
+    color: var(--text-muted);
+  }
+  .d-title h2 {
+    font-size: 20px;
+    overflow-wrap: anywhere;
+  }
+  .d-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
+    color: var(--text-muted);
+    font-size: 12.5px;
+  }
+  .d-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .menu-anchor {
+    position: relative;
+  }
+  .fields {
+    margin: 0 -10px;
+  }
+  .totp-code {
+    display: block;
+    font-family: var(--mono);
+    font-size: 26px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    line-height: 1.25;
+    font-variant-numeric: tabular-nums;
+  }
+  .ring {
+    width: 30px;
+    height: 30px;
+    margin-right: 6px;
+  }
+  .ring circle {
+    fill: none;
+    stroke-width: 3;
+  }
+  .ring .track {
+    stroke: var(--border-strong);
+  }
+  .ring .fill {
+    stroke: var(--accent);
+    stroke-linecap: round;
+    transform: rotate(-90deg);
+    transform-origin: 18px 18px;
+    transition: stroke-dashoffset 1s linear;
+  }
+  .ring .fill.low {
+    stroke: var(--warning);
+  }
+  .ring text {
+    font-size: 11px;
+    font-family: var(--font);
+    fill: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .sub-h {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-muted);
+    font-family: var(--font);
+    margin-bottom: 4px;
+  }
+  .notes-body {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    user-select: text;
+  }
+  .att-confirm {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    min-height: 52px;
+    padding: 6px 10px;
+  }
+  .copy-rows:has(.att) {
+    margin: 0 -10px;
+  }
+  .att-empty {
+    font-size: 12.5px;
+  }
+  .foot {
+    margin-top: 28px;
+    font-size: 12px;
+  }
+  @media (max-width: 719px) {
+    .d-head {
+      grid-template-columns: minmax(0, 1fr) auto;
+    }
+    .type-glyph {
+      display: none;
+    }
+  }
+</style>

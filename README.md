@@ -106,8 +106,8 @@ LocalPass is **pre-1.0 and not yet independently audited — do not store real s
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) — and read [LESSONS.md](LESSONS.md) for conventions and the decision log before proposing changes. [docs/architecture.md](docs/architecture.md) is the best starting point for the codebase.
+See [CONTRIBUTING.md](CONTRIBUTING.md) — and read [LESSONS.md](LESSONS.md) for conventions and the decision log before proposing changes. [docs/architecture.md](docs/architecture.md) is the best starting point for the codebase. UI work follows [DESIGN.md](DESIGN.md) (tokens, type, the mark, motion, layout rules).
 
 ## License
 
-AGPL-3.0 for core/daemon crates ([LICENSE](LICENSE)); MPL-2.0 for future GUI code ([LICENSES/MPL-2.0.txt](LICENSES/MPL-2.0.txt)).
+AGPL-3.0 for core/daemon crates ([LICENSE](LICENSE)); MPL-2.0 for future GUI code ([LICENSES/MPL-2.0.txt](LICENSES/MPL-2.0.txt)). The desktop app bundles the JetBrains Mono font under the SIL Open Font License 1.1 ([LICENSES/OFL-1.1-JetBrainsMono.txt](LICENSES/OFL-1.1-JetBrainsMono.txt)).

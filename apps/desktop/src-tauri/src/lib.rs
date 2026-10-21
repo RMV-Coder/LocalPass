@@ -20,10 +20,12 @@ pub mod commands;
 pub mod daemon;
 pub mod dotenv;
 pub mod generate;
+pub mod hello;
 pub mod item_input;
 pub mod model;
 #[cfg(target_os = "android")]
 pub mod safstore;
+pub mod updates;
 mod wordlist;
 
 /// Build and run the Tauri application.
@@ -58,7 +60,15 @@ pub fn run() {
         builder = builder.plugin(tauri_plugin_android_fs::init());
     }
 
+    // DESKTOP ONLY: signed in-app updates (see `updates.rs`). Only Rust calls
+    // the updater; no updater permission is granted to the webview.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
+
     builder
+        .manage(updates::PendingUpdate::default())
         .setup(|app| {
             // Declare which surface this process is, once, before any command
             // can run and therefore before anything can write an audit record
@@ -147,6 +157,13 @@ pub fn run() {
             commands::list_attachments,
             commands::get_attachment,
             commands::delete_attachment,
+            commands::app_info,
+            commands::hello_status,
+            commands::hello_enable,
+            commands::hello_disable,
+            commands::hello_unlock,
+            updates::update_check,
+            updates::update_install,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the LocalPass desktop application");

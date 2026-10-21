@@ -1,0 +1,7 @@
+{
+  "default": "mark.svg",
+  "bg_color": "#D4A24C",
+  "android_bg": "android-bg.svg",
+  "android_fg": "mark-glyph.svg",
+  "android_monochrome": "mark-glyph.svg"
+}

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 100 100">
+  <!-- Square, no corner: iOS and Android launchers apply their own mask. The
+       glyph is scaled to 80% about the centre so it stays inside Android's
+       adaptive-icon safe zone (66/108) under every mask shape. -->
+  <rect width="100" height="100" fill="#D4A24C"/>
+  <g fill="#1A1917" transform="translate(50 50.75) scale(0.8) translate(-50 -50.75)">
+    <circle cx="46" cy="41" r="13.5"/>
+    <path d="M40.5 41V71.2a2.8 2.8 0 0 0 2.8 2.8H64.7a2.8 2.8 0 0 0 2.8-2.8V65.8a2.8 2.8 0 0 0-2.8-2.8H51.5V41z"/>
+  </g>
+</svg>

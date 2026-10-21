@@ -3,157 +3,116 @@
   This file is part of the LocalPass desktop GUI. See ../../LICENSE.
 
   Static help / quick-start guide. No daemon calls, no secret state — just
-  reference content rendered from the sidebar "Help" tab.
+  reference content, reached from Settings (and More on a phone).
 -->
 <script lang="ts">
-  // A keyboard-shortcut row helper keeps the markup tidy.
   const shortcuts: { keys: string[]; action: string }[] = [
-    { keys: ["↑", "↓"], action: "Move through the item list" },
-    { keys: ["Enter"], action: "Open the focused item" },
-    { keys: ["Tab"], action: "Move between controls (fully keyboard-operable)" },
+    { keys: ["Ctrl", "K"], action: "Search (Ctrl F works too)" },
+    { keys: ["Ctrl", "N"], action: "New item in this vault" },
+    { keys: ["Ctrl", "L"], action: "Lock now" },
+    { keys: ["↑", "↓"], action: "Move through the list" },
+    { keys: ["Enter"], action: "Open an item, or copy the focused field" },
+    { keys: ["Esc"], action: "Clear the search, close a dialog" },
   ];
 </script>
 
-<div class="detail help">
-  <h2>Help &amp; quick guide</h2>
-  <p class="muted" style="margin-top:0">
-    LocalPass keeps your passwords, API keys, SSH keys, TOTP codes and
-    <code>.env</code> secrets encrypted on <strong>this device</strong> — no cloud.
-  </p>
-
-  <div class="error" role="note" style="color:var(--text);background:var(--bg-hover);border-color:var(--border)">
-    <strong>Pre-1.0 — not yet audited.</strong> Please don't store irreplaceable
-    real secrets yet. The on-disk format may still change before 1.0.
+<div class="page help">
+  <div class="page-head">
+    <div>
+      <h2>Help</h2>
+      <p class="sub">LocalPass keeps passwords, API keys, SSH keys, one-time codes and <code>.env</code> sets encrypted on this device. No cloud.</p>
+    </div>
   </div>
 
-  <section class="field-group help-section">
-    <div class="field-name">Getting started</div>
-    <ol class="help-list">
-      <li><strong>Save your Emergency Kit.</strong> It holds your Secret Key, which
-        together with your master password unlocks the vault. Store it offline.</li>
-      <li><strong>Add items</strong> with <span class="badge">+ Add</span> in the
-        item list — pick a type, fill the fields, save.</li>
-      <li><strong>Reveal &amp; copy</strong> secrets with the per-field buttons in
-        an item's detail view. Values stay masked until you ask.</li>
-      <li><strong>Create more vaults</strong> with <span class="badge">+ New</span>
-        to keep, say, personal and work secrets apart.</li>
-    </ol>
+  <div class="callout warn" role="note">
+    <span><strong>Before 1.0.</strong> LocalPass has not had an external audit yet and the on-disk format may still change. Keep a copy of anything irreplaceable elsewhere.</span>
+  </div>
+
+  <section class="section">
+    <h3>Everyday use</h3>
+    <ul class="help-list">
+      <li><strong>Copy:</strong> click any field. Copied passwords stay out of clipboard history and clear after 30 seconds.</li>
+      <li><strong>Reveal:</strong> the eye on a secret field shows it in place; it hides again after 30 seconds or when you leave the item.</li>
+      <li><strong>Search:</strong> searches the open vault; switch to <em>All vaults</em> to look everywhere.</li>
+      <li><strong>Trash:</strong> deleted items wait at the bottom of the list for 30 days before they are gone.</li>
+    </ul>
   </section>
 
-  <section class="field-group help-section">
-    <div class="field-name">Keyboard &amp; navigation</div>
-    <div class="help-keys">
+  <section class="section">
+    <h3>Keyboard</h3>
+    <div class="keys">
       {#each shortcuts as s (s.action)}
-        <div class="help-key-row">
-          <span class="help-keycaps">
-            {#each s.keys as k (k)}<kbd class="kbd">{k}</kbd>{/each}
-          </span>
+        <div class="key-row">
+          <span class="caps">{#each s.keys as k (k)}<kbd class="kbd">{k}</kbd>{/each}</span>
           <span>{s.action}</span>
         </div>
       {/each}
     </div>
-    <p class="hint">Use the search box at the top of the item list to filter as you type.</p>
+    <p class="hint">On macOS use ⌘ instead of Ctrl.</p>
   </section>
 
-  <section class="field-group help-section">
-    <div class="field-name">Item types</div>
-    <p class="hint" style="margin-top:0">
-      <span class="badge">Login</span>
-      <span class="badge">Secure note</span>
-      <span class="badge">API key</span>
-      <span class="badge">Env set</span>
-      <span class="badge">SSH key</span>
-      <span class="badge">TOTP</span>
-    </p>
+  <section class="section">
+    <h3>Item types</h3>
     <ul class="help-list">
-      <li><strong>TOTP</strong> items show a live 6-digit code with a countdown ring.</li>
-      <li><strong>SSH keys</strong> are served by the built-in agent while unlocked —
-        the private key never leaves the daemon.</li>
-      <li><strong>Attachments</strong> can be added to any item. They're stored
-        encrypted and written straight to the file you choose on download — the
-        contents never pass through this window.</li>
+      <li><strong>Login</strong>, <strong>Secure note</strong>, <strong>API key</strong>.</li>
+      <li><strong>One-time code (TOTP):</strong> a live 6-digit code with a countdown.</li>
+      <li><strong>SSH key:</strong> served by the built-in SSH agent while unlocked; the private key never leaves the service.</li>
+      <li><strong>Env set:</strong> <code>KEY=value</code> variables. Its page builds a <code>localpass run</code> command that injects them into your dev server without writing a file.</li>
+      <li><strong>Attachments</strong> can go on any item. Saving writes straight to the file you choose; the contents never pass through this window.</li>
     </ul>
   </section>
 
-  <section class="field-group help-section">
-    <div class="field-name">.env &amp; dev servers</div>
-    <p class="hint" style="margin-top:0">
-      An <strong>Env set</strong> holds your <code>KEY=value</code> variables. On its
-      detail view, <em>“Use in your dev server”</em> builds a
-      <code class="mono">localpass run</code> command that injects the variables into
-      your process — nothing is written to disk. <em>“Export as .env”</em> assembles
-      a copyable <code>.env</code> when you need one.
+  <section class="section">
+    <h3>Devices and sync</h3>
+    <p class="body">
+      <strong>Devices</strong> links another machine you own through a shared folder (Dropbox,
+      Syncthing, a USB stick). Everything in the folder is encrypted and signed, so the folder
+      itself does not need to be trusted. You compare a fingerprint once when you pair.
     </p>
   </section>
 
-  <section class="field-group help-section">
-    <div class="field-name">Devices &amp; sync</div>
-    <p class="hint" style="margin-top:0">
-      Open the <strong>Devices &amp; Sync</strong> tab to link another machine you
-      own: exchange device identities, confirm the fingerprint, share a vault, and
-      sync through a shared folder. Everything stays end-to-end encrypted; there's
-      no server in the middle.
-    </p>
-  </section>
-
-  <section class="field-group help-section">
-    <div class="field-name">Security &amp; recovery</div>
+  <section class="section">
+    <h3>Recovery</h3>
     <ul class="help-list">
-      <li><strong>No cloud reset.</strong> Losing your master password, Secret Key,
-        <em>and</em> all your devices means the data is gone — by design. This is why
-        the Emergency Kit matters.</li>
-      <li><strong>Masked by default.</strong> Secrets are hidden until you explicitly
-        reveal or copy them, and every reveal is recorded in the local audit log.</li>
-      <li><strong>Auto-lock.</strong> The vault locks itself after a period of
-        inactivity; unlock again with your master password.</li>
+      <li><strong>No reset.</strong> Your master password and Secret Key are the only way in. The Secret Key is stored on each device you use; keep your Emergency Kit offline for a new one.</li>
+      <li>Lose the password, the Secret Key <em>and</em> every device, and the data is gone. That is the design.</li>
+      <li>The vault locks itself after a while without use. Windows Hello (Settings) can unlock it on this device.</li>
     </ul>
-    <p class="hint">
-      Learn more in the project README and <code class="mono">SECURITY.md</code> at
-      <code class="mono">github.com/RMV-Coder/LocalPass</code>.
-    </p>
+    <p class="hint">More in <code>README.md</code> and <code>SECURITY.md</code> at <code>github.com/RMV-Coder/LocalPass</code>.</p>
   </section>
 </div>
 
 <style>
   .help {
-    max-width: 640px;
+    max-width: 680px;
   }
-  .help-section {
-    margin-top: 1.25rem;
+  .help h3 {
+    font-size: 14px;
+    margin-bottom: 6px;
   }
   .help-list {
-    margin: 0.35rem 0 0;
-    padding-left: 1.2rem;
+    margin: 0;
+    padding-left: 18px;
     line-height: 1.6;
   }
-  .help-list li {
-    margin-bottom: 0.35rem;
+  .help-list li + li {
+    margin-top: 4px;
   }
-  .help-keys {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-    margin-top: 0.35rem;
+  .body {
+    line-height: 1.6;
   }
-  .help-key-row {
-    display: flex;
+  .keys {
+    display: grid;
+    gap: 6px;
+  }
+  .key-row {
+    display: grid;
+    grid-template-columns: 120px minmax(0, 1fr);
     align-items: center;
-    gap: 0.6rem;
+    gap: 12px;
   }
-  .help-keycaps {
+  .caps {
     display: inline-flex;
-    gap: 0.25rem;
-    min-width: 4.5rem;
-  }
-  .kbd {
-    font-family: var(--mono);
-    font-size: 0.8em;
-    line-height: 1;
-    padding: 0.25em 0.5em;
-    border: 1px solid var(--border);
-    border-bottom-width: 2px;
-    border-radius: 5px;
-    background: var(--bg-elevated);
-    color: var(--text);
+    gap: 4px;
   }
 </style>

@@ -14,6 +14,9 @@ import {
   fieldLabel,
   formatShortDate,
   isoTimestamp,
+  formatAge,
+  formatAgo,
+  formatCountdown,
 } from "./format";
 
 describe("typeLabel", () => {
@@ -158,5 +161,65 @@ describe("isoTimestamp", () => {
     expect(isoTimestamp(0)).toBe("");
     expect(isoTimestamp(Number.NaN)).toBe("");
     expect(isoTimestamp(1_700_000_000_000)).toBe("2023-11-14T22:13:20.000Z");
+  });
+});
+
+describe("formatAge", () => {
+  const now = new Date(2026, 9, 21, 12, 0).getTime();
+  const ago = (ms: number) => now - ms;
+  it("buckets recent times compactly", () => {
+    expect(formatAge(ago(20_000), now)).toBe("now");
+    expect(formatAge(ago(5 * 60_000), now)).toBe("5m");
+    expect(formatAge(ago(3 * 3_600_000), now)).toBe("3h");
+    expect(formatAge(ago(2 * 86_400_000), now)).toBe("2d");
+  });
+  it("switches to the short date from a week on", () => {
+    expect(formatAge(ago(8 * 86_400_000), now)).toBe(formatShortDate(ago(8 * 86_400_000), now));
+  });
+  it("handles missing, invalid and future values", () => {
+    expect(formatAge(0, now)).toBe("—");
+    expect(formatAge(Number.NaN, now)).toBe("—");
+    expect(formatAge(now + 3_600_000, now)).toBe(formatShortDate(now + 3_600_000, now));
+  });
+});
+
+describe("formatAgo", () => {
+  const now = new Date(2026, 9, 21, 12, 0).getTime();
+  it("says just now under a minute", () => {
+    expect(formatAgo(now - 10_000, now)).toBe("just now");
+  });
+  it("uses relative wording for minutes, hours and days", () => {
+    expect(formatAgo(now - 3 * 60_000, now)).toMatch(/3/);
+    expect(formatAgo(now - 2 * 3_600_000, now)).toMatch(/2/);
+    expect(formatAgo(now - 5 * 86_400_000, now)).toMatch(/5/);
+  });
+  it("falls back to the short date past four weeks, and — for nothing", () => {
+    const old = now - 40 * 86_400_000;
+    expect(formatAgo(old, now)).toBe(formatShortDate(old, now));
+    expect(formatAgo(0, now)).toBe("—");
+  });
+  it("never reads a future time as 'in …'", () => {
+    expect(formatAgo(now + 120_000, now)).toBe("just now");
+  });
+});
+
+describe("formatCountdown", () => {
+  it("shows seconds under a minute, rounding up", () => {
+    expect(formatCountdown(44.2)).toBe("45 s");
+    expect(formatCountdown(1)).toBe("1 s");
+  });
+  it("shows whole minutes, rounding up so it never claims less time than is left", () => {
+    expect(formatCountdown(60)).toBe("1 min");
+    expect(formatCountdown(61)).toBe("2 min");
+    expect(formatCountdown(14 * 60 + 5)).toBe("15 min");
+  });
+  it("shows hours and minutes past an hour", () => {
+    expect(formatCountdown(3600)).toBe("1 h");
+    expect(formatCountdown(3600 + 5 * 60)).toBe("1 h 5 min");
+  });
+  it("treats zero, negative and NaN as zero", () => {
+    expect(formatCountdown(0)).toBe("0 s");
+    expect(formatCountdown(-5)).toBe("0 s");
+    expect(formatCountdown(Number.NaN)).toBe("0 s");
   });
 });
