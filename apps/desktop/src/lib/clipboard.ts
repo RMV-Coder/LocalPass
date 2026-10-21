@@ -15,11 +15,18 @@ import { copySecretNative } from "./api";
  *  history / cloud sync and cleared after 30 s or on lock; falls back to the
  *  webview path where there is no native clipboard (mobile). */
 export async function copySecret(text: string): Promise<boolean> {
+  return (await copySecretVia(text)) !== null;
+}
+
+/** `copySecret`, reporting which path took the copy: "native" means it is kept
+ *  out of clipboard history and cleared after 30 s (so the UI may say so);
+ *  "webview" means neither guarantee holds; null means the copy failed. */
+export async function copySecretVia(text: string): Promise<"native" | "webview" | null> {
   try {
     await copySecretNative(text);
-    return true;
+    return "native";
   } catch {
-    return copyToClipboard(text);
+    return (await copyToClipboard(text)) ? "webview" : null;
   }
 }
 

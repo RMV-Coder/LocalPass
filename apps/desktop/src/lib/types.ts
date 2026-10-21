@@ -12,6 +12,14 @@ export type SessionState =
       idle_remaining_secs: number | null;
       /** An AI agent is connected: changes and consent ask for the master password. */
       agent_session?: boolean;
+      /** The idle auto-lock timeout in seconds (0 = never). */
+      autolock_secs?: number;
+      /** Seconds left in an open pairing-mode window, null when off. */
+      pairing_mode_secs?: number | null;
+      /** Seconds left in an open agent-fill arm window, null when off. */
+      agent_fill_secs?: number | null;
+      /** SSH identities the built-in agent is serving. */
+      ssh_identity_count?: number;
     }
   | { state: "locked"; profile: string }
   | { state: "no_daemon" }
@@ -261,4 +269,30 @@ export interface AttachmentView {
 export interface AttachmentSavedView {
   filename: string;
   bytes_written: number;
+}
+
+/** The running app (Settings → About). Display only. */
+export interface AppInfoView {
+  version: string;
+  /** "windows" | "macos" | "linux" | "android" | "ios". */
+  platform: string;
+  profile: string;
+}
+
+/** Windows Hello unlock availability for this device + profile. */
+export interface HelloStatusView {
+  /** Windows Hello is set up on this device (a PIN at least). */
+  supported: boolean;
+  /** Hello unlock is turned on for this profile. */
+  enrolled: boolean;
+}
+
+/** A newer signed release found by the updater. */
+export interface UpdateInfoView {
+  version: string;
+  current_version: string;
+  /** The release notes (Markdown-ish plain text), possibly empty. */
+  notes: string;
+  /** The feed's publish date (unix ms), when it carries one. */
+  date_ms: number | null;
 }

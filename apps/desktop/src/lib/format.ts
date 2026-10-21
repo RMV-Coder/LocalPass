@@ -136,3 +136,49 @@ export function groupTotp(code: string): string {
   if (code.length === 8) return `${code.slice(0, 4)} ${code.slice(4)}`;
   return code;
 }
+
+/** Compact age for dense lists: "now", "5m", "3h", "2d" (under a week), then
+ *  the short date. `now` is injectable for tests. "—" for a missing value. */
+export function formatAge(millis: number, now: number = Date.now()): string {
+  if (!millis) return "—";
+  const diff = now - millis;
+  if (!Number.isFinite(diff)) return "—";
+  if (diff < 0) return formatShortDate(millis, now);
+  const min = Math.floor(diff / 60_000);
+  if (min < 1) return "now";
+  if (min < 60) return `${min}m`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `${h}h`;
+  const d = Math.floor(h / 24);
+  if (d < 7) return `${d}d`;
+  return formatShortDate(millis, now);
+}
+
+/** "3 minutes ago" / "2 days ago" for detail metadata, in the platform's own
+ *  relative-time wording. Falls back to the short date past four weeks. */
+export function formatAgo(millis: number, now: number = Date.now()): string {
+  if (!millis) return "—";
+  const diff = Math.max(0, now - millis);
+  const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+  const min = Math.round(diff / 60_000);
+  if (min < 1) return "just now";
+  if (min < 60) return rtf.format(-min, "minute");
+  const h = Math.round(min / 60);
+  if (h < 24) return rtf.format(-h, "hour");
+  const d = Math.round(h / 24);
+  if (d < 28) return rtf.format(-d, "day");
+  return formatShortDate(millis, now);
+}
+
+/** The auto-lock countdown, coarse on purpose (it must not tick every second
+ *  in the corner of the eye): "45 s" under a minute, then whole minutes, then
+ *  "1 h 5 min". Zero, negative or NaN renders as "0 s". */
+export function formatCountdown(secs: number): string {
+  if (!Number.isFinite(secs) || secs <= 0) return "0 s";
+  if (secs < 60) return `${Math.ceil(secs)} s`;
+  const min = Math.ceil(secs / 60);
+  if (min < 60) return `${min} min`;
+  const h = Math.floor(min / 60);
+  const rest = min % 60;
+  return rest ? `${h} h ${rest} min` : `${h} h`;
+}

@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const copySecretNative = vi.fn<(text: string) => Promise<void>>();
 vi.mock("./api", () => ({ copySecretNative: (text: string) => copySecretNative(text) }));
 
-import { copySecret, copyToClipboard } from "./clipboard";
+import { copySecret, copySecretVia, copyToClipboard } from "./clipboard";
 
 const writeText = vi.fn<(text: string) => Promise<void>>();
 
@@ -40,6 +40,26 @@ describe("copySecret", () => {
     writeText.mockRejectedValue(new Error("denied"));
     vi.stubGlobal("document", undefined);
     await expect(copySecret("x-secret")).resolves.toBe(false);
+  });
+});
+
+describe("copySecretVia", () => {
+  it("reports the native path, so the UI may promise the 30 s clear", async () => {
+    copySecretNative.mockResolvedValue(undefined);
+    await expect(copySecretVia("s3cret")).resolves.toBe("native");
+  });
+
+  it("reports the webview path when only the fallback worked", async () => {
+    copySecretNative.mockRejectedValue("no native clipboard");
+    await expect(copySecretVia("s3cret")).resolves.toBe("webview");
+    expect(writeText).toHaveBeenCalledWith("s3cret");
+  });
+
+  it("reports null when nothing copied", async () => {
+    copySecretNative.mockRejectedValue("no native clipboard");
+    writeText.mockRejectedValue(new Error("denied"));
+    vi.stubGlobal("document", undefined);
+    await expect(copySecretVia("s3cret")).resolves.toBeNull();
   });
 });
 
