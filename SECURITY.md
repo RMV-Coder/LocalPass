@@ -167,7 +167,7 @@ not the MVP default (PRD §5.2; vault-format.md §9).
 
 ## Known dependency advisories
 
-Supply-chain scanning (`cargo deny`, run in CI) is clean except for two
+Supply-chain scanning (`cargo deny`, run in CI) is clean except for three
 documented, accepted advisories on transitive dependencies (rationale recorded
 in [`deny.toml`](deny.toml)):
 
@@ -185,6 +185,12 @@ in [`deny.toml`](deny.toml)):
   proc-macro pulled transitively by `age`'s error-message localization. It ships
   no runtime code and is an "unmaintained" notice, not a vulnerability; it will
   drop when `age` updates its i18n stack.
+- **RUSTSEC-2026-0374 (`basic-toml` — unmaintained).** Part of the same
+  build-time i18n stack (`age` → `i18n-embed-fl` → `i18n-config`): the
+  proc-macros use it at compile time to parse `age`'s own bundled `i18n.toml`,
+  never untrusted input. It ships no runtime code and is an "unmaintained"
+  notice with no maintained release, not a vulnerability; it will drop when
+  `age` updates its i18n stack.
 
 ---
 

@@ -33,7 +33,7 @@ fn write_1pux(dir: &std::path::Path, name: &str, export_json: &str) -> String {
     let mut buf = Vec::new();
     {
         let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
-        let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        let opts = zip::write::SimpleFileOptions::default();
         zw.start_file("export.data", opts).unwrap();
         zw.write_all(export_json.as_bytes()).unwrap();
         zw.finish().unwrap();
