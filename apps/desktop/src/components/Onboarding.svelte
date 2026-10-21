@@ -20,6 +20,7 @@
   import { toast } from "../lib/toast";
   import Mark from "./Mark.svelte";
   import Icon from "./Icon.svelte";
+  import CopyRow from "./CopyRow.svelte";
 
   interface Props {
     /** Called once onboarding is complete (the daemon holds the unlocked
@@ -40,7 +41,6 @@
   // Key — component-local, cleared on continue/teardown.
   let kit = $state<CreatedAccount | null>(null);
   let saved = $state(false); // "I have saved my Secret Key" checkbox
-  let copied = $state(false);
 
   const tooShort = $derived(password.length > 0 && password.length < MIN_LEN);
   const mismatch = $derived(confirm.length > 0 && confirm !== password);
@@ -66,15 +66,11 @@
     }
   }
 
-  async function copyKey() {
-    if (!kit) return;
+  async function copyKey(): Promise<"native" | "webview" | null> {
+    if (!kit) return null;
     const via = await copySecretVia(kit.secret_key);
-    if (!via) {
-      toast("Copy failed", "error");
-      return;
-    }
-    copied = true;
-    setTimeout(() => (copied = false), 1600);
+    if (!via) toast("Copy failed", "error");
+    return via;
   }
 
   function continueToVault() {
@@ -164,17 +160,9 @@
         device. You will not see it again, so store it offline now.
       </p>
 
-      <button type="button" class="copy-row key" class:copied onclick={copyKey} aria-label="Copy Secret Key">
-        <span>
-          <span class="k">Secret Key</span>
-          <span class="v">{kit.secret_key}</span>
-        </span>
-        <span class="acts">
-          <span class="copy-hint">
-            {#if copied}<Icon name="check" size={14} /> Copied{:else}<Icon name="copy" size={14} /> Copy{/if}
-          </span>
-        </span>
-      </button>
+      <div class="key">
+        <CopyRow label="Secret Key" display={kit.secret_key} secret revealed copy={copyKey} />
+      </div>
 
       <div class="callout warn" role="note">
         <span class="icon"><Icon name="alert" size={16} /></span>
@@ -214,7 +202,7 @@
     max-width: 36ch;
   }
   form,
-  .copy-row,
+  .key,
   .callout,
   .confirm {
     width: 100%;
@@ -224,10 +212,11 @@
     color: var(--warning);
   }
   .key {
+    border-radius: var(--radius);
     background: var(--bg-hover);
     margin-bottom: 4px;
   }
-  .key .copy-hint {
+  .key :global(.copy-hint) {
     opacity: 1;
   }
   .confirm {

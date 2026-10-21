@@ -398,7 +398,7 @@
       </div>
 
       <div class="field-group">
-        <label for="if-url">{type_str === "api_key" ? "Endpoint" : "Website"}</label>
+        <label for="if-url">{type_str === "api_key" ? "Endpoint" : "URL"}</label>
         <input id="if-url" type="text" autocomplete="off" spellcheck="false" placeholder="https://" bind:value={url} />
       </div>
     {/if}
