@@ -142,15 +142,44 @@ fn promote_locked_to_no_account(state: SessionState) -> SessionState {
 /// wrong password returns an `Err` with a secret-free message the UI shows in
 /// the error region (aria-live).
 #[tauri::command]
-pub fn unlock(mut password: String) -> Result<SessionState, String> {
+pub fn unlock(password: String) -> Result<SessionState, String> {
+    unlock_inner(password).map_err(|f| f.message)
+}
+
+/// Why an unlock failed. `auth` is the daemon's own flag: the password (or
+/// Secret Key) was wrong, as opposed to a transport or state problem.
+struct UnlockFailure {
+    auth: bool,
+    message: String,
+}
+
+impl From<String> for UnlockFailure {
+    fn from(message: String) -> Self {
+        Self {
+            auth: false,
+            message,
+        }
+    }
+}
+
+/// [`unlock`]'s body, shared with [`hello_unlock`] (which must tell a wrong
+/// password — a stale Hello enrolment — from any other failure). Takes the
+/// password by value and zeroizes every copy, success or not.
+fn unlock_inner(mut password: String) -> Result<SessionState, UnlockFailure> {
     // Make unlock self-sufficient: if the service isn't up (or died), start it
     // first, so the user never sees a "no daemon" failure on the unlock path.
     // On failure the password is still zeroized below (we return before use).
     if let Err(message) = daemon::ensure_running() {
         password.zeroize();
-        return Err(message);
+        return Err(message.into());
     }
-    let profile = daemon::profile_string()?;
+    let profile = match daemon::profile_string() {
+        Ok(p) => p,
+        Err(m) => {
+            password.zeroize();
+            return Err(m.into());
+        }
+    };
     let req = Request::Unlock {
         profile,
         password: password.clone(),
@@ -167,13 +196,136 @@ pub fn unlock(mut password: String) -> Result<SessionState, String> {
 
     match result {
         Ok(Response::Ok { .. }) => Ok(status()),
-        Ok(Response::Error { message, .. }) => Err(message),
-        Ok(Response::Locked) => Err("unlock failed: the vault is still locked".into()),
-        Ok(Response::WrongProfile { expected }) => Err(format!(
-            "the running daemon serves a different profile ({expected})"
-        )),
-        Ok(other) => Err(format!("unexpected daemon response: {}", other.kind())),
-        Err(e) => Err(daemon_err_state(&e).error_message()),
+        Ok(Response::Error { message, auth }) => Err(UnlockFailure { auth, message }),
+        Ok(Response::Locked) => Err("unlock failed: the vault is still locked"
+            .to_string()
+            .into()),
+        Ok(Response::WrongProfile { expected }) => {
+            Err(format!("the running daemon serves a different profile ({expected})").into())
+        }
+        Ok(other) => Err(format!("unexpected daemon response: {}", other.kind()).into()),
+        Err(e) => Err(daemon_err_state(&e).error_message().into()),
+    }
+}
+
+// --- App info + Windows Hello unlock ---------------------------------------
+
+/// The running app's version, platform and profile (Settings → About).
+#[tauri::command]
+pub fn app_info(app: tauri::AppHandle) -> model::AppInfoView {
+    model::AppInfoView {
+        version: app.package_info().version.to_string(),
+        platform: std::env::consts::OS.to_string(),
+        profile: daemon::profile_string().unwrap_or_default(),
+    }
+}
+
+/// Where Hello enrolments live: the app's LOCAL (non-roaming) data dir, so a
+/// roaming Windows profile never carries one to another machine.
+fn hello_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager;
+    app.path()
+        .app_local_data_dir()
+        .map_err(|e| format!("could not find the app data folder: {e}"))
+}
+
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| format!("background task failed: {e}"))
+}
+
+/// Whether Windows Hello can unlock here, and whether it is on for this profile.
+/// Async (off the main thread): the WinRT availability check blocks briefly.
+#[tauri::command]
+pub async fn hello_status(app: tauri::AppHandle) -> Result<model::HelloStatusView, String> {
+    let dir = hello_dir(&app)?;
+    let profile = daemon::profile_string()?;
+    let (supported, enrolled) = blocking(move || crate::hello::status(&dir, &profile)).await?;
+    Ok(model::HelloStatusView {
+        supported,
+        enrolled,
+    })
+}
+
+/// Turn on Windows Hello unlock. The service checks the master password first
+/// (the same check as a presence confirmation, so wrong guesses count toward
+/// its lock-out); only then is it sealed under a Hello key (one or two Hello
+/// prompts). The password is zeroized on every path and never returned.
+#[tauri::command]
+pub async fn hello_enable(app: tauri::AppHandle, password: String) -> Result<(), String> {
+    let password = zeroize::Zeroizing::new(password);
+    let dir = hello_dir(&app)?;
+    let profile = daemon::profile_string()?;
+    let mut check = Request::ConfirmPresence {
+        profile: profile.clone(),
+        password: password.to_string(),
+    };
+    let result = daemon::call(&check);
+    check.zeroize_secrets();
+    match result.map_err(|e| e.to_string())? {
+        Response::PresenceGrant {
+            token,
+            expires_in_secs,
+        } => {
+            lp_daemon::presence::set_grant(token, std::time::Duration::from_secs(expires_in_secs));
+        }
+        other => {
+            check_response_error(&other)?;
+            return Err(format!("unexpected daemon response: {}", other.kind()));
+        }
+    }
+    blocking(move || crate::hello::enroll(&dir, &profile, password.as_bytes()))
+        .await?
+        .map_err(|e| e.message())
+}
+
+/// Turn off Windows Hello unlock (deletes the sealed password and the key).
+#[tauri::command]
+pub async fn hello_disable(app: tauri::AppHandle) -> Result<(), String> {
+    let dir = hello_dir(&app)?;
+    let profile = daemon::profile_string()?;
+    blocking(move || crate::hello::disable(&dir, &profile))
+        .await?
+        .map_err(|e| e.message())
+}
+
+/// Unlock with Windows Hello: one Hello prompt unseals the master password
+/// here in Rust, and it goes straight into the ordinary unlock. If the service
+/// says the password is wrong, the master password has changed since
+/// enrolment: the stale enrolment is deleted and the user is told why.
+#[tauri::command]
+pub async fn hello_unlock(app: tauri::AppHandle) -> Result<SessionState, String> {
+    use crate::hello::{self, HelloError};
+    let dir = hello_dir(&app)?;
+    let profile = daemon::profile_string()?;
+    let (d, p) = (dir.clone(), profile.clone());
+    let sealed = blocking(move || hello::unseal(&d, &p)).await?;
+    let secret = match sealed {
+        Ok(s) => s,
+        Err(HelloError::Stale) => {
+            let _ = hello::disable(&dir, &profile);
+            return Err(HelloError::Stale.message());
+        }
+        Err(e) => return Err(e.message()),
+    };
+    let password = match String::from_utf8(secret.to_vec()) {
+        Ok(p) => p,
+        Err(e) => {
+            let mut bytes = e.into_bytes();
+            bytes.zeroize();
+            let _ = hello::disable(&dir, &profile);
+            return Err(HelloError::Stale.message());
+        }
+    };
+    drop(secret);
+    match blocking(move || unlock_inner(password)).await? {
+        Ok(state) => Ok(state),
+        Err(UnlockFailure { auth: true, .. }) => {
+            let _ = hello::disable(&dir, &profile);
+            Err(HelloError::Stale.message())
+        }
+        Err(f) => Err(f.message),
     }
 }
 

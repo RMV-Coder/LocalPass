@@ -43,6 +43,19 @@ pub enum SessionState {
         /// password (`mcp-server.md` §7). The UI shows a banner.
         #[serde(default)]
         agent_session: bool,
+        /// The effective idle auto-lock timeout in seconds (`0` = never), so
+        /// the UI can restart its countdown after activity it caused.
+        #[serde(default)]
+        autolock_secs: u64,
+        /// Seconds left in an open pairing-mode window, `None` when off.
+        #[serde(default)]
+        pairing_mode_secs: Option<u64>,
+        /// Seconds left in an open agent-fill arm window, `None` when off.
+        #[serde(default)]
+        agent_fill_secs: Option<u64>,
+        /// SSH identities the built-in agent is serving right now.
+        #[serde(default)]
+        ssh_identity_count: usize,
     },
     /// A daemon is running but no session is held — show the unlock screen.
     Locked {
@@ -533,6 +546,37 @@ pub fn find_field_value<'a>(item: &'a WireItem, name: &str) -> Option<&'a str> {
         .map(|f| f.value.as_str())
 }
 
+/// The running app, for Settings → About. Display only; no secret.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AppInfoView {
+    /// The app version (`tauri.conf.json`).
+    pub version: String,
+    /// `windows` / `macos` / `linux` / `android` / `ios`.
+    pub platform: String,
+    /// The profile directory this app serves.
+    pub profile: String,
+}
+
+/// Windows Hello unlock availability (see [`crate::hello`]).
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct HelloStatusView {
+    /// Windows Hello is set up on this device (at least a PIN).
+    pub supported: bool,
+    /// Hello unlock is turned on for this profile.
+    pub enrolled: bool,
+}
+
+/// A newer signed release found by the updater (see [`crate::updates`]).
+/// `notes` is untrusted text from the release; the UI renders it as text.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct UpdateInfoView {
+    pub version: String,
+    pub current_version: String,
+    pub notes: String,
+    /// The feed's publish date, unix milliseconds.
+    pub date_ms: Option<i64>,
+}
+
 /// Map a daemon [`Response::Status`] into the [`SessionState`] the UI switches
 /// on. A non-status response is mapped to a secret-free [`SessionState::Error`].
 #[must_use]
@@ -544,12 +588,20 @@ pub fn session_state_from_status(resp: &Response) -> SessionState {
             vault_count,
             idle_remaining_secs,
             agent_session,
+            autolock_secs,
+            pairing_mode_secs,
+            agent_fill_secs,
+            ssh_identity_count,
             ..
         } => SessionState::Unlocked {
             vault_count: vault_count.unwrap_or(0),
             profile: profile.clone(),
             idle_remaining_secs: *idle_remaining_secs,
             agent_session: *agent_session,
+            autolock_secs: *autolock_secs,
+            pairing_mode_secs: *pairing_mode_secs,
+            agent_fill_secs: *agent_fill_secs,
+            ssh_identity_count: *ssh_identity_count,
         },
         Response::Status {
             state: LockState::Locked,
@@ -668,7 +720,7 @@ mod tests {
             ssh_agent_endpoint: None,
             ssh_identity_count: 0,
             pairing_mode_secs: None,
-            agent_fill_secs: None,
+            agent_fill_secs: Some(120),
             agent_session: false,
         };
         let st = session_state_from_status(&resp);
@@ -679,6 +731,10 @@ mod tests {
                 profile: "/home/u/.local/share/localpass".into(),
                 idle_remaining_secs: Some(540),
                 agent_session: false,
+                autolock_secs: 600,
+                pairing_mode_secs: None,
+                agent_fill_secs: Some(120),
+                ssh_identity_count: 0,
             }
         );
     }
