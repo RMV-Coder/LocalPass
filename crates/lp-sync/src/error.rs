@@ -131,6 +131,12 @@ pub enum Error {
     #[error("nearby sync protocol error: {0}")]
     Protocol(&'static str),
 
+    /// A QR transfer, bundle or "what I have" code was refused: damaged,
+    /// malformed, out of range, or made by another version
+    /// (`qr-transport.md` §8, §9.1). Carries a static, secret-free description.
+    #[error("{0}")]
+    Qr(&'static str),
+
     /// A LAN deadline passed: the handshake did not finish in time, or the
     /// next record did not arrive (`lan-transport.md` §5.4).
     #[error("nearby sync timed out: {0}")]

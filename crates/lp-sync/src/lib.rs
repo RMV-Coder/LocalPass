@@ -42,6 +42,12 @@
 //! [`engine::pull`] uses. It runs over any byte stream and borrows the
 //! unlocked session through a small trait, so the sockets live in the daemon.
 //!
+//! [`qr`] is the offline transport (`docs/specs/qr-transport.md`): one device
+//! shows an animated stream of QR codes carrying a RaptorQ fountain code, the
+//! other films it. It carries the nearby link's encodings in a one-way
+//! **bundle** and, like the nearby link, owns no verification: shares go
+//! through `lp-vault`'s signed-share import and ops through [`engine::ingest`].
+//!
 //! [`engine`] ties them together for the CLI: `setup` / `push` / `pull` /
 //! `status`, each over a caller-supplied `StoreFactory` (desktop passes
 //! `FsStoreFactory`). [`identity`] provides the export/trust pairing strings +
@@ -85,6 +91,7 @@ pub mod error;
 pub mod identity;
 pub mod merge;
 pub mod nearby;
+pub mod qr;
 pub mod shipping;
 pub mod store;
 pub mod verify;
