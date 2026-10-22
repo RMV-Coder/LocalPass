@@ -323,10 +323,10 @@ Notes grounded in the specs and code:
   never a secret value or a vault/item name. Read it with `localpass audit`
   (`--since`, `--json`, `--verify`) or, from a daemon client, `Request::AuditList`.
 - **Sync has three transports**: the file channel, the direct LAN link
-  (`localpass sync nearby`, daemon `Nearby*` requests; lan-transport.md) and
-  the QR stream (Devices → Sync by QR code; `localpass sync qr`, daemon
-  `QrHaveCode`/`QrExport`/`QrImport`; qr-transport.md). The desktop/Android
-  entry points and mDNS discovery for the LAN link are follow-ups; the relay
+  (Devices → Sync with a nearby device; `localpass sync nearby`, daemon
+  `Nearby*` requests; lan-transport.md) and the QR stream (Devices → Sync by
+  QR code; `localpass sync qr`, daemon `QrHaveCode`/`QrExport`/`QrImport`;
+  qr-transport.md). mDNS discovery for the LAN link is a follow-up; the relay
   and team sharing/roles/revocation are Phase 2 (sync-protocol.md §6, §7.4,
   §10).
 - **The QR transport moves bundles by path.** The daemon writes and reads the
