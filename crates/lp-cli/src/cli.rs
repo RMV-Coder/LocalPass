@@ -595,6 +595,24 @@ attachment, a refused share) exits non-zero."
         #[arg(long)]
         json: bool,
     },
+    /// Sync with a trusted device by QR code, with no network (or by file).
+    #[command(
+        long_about = "Sync by QR code: move changes between two trusted devices with no network.\n\n\
+One device plays an animated QR code and the other films it; in the app that \
+is Devices → Sync by QR code. These commands are the same channel without the \
+camera: `export` writes the bundle the stream would carry to a file, and \
+`import` reads one, so a bundle can travel on a USB stick.\n\n\
+`have` prints this device's \"what I have\" code (LPHAVE1-…); pass it to \
+`export --have` on the other device to send only what this one lacks.\n\n\
+SAFETY: a bundle is ciphertext plus sync metadata, like the sync folder. \
+`import` checks the bundle's hash, adopts a vault key only if a trusted device \
+signed it for this device, and verifies every change exactly as `sync pull` \
+does. An alarm exits non-zero."
+    )]
+    Qr {
+        #[command(subcommand)]
+        command: QrCommand,
+    },
     /// Join vaults another of your devices shared to this one.
     #[command(long_about = "Adopt shared vaults from a sync root.\n\n\
 Scans <DIR>/<vault-id>/keys/ for VaultKey blobs sealed to THIS device (shipped \
@@ -605,6 +623,55 @@ Run this on a second device after it has been trusted by the first.")]
         /// The shared sync-root directory.
         #[arg(long, value_name = "DIR")]
         dir: PathBuf,
+    },
+}
+
+/// `localpass sync qr ...` (`docs/specs/qr-transport.md` §10.3).
+#[derive(Debug, Subcommand)]
+pub enum QrCommand {
+    /// Print this device's "what I have" code (LPHAVE1-…).
+    Have {
+        /// Only list this vault (repeatable; default: every vault).
+        #[arg(long = "vault", value_name = "VAULT")]
+        vaults: Vec<String>,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Write a bundle (what a QR stream carries) to a file.
+    Export {
+        /// The bundle file to write (.lpqr).
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+        /// Only send this vault (repeatable; default: every vault).
+        #[arg(long = "vault", value_name = "VAULT")]
+        vaults: Vec<String>,
+        /// The other device's "what I have" code: send only what it lacks.
+        #[arg(long, value_name = "LPHAVE1-…")]
+        have: Option<String>,
+        /// The trusted device a --share is for (its device id).
+        #[arg(long, value_name = "DEVICE_ID")]
+        peer: Option<String>,
+        /// Hand this vault's key to --peer (repeatable).
+        #[arg(long = "share", value_name = "VAULT")]
+        share: Vec<String>,
+        /// Include attachment files (off by default: QR is slow).
+        #[arg(long)]
+        attachments: bool,
+        /// Overwrite --out if it exists.
+        #[arg(long)]
+        force: bool,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read a bundle file and apply what it carries.
+    Import {
+        /// The bundle file (.lpqr).
+        file: PathBuf,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
