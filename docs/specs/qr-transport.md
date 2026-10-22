@@ -428,8 +428,8 @@ is not needed: only LocalPass reads these codes.
 | Frame rate | **10 frames/s**, adjustable 3–15 | Each code must be on screen for at least two camera frames (30 fps → ≥ 66 ms) or the camera sees two codes blended. 15 frames/s caught fewer frames than 10 in every measured pair, because the decoder — not the display — is the limit. |
 
 The sender's platform picks the default code size and the user can switch it
-("Large — when a phone camera films this screen" / "Small — when a laptop
-webcam films this screen"). The receiver accepts either: it learns `T` from
+("Large — a phone camera films this screen" / "Small — a laptop webcam
+films this screen"). The receiver accepts either: it learns `T` from
 the frames.
 
 **Decoding on the receiver.** The camera loop samples the middle square of each
