@@ -306,8 +306,18 @@ pub struct SyncAdoptView {
     pub adopted: Vec<AdoptedVaultView>,
     /// Total ops applied across all adopted vaults' initial pulls.
     pub applied_total: usize,
-    /// Secret-free alarm descriptions raised during the adopt pulls.
+    /// Secret-free alarm descriptions raised during the adopt pulls, and
+    /// shares refused for failing authentication.
     pub alarms: Vec<String>,
+    /// Shares addressed to this device from a device it has not trusted yet
+    /// (refused, left in place; not an alarm).
+    pub untrusted_shares: usize,
+    /// Vault folders in the chosen folder (zero: no LocalPass data there).
+    pub vault_folders: usize,
+    /// Shares in the folder addressed to other devices.
+    pub shares_for_other_devices: usize,
+    /// The chosen folder looks like one vault's folder, not the sync root.
+    pub looks_like_vault_folder: bool,
 }
 
 /// One announced-but-untrusted device for the Devices screen's "Pending

@@ -49,6 +49,7 @@
   import { formatTimestamp } from "../lib/format";
   import { toast } from "../lib/toast";
   import { summarizeSync } from "../lib/syncsummary";
+  import { adoptOutcome, folderUsedByAnotherDevice, type Outcome } from "../lib/vaultshare";
   import Icon from "./Icon.svelte";
 
   interface Props {
@@ -129,17 +130,21 @@
   let pendingError = $state("");
   let pendingBusy = $state(false);
 
-  // Share-a-vault panel.
+  // Share-a-vault panel. A share travels through the vault's OWN sync folder,
+  // so the panel shows that folder (and refuses to share before there is one).
   let shareVault = $state("");
   let sharePeer = $state("");
   let shareBusy = $state(false);
   let shareError = $state("");
+  let shareStatus = $state<SyncStatusView | null>(null);
+  /** The last successful share, for the next-steps checklist. */
+  let shareDone = $state<{ vault: string; device: string; folder: string } | null>(null);
 
   // Adopt panel.
   let adoptDir = $state("");
   let adoptBusy = $state(false);
   let adoptError = $state("");
-  let adoptResult = $state("");
+  let adoptResult = $state<Outcome | null>(null);
 
   // --- Folder picking (Android) ---
   // On Android, scoped storage means a shared folder can only be reached through
@@ -490,8 +495,25 @@
         syncDir = status.root;
         void refreshPending(status.root);
       }
+      // Receiving usually uses the folder this device already syncs through.
+      if (status.enrolled && status.root && !adoptDir.trim()) adoptDir = status.root;
+      if (vaultId === shareVault) shareStatus = status;
     } catch {
       status = null;
+    }
+  }
+
+  /** The share vault's sync status: which folder a share would go through,
+   *  and whether any other device has used that folder. */
+  async function refreshShareStatus(vaultId: string = shareVault) {
+    if (!vaultId) {
+      shareStatus = null;
+      return;
+    }
+    try {
+      shareStatus = await syncStatus(vaultId);
+    } catch {
+      shareStatus = null;
     }
   }
 
@@ -499,9 +521,15 @@
     if (!shareVault || !sharePeer || shareBusy) return;
     shareBusy = true;
     shareError = "";
+    shareDone = null;
     try {
       await shareVaultToDevice(shareVault, sharePeer);
-      toast("Vault shared to the device", "ok");
+      const peer = peers.find((p) => p.device_id === sharePeer);
+      shareDone = {
+        vault: vaults.find((v) => v.id === shareVault)?.name ?? "the vault",
+        device: peer?.label?.trim() || "the other device",
+        folder: shareStatus?.root ?? "",
+      };
     } catch (err) {
       shareError = typeof err === "string" ? err : "Share failed.";
     } finally {
@@ -509,22 +537,24 @@
     }
   }
 
+  /** Open the sync-folder panel for the vault being shared. */
+  function setUpShareVault() {
+    syncVault = shareVault;
+    void refreshStatus(shareVault);
+    setupOpen = true;
+  }
+
   async function doAdopt() {
     if (!adoptDir.trim() || adoptBusy) return;
     adoptBusy = true;
     adoptError = "";
-    adoptResult = "";
+    adoptResult = null;
     alarms = [];
     try {
       const r = await syncAdopt(adoptDir.trim());
       alarms = r.alarms;
-      if (r.adopted.length === 0) {
-        adoptResult = "No vaults were shared to this device in that folder.";
-      } else {
-        const names = r.adopted.map((a) => a.name || a.vault_id).join(", ");
-        adoptResult = `Adopted ${r.adopted.length} vault(s) (${names}); applied ${r.applied_total} op(s).`;
-        onVaultsChanged?.(); // refresh the parent vault list + header count
-      }
+      adoptResult = adoptOutcome(r);
+      if (r.adopted.length > 0) onVaultsChanged?.(); // refresh the parent vault list + header count
     } catch (err) {
       adoptError = typeof err === "string" ? err : "Adopt failed.";
     } finally {
@@ -583,6 +613,15 @@
     refreshStatus(fallback);
     refreshPending();
   });
+
+  // The share panel's vault: look up its folder whenever it changes.
+  $effect(() => {
+    const v = shareVault;
+    shareDone = null;
+    void refreshShareStatus(v);
+  });
+
+  const shareVaultName = $derived(vaults.find((v) => v.id === shareVault)?.name ?? "this vault");
 </script>
 
 <div class="page devices">
@@ -631,6 +670,13 @@
           Folder <code class="wrap-anywhere">{status.root ?? "(none)"}</code>{#if status.pending}
             · {status.pending} waiting for a vault key{/if}
         </p>
+        {#if peers.length > 0 && !folderUsedByAnotherDevice(status)}
+          <p class="detail-line warn-line">
+            No other device has used this folder yet. Make sure your other devices sync it too
+            (Syncthing, OneDrive, Dropbox, a network drive), not a folder that exists only on this
+            computer.
+          </p>
+        {/if}
       {:else}
         <p class="detail-line">Pick a shared folder (Dropbox, OneDrive, Syncthing, a USB drive) to keep this vault in step across devices.</p>
       {/if}
@@ -816,6 +862,10 @@
             {/if}
             {#if trustError}<div class="error" role="alert">{trustError}</div>{/if}
           </form>
+          <p class="hint">
+            Then do the same on the other device, so each one trusts the other. Syncing and
+            sharing a vault both need that.
+          </p>
 
           <!-- Pending devices (device-pairing.md §5): devices that announced
                themselves in the shared folder. UNTRUSTED (§5.2): "Use" only
@@ -897,7 +947,8 @@
     </summary>
     <div class="body">
       <p class="hint" style="margin-top:0">
-        Sends the vault's key, sealed to that device, through the sync folder. Set the folder up first.
+        Sends the vault's key, sealed to that device, through the vault's sync folder. The other
+        device then receives it from the same folder.
       </p>
       <div class="share-grid">
         <div>
@@ -913,11 +964,50 @@
             {#each peers as p (p.device_id)}<option value={p.device_id}>{p.label || p.fingerprint}</option>{/each}
           </select>
         </div>
-        <button class="btn btn-primary" onclick={doShare} disabled={shareBusy || !shareVault || !sharePeer}>
+        <button
+          class="btn btn-primary"
+          onclick={doShare}
+          disabled={shareBusy || !shareVault || !sharePeer || !shareStatus?.enrolled}
+        >
           {shareBusy ? "Sharing…" : "Share"}
         </button>
       </div>
+      {#if peers.length === 0}
+        <p class="hint">Add the other device first (Add a device above), on both devices.</p>
+      {/if}
+      {#if shareStatus && !shareStatus.enrolled}
+        <div class="toolbar note">
+          <span>{shareVaultName} does not sync through a folder yet, so there is nothing to send the key through.</span>
+          <button class="btn btn-sm" onclick={setUpShareVault}>Set up its sync folder</button>
+        </div>
+      {:else if shareStatus?.enrolled}
+        <p class="hint">
+          Goes through <code class="wrap-anywhere">{shareStatus.root}</code>
+        </p>
+        {#if peers.length > 0 && !folderUsedByAnotherDevice(shareStatus)}
+          <p class="hint warn-line">
+            No other device has used this folder yet. Check that the other device syncs it too;
+            a folder that exists only on this computer never reaches it.
+          </p>
+        {/if}
+      {/if}
       {#if shareError}<div class="error" role="alert">{shareError}</div>{/if}
+      {#if shareDone}
+        <div class="next-steps" role="status">
+          <p><strong>Shared {shareDone.vault} with {shareDone.device}.</strong> Next, on {shareDone.device}:</p>
+          <ol>
+            <li>
+              Trust this device, if it does not yet. Its fingerprint is
+              <strong class="mono">{identity?.fingerprint ?? "shown above"}</strong>.
+            </li>
+            <li>
+              Wait until {#if shareDone.folder}<code class="wrap-anywhere">{shareDone.folder}</code>{:else}the folder{/if}
+              has synced there.
+            </li>
+            <li>Open Devices, then Receive vaults shared with this device, and choose that same folder.</li>
+          </ol>
+        </div>
+      {/if}
     </div>
   </details>
 
@@ -928,6 +1018,12 @@
       <span class="chev"><Icon name="chevron" size={14} /></span>
     </summary>
     <div class="body">
+      <p class="hint" style="margin-top:0; margin-bottom:10px">
+        Choose the folder the other device shared through, as it appears on this device. Both
+        devices must trust each other first.
+        {#if identity}On the sharing device, pick the device with this fingerprint:
+          <strong class="mono">{identity.fingerprint}</strong>{/if}
+      </p>
       <label for="adopt-dir" class="label">{canPickDir ? "Shared folder" : "Shared folder path"}</label>
       <div class="dir-row">
         <input
@@ -948,7 +1044,15 @@
         </button>
       </div>
       {#if adoptError}<div class="error" role="alert">{adoptError}</div>{/if}
-      {#if adoptResult}<p class="hint" role="status">{adoptResult}</p>{/if}
+      {#if adoptResult}
+        <div class="outcome {adoptResult.tone}" role="status">
+          <p class="outcome-t">{adoptResult.title}</p>
+          <p>{adoptResult.detail}</p>
+          {#if adoptResult.action === "pair"}
+            <button class="btn btn-sm" onclick={() => (pairOpen = true)}>Open Add a device</button>
+          {/if}
+        </div>
+      {/if}
     </div>
   </details>
 </div>
@@ -1002,6 +1106,51 @@
   }
   .ok-line {
     color: var(--success);
+  }
+  .warn-line {
+    color: var(--warning);
+  }
+  /* What Receive found, and what to do next. */
+  .outcome,
+  .next-steps,
+  .note {
+    margin-top: 10px;
+    padding: 10px 12px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .outcome p,
+  .next-steps p {
+    margin: 0;
+  }
+  .outcome p + p,
+  .outcome p + .btn {
+    margin-top: 4px;
+  }
+  .outcome .btn {
+    margin-top: 8px;
+  }
+  .outcome-t {
+    font-weight: 600;
+  }
+  .outcome.ok {
+    border-color: color-mix(in srgb, var(--success) 40%, var(--border));
+  }
+  .outcome.warn {
+    background: var(--warning-tint);
+    border-color: color-mix(in srgb, var(--warning) 40%, var(--border));
+  }
+  .next-steps ol {
+    margin: 6px 0 0;
+    padding-left: 20px;
+    display: grid;
+    gap: 4px;
+  }
+  .note {
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
   }
   .device-list .dev-ico {
     color: var(--text-muted);

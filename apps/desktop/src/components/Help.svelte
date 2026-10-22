@@ -69,6 +69,11 @@
       Syncthing, a USB stick). Everything in the folder is encrypted and signed, so the folder
       itself does not need to be trusted. You compare a fingerprint once when you pair.
     </p>
+    <p class="body">
+      To give another device a vault: trust each device on the other one, set the vault up to
+      sync through a folder that both devices really share, then <strong>Share</strong> it on
+      this device and <strong>Receive</strong> it on the other, choosing that same folder.
+    </p>
   </section>
 
   <section class="section">
