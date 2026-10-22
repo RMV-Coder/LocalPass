@@ -34,6 +34,14 @@
 //! resolve the vault's enrolled root string through it, so a host outside this
 //! crate injects its backend rather than this crate depending on the host.
 //!
+//! [`nearby`] is the live transport (`docs/specs/lan-transport.md`): a Noise
+//! XX link between two already-pinned devices on the same network, over which
+//! they exchange the same canonical op bytes the file channel carries and hand
+//! each other signed vault-key shares. It owns no verification or merge logic
+//! of its own — received ops go through [`engine::ingest`], the same function
+//! [`engine::pull`] uses. It runs over any byte stream and borrows the
+//! unlocked session through a small trait, so the sockets live in the daemon.
+//!
 //! [`engine`] ties them together for the CLI: `setup` / `push` / `pull` /
 //! `status`, each over a caller-supplied `StoreFactory` (desktop passes
 //! `FsStoreFactory`). [`identity`] provides the export/trust pairing strings +
@@ -76,10 +84,11 @@ pub mod engine;
 pub mod error;
 pub mod identity;
 pub mod merge;
+pub mod nearby;
 pub mod shipping;
 pub mod store;
 pub mod verify;
 pub mod wire;
 
-pub use error::{Alarm, Error, Quarantine, Result};
+pub use error::{Alarm, Error, Quarantine, Refusal, Result};
 pub use identity::DeviceIdentity;

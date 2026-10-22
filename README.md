@@ -50,7 +50,7 @@ still stands between `main` and a 1.0 release is tracked in
 | `lp-vault` — storage core | ✅ Account store, vaults, item CRUD with per-version keys, immutable history, trash + prune, signed op log with hash chain, encrypted incremental search index, backups |
 | `lp-daemon` — key-holding daemon | ✅ Same-user IPC session reuse, idle auto-lock, vault-backed SSH agent |
 | `lp-cli` — `localpass` binary | ✅ init/vault/item/search/generate/password, `run`/`env` secret injection, `totp`, `ssh`, `backup`, `import`/`export`, `sync`, `device`, `kit`, `mcp` (MCP server for AI agents) |
-| `lp-sync` — sync engine | ✅ Signed op-log ingest + deterministic merge, file-based shipping, cross-device key sharing (live LAN/mDNS transport is a documented follow-up) |
+| `lp-sync` — sync engine | ✅ Signed op-log ingest + deterministic merge, file-based shipping, cross-device key sharing, and direct sync with a nearby trusted device over the LAN or Tailscale (`localpass sync nearby`; GUI entry point and mDNS discovery are follow-ups) |
 | `lp-porter` — import/export | ✅ 1Password/Bitwarden/LastPass/CSV/`.env`/KeePass KDBX 4 import, age-encrypted archive export |
 | `lp-native-host` — browser bridge | ✅ Fill-scoped native-messaging host (the extension UI itself is not yet built) |
 | `apps/desktop` — Tauri GUI (MPL-2.0) | ✅ Zero-terminal: account creation, item CRUD, search, reveal/copy, live TOTP, generator, `.env` secure documents, encrypted attachments, and device linking + sync — bundles the daemon and auto-starts it |

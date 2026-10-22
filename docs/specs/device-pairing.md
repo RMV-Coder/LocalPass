@@ -47,8 +47,10 @@ anchor, an X25519 key-share recipient key, a device id, and a CRC. It contains
   a vault key to you, so a share must also be **signed** by the sending device,
   and adopt accepts it only from a device you pinned (`sync-protocol.md` §7.1).
   A share planted in the sync folder by anyone else is refused and reported.
-- There is **no listener to reach.** The MVP channel (§7) is a dumb, untrusted
-  folder. Nothing in LocalPass accepts an inbound pairing request.
+- There is **no listener to reach** outside a "Sync with a nearby device"
+  window ([`lan-transport.md`](lan-transport.md) §7.1), and inside one only a
+  device you already pinned gets past the handshake. Nothing in LocalPass
+  accepts an inbound pairing request.
 
 The one real attack on pairing is **substitution**: an attacker who can tamper
 with the channel you use to *transport* the string swaps in their own identity,
@@ -188,11 +190,14 @@ fails *always*, discoverability or not.
    is a speed bump and an audit-log moment, not a boundary.)
 2. **Accidental trust.** A deliberate ceremony is harder to fumble than an
    always-live "paste and go" box.
-3. **It is the correct home for the control that *will* be load-bearing.** When
-   the LAN/mDNS live transport lands (PRD backlog), "discoverable" gates whether
-   this device *announces itself and accepts inbound connections* — a real
-   network control with real teeth. Specifying it now means that arrives as a
-   familiar toggle rather than a new concept.
+3. **It set the pattern for the control that *is* load-bearing.** The LAN
+   transport's listen window ([`lan-transport.md`](lan-transport.md) §7.1) is a
+   *sibling* of pairing mode, not pairing mode itself: same shape (off by
+   default, time-boxed, audited, presence-gated while an agent is connected),
+   but it gates *accepting connections from already-pinned devices*, while
+   pairing mode gates *pinning a new one*. Keeping them separate means syncing
+   with your own phone never requires opening the window that admits new
+   trust.
 
 Toggling pairing mode SHOULD be recorded in the local audit log (PRD §4.9).
 
@@ -295,11 +300,12 @@ device with a fingerprint; each side confirms once. QR is not needed.
   separate pairing stack per platform — a large, always-present attack surface
   and substantial per-OS code, to solve a problem QR already solves with **zero
   runtime surface** (a QR is a rendered image; it listens to nothing). It also
-  cuts against the "fully local, offline" posture. If cable-free sync is wanted,
-  the planned LAN/mDNS transport is the place, not BT.
+  cuts against the "fully local, offline" posture. Cable-free sync is the LAN
+  transport ([`lan-transport.md`](lan-transport.md)), not BT.
 - **Auto-trust on scan.** See §3.3.
-- **Network discovery / a real "discoverable" service.** Deferred to the LAN/mDNS
-  transport; §4 is where its toggle will live.
+- **Network discovery / a real "discoverable" service.** Belongs to the LAN
+  transport ([`lan-transport.md`](lan-transport.md) §8: manual address today,
+  mDNS a follow-up), behind its own listen window rather than §4's toggle.
 - **Encoding anything but the identity string in the QR** (vault offers, folder
   locations, tokens). One canonical payload (§3.1).
 - **Changing the trust model.** No new pin path, no relaxation of §5 step 1.

@@ -56,6 +56,18 @@ getrandom = "0.2"
 data-encoding = "2"
 # --- Op-chain hashing: BLAKE3 (sync-protocol.md §5). Integrity chaining only. ---
 blake3 = "1"
+# --- LAN sync transport: Noise XX (PRD §5.2 / §6.2 `snow`; lan-transport.md).
+# --- Only the three primitives of Noise_XX_25519_ChaChaPoly_SHA256 plus the OS
+# --- RNG are enabled, and they resolve to the versions this crate already pins
+# --- (curve25519-dalek 4, chacha20poly1305 0.10, sha2 0.10). `std` stays OFF on
+# --- purpose: snow's `std` feature turns on `ring/std`, which would pull ring
+# --- (a C/asm crypto stack) into the tree. No BLAKE2, AES-GCM or P-256. ---
+snow = { version = "0.10", default-features = false, features = [
+    "use-curve25519",
+    "use-chacha20poly1305",
+    "use-sha2",
+    "use-getrandom",
+] }
 # --- One error enum across the crate (PRD §6.2 hygiene). ---
 thiserror = { workspace = true }
 

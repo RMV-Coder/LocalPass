@@ -130,6 +130,20 @@ customizing.
 - **Sync.** File-based sync via the Storage Access Framework (a user-picked
   folder / cloud provider) is the natural first transport; the op-log engine is
   transport-agnostic and reused unchanged.
+- **Nearby (LAN) sync** ([lan-transport.md](specs/lan-transport.md)) avoids the
+  folder entirely, which matters here because the SAF picker hides cloud
+  providers. The protocol and the listener/dialer are plain Rust in
+  `lp-sync`/`lp-daemon` and need no Android code to *work*; what the app must
+  add: (1) the in-process backend must run the engine's deferred nearby job
+  after releasing its state mutex (`lp_daemon::nearby::run_deferred`, as the
+  desktop daemon's server does) — today it drops it, so `NearbyConnect`
+  answers an error and `NearbyListen` never serves; (2) the `INTERNET`
+  permission in the generated manifest (`gen/android/` is not in the
+  repository, so check it on the release build); (3) for mDNS discovery, a
+  `WifiManager.MulticastLock` held only while the listen window is open,
+  `CHANGE_WIFI_MULTICAST_STATE`, and `NsdManager` to browse/announce
+  `_localpass-sync._tcp`. The phone typically *dials* the desktop, which is the
+  simpler side (no inbound socket on the phone).
 - **Signing & Play Store.** A release keystore + Play App Signing; out of scope
   until the desktop 1.0 gates (audit, format freeze) pass.
 

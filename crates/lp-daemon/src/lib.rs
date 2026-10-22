@@ -24,8 +24,8 @@
 //!
 //! ## Transport & access control (the security core — PRD §7.3, §8 T8)
 //!
-//! No localhost TCP is ever used (that class of local-port-hijack bugs is out of
-//! scope, PRD §4.7). Instead:
+//! The control channel is never a TCP port (that class of local-port-hijack
+//! bugs is out of scope, PRD §4.7). Instead:
 //!
 //! - **Windows:** a named pipe `\\.\pipe\localpass-<sanitized-username>` created
 //!   with a security descriptor whose DACL grants access to the **current user's
@@ -70,6 +70,11 @@
 //! - [`spawn`] — launch the `localpass-daemon` binary detached (`daemon start`).
 //! - [`sshagent`] — the SSH agent protocol served on a **second** same-user-only
 //!   endpoint by the same process (vault-backed SSH keys, PRD §4.8).
+//! - [`nearby`] — "Sync with a nearby device": the LAN listener and dialer for
+//!   `docs/specs/lan-transport.md`. Its TCP socket exists only inside an
+//!   opt-in, time-boxed window, accepts only local-network addresses, and
+//!   speaks only the Noise-authenticated sync exchange with **pinned** devices
+//!   — it is not a control channel and accepts no daemon request.
 //! - [`error`] — the transport/lifecycle error type.
 //!
 //! `unsafe` is confined to the two platform transport modules (the Windows
@@ -83,6 +88,7 @@ pub mod client;
 pub mod engine;
 pub mod error;
 pub mod frame;
+pub mod nearby;
 pub mod origin;
 pub mod presence;
 pub mod protocol;

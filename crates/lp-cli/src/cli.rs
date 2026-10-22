@@ -491,9 +491,13 @@ ops without detection (PRD §8 T5/T13).\n\n\
 WORKFLOW: `sync setup --dir <shared-dir>` enrolls a vault (once per device); \
 `sync push` publishes this device's ops; `sync pull` verifies + merges peers' \
 ops into your vault; `sync status` shows per-device progress.\n\n\
+NO SHARED FOLDER? `sync nearby` syncs directly with a trusted device on the \
+same Wi-Fi or Tailscale network: `--listen` on one, `--connect <IP>` on the \
+other.\n\n\
 PAIRING: only devices you have trusted (`device trust`) are accepted as op \
-authors. Live mDNS/SAS pairing is a LATER wave; today you exchange identity \
-strings out-of-band (`device export-identity` / `device trust`)."
+authors or as nearby peers. SAS pairing and mDNS discovery are a LATER wave; \
+today you exchange identity strings out-of-band (`device export-identity` / \
+`device trust`)."
 )]
 pub enum SyncCommand {
     /// Enroll a vault for file-based sync under a shared directory.
@@ -539,6 +543,54 @@ always wins over a concurrent delete."
         /// The vault to report on (name or id).
         #[arg(long, default_value = "personal", value_name = "NAME_OR_ID")]
         vault: String,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Sync directly with a trusted device on the same network (no shared folder).
+    #[command(
+        long_about = "Sync with a nearby trusted device over the local network.\n\n\
+Run `--listen` on one device and `--connect <IP>` on the other. The two \
+devices must already trust each other (`device trust` on both). They open an \
+end-to-end encrypted, mutually authenticated link (Noise XX, pinned to the \
+keys you trusted), exchange the ops each one lacks for every vault they both \
+hold, verify every op exactly as `sync pull` does, and close. Works over the \
+same Wi-Fi or a Tailscale/WireGuard network; no shared folder, no sync app, \
+no server.\n\n\
+--share VAULT hands that vault's key to the other device in the same session \
+(it needs --peer, the device it is for), so one session both shares a vault \
+and fills it.\n\n\
+SAFETY: --listen opens a port only for this command, for --timeout seconds \
+(default 180, at most 600), for ONE session. Only local-network addresses \
+(LAN, link-local, Tailscale's 100.64.0.0/10 and fd00::/8) can connect, and a \
+device you have not trusted is refused during the handshake, before anything \
+else is read. --connect takes an IP address, never a host name, so nothing is \
+looked up on the internet. An alarm (a quarantined device, a tampered \
+attachment, a refused share) exits non-zero."
+    )]
+    Nearby {
+        /// Wait for the other device to connect (opens a port for one session).
+        #[arg(long, conflicts_with = "connect", required_unless_present = "connect")]
+        listen: bool,
+        /// Connect to a listening device: its IP, optionally with :PORT.
+        #[arg(long, value_name = "IP[:PORT]")]
+        connect: Option<String>,
+        /// With --listen: the local IP to listen on (default: all IPv4).
+        #[arg(long, value_name = "IP", requires = "listen")]
+        bind: Option<String>,
+        /// With --listen: the port (default 47823; 0 picks a free one).
+        #[arg(long, value_name = "PORT", requires = "listen")]
+        port: Option<u16>,
+        /// With --listen: seconds to wait for the other device (max 600).
+        #[arg(long, value_name = "SECS", requires = "listen")]
+        timeout: Option<u64>,
+        /// Only sync with this trusted device (its device id). Required with
+        /// --share.
+        #[arg(long, value_name = "DEVICE_ID")]
+        peer: Option<String>,
+        /// Share this vault's key with --peer in the same session (repeatable).
+        #[arg(long = "share", value_name = "VAULT")]
+        share: Vec<String>,
         /// Emit machine-readable JSON.
         #[arg(long)]
         json: bool,
