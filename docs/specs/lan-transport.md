@@ -1,8 +1,8 @@
 # LocalPass LAN Transport — direct device-to-device sync ("Sync with a nearby device")
 
 **Protocol version: 1** (carried in the Noise prologue)
-**Status: implemented (core, daemon, CLI); desktop GUI and Android entry points
-are a follow-up — see §12**
+**Status: implemented (core, daemon, CLI, desktop Devices screen, Android
+in-process backend); mDNS discovery is a follow-up — see §12**
 **Date: 2026-10-22**
 
 ## Scope
@@ -515,11 +515,16 @@ network. Host names are a possible later addition (§12).
 
 1. **Manual address (built).** The listener shows `host:port`; the user types
    it on the other device. On Tailscale, the tailnet IP.
-2. **QR (follow-up, GUI).** The listener displays the same `host:port` as a QR
-   code next to the text. The QR is a convenience for typing only: it carries
-   no key and grants nothing — the handshake authenticates the device that
-   answers, whatever the QR said. A wrong or forged address can at worst
-   connect to a device that then fails the handshake.
+2. **QR (built, GUI).** The listener displays the same address as a QR code
+   next to the text. The payload is `LPNEAR1-` followed by `IP:port` (for
+   example `LPNEAR1-192.168.1.20:47823`), so a scan can tell it apart from a
+   device-identity QR (`LPDEV1-…`); the app's scanner also accepts a bare
+   `IP[:port]`. The backend renders a QR only for a local-network address. The
+   QR is a convenience for typing only: it carries no key and grants nothing —
+   the handshake authenticates the device that answers, whatever the QR said.
+   A wrong or forged address can at worst connect to a device that then fails
+   the handshake. Typical use: the desktop waits, the phone scans and
+   connects, so the phone never needs an inbound socket.
 3. **mDNS (follow-up).** The listener announces `_localpass-sync._tcp.local.`
    only while its window is open, with a random per-window instance name and a
    TXT record carrying the protocol version and nothing identifying (no device
@@ -605,14 +610,18 @@ Shares sent over the link are recorded by the existing `vault_share` kind
 
 ## 12. Not built in this version (follow-ups)
 
-- **Desktop GUI entry point** — a "Sync with a nearby device" button on the
-  Devices screen (listen with a countdown and the address + QR; connect by
-  address), via the daemon requests above.
-- **Android** — the in-process backend must run the deferred nearby actions
-  (§9.1) itself; `INTERNET` permission is already present, mDNS needs
-  `CHANGE_WIFI_MULTICAST_STATE` + a `MulticastLock` and `NsdManager`.
-- **mDNS discovery** (§8.3) on both platforms.
-- **QR display** of the listen address (§8.2).
+Built since the first version: the desktop Devices screen's "Sync with a
+nearby device" section (wait with a countdown, the address and its QR;
+connect by typing or scanning; optionally share a vault), and the Android /
+in-process backend running the deferred nearby jobs (`apps/desktop/src-tauri`
+`daemon.rs`). Still not built:
+
+- **mDNS discovery** (§8.3) on both platforms. On Android it needs
+  `CHANGE_WIFI_MULTICAST_STATE`, a `MulticastLock` held only while the window
+  is open, and `NsdManager`.
+- **On-device verification** of the Android path (a phone dialing a desktop on
+  real Wi-Fi), including the `INTERNET` permission in the generated manifest
+  (`gen/android/` is not in the repository).
 - **Host names** for `--connect` (today: IP literals only, §7.3).
 - **IPv6 by default** (today: bind `[::]` explicitly).
 - Fuzz targets for the record layer and message decoders (release-checklist §1).

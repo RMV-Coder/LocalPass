@@ -78,7 +78,7 @@ db credential) are reserved in the payload schema but not implemented
 | **File-based** log-shipping sync | ✅ | `localpass sync setup/push/pull/status/adopt`; `lp-sync` (`engine`, `shipping`) | The MVP-default sync (PRD §11 #6): immutable E2EE `.oplog` segments over a dumb channel; ingest verifier (signature/seq/hash-chain/Lamport) + deterministic merge with loser-preservation. |
 | Device pairing | ◑ | `localpass device export-identity/trust`; `lp-sync` (`identity`) | Offline pairing groundwork only: exchange identity strings out-of-band, confirm the fingerprint by hand, then trust. Only trusted devices are accepted as op authors. |
 | **SAS** pairing (6-word phrase, mDNS discovery) | ⛔ | — | The spoken-SAS + mDNS live-pairing UX is a **documented later wave** (sync-protocol.md §6; CLI `sync`/`device` long-help both say so). Today it is manual fingerprint confirmation. |
-| **Direct LAN / overlay** live transport (Noise XX, mDNS) | ◑ | `localpass sync nearby --listen` / `--connect IP[:PORT]`; daemon `NearbyListen`/`NearbyConnect`/`NearbyStatus`/`NearbyStop`; `lp-sync` (`nearby`, `engine::ingest`); `lp-daemon` (`nearby`); `lp-crypto` (`noise`) | **Core, daemon and CLI built** ([lan-transport.md](specs/lan-transport.md)): Noise XX between pinned devices, a per-connection static key certified by the Ed25519 identity key, authentication before any data, the same canonical op bytes through the unchanged §5 verifier and §4 merge, signed `LPS2` shares over the link, attachment blobs, an opt-in time-boxed listen window, local-address-only policy, explicit limits. Works over Tailscale (IP connectivity). **Not built:** the desktop Devices entry point, Android (in-process backend, NSD/multicast lock), mDNS discovery, QR of the address (see §3). |
+| **Direct LAN / overlay** live transport (Noise XX, mDNS) | ◑ | Desktop: Devices → "Sync with a nearby device"; `localpass sync nearby --listen` / `--connect IP[:PORT]`; daemon `NearbyListen`/`NearbyConnect`/`NearbyStatus`/`NearbyStop`; `lp-sync` (`nearby`, `engine::ingest`); `lp-daemon` (`nearby`); `lp-crypto` (`noise`) | **Core, daemon and CLI built** ([lan-transport.md](specs/lan-transport.md)): Noise XX between pinned devices, a per-connection static key certified by the Ed25519 identity key, authentication before any data, the same canonical op bytes through the unchanged §5 verifier and §4 merge, signed `LPS2` shares over the link, attachment blobs, an opt-in time-boxed listen window, local-address-only policy, explicit limits. Works over Tailscale (IP connectivity). The desktop Devices screen can wait (address + QR + countdown) or connect (typed or scanned address), optionally sharing a vault; the Android in-process backend runs the same deferred jobs. **Not built:** mDNS discovery; **not verified on a phone** yet (see §3). |
 | Cross-device VaultKey sharing (single-user multi-device) | ✅ | `localpass vault share-to-device`, `sync adopt`; `lp-sync` (`share_vault_to_device`/`adopt_report`); `lp-vault` (`share_vault_key_to_peer`/`import_shared_vault_key`) | Sealed through `lp-crypto`'s typed key transport (`seal_key_for` → `SealingKeyPair::open_key`), so raw key bytes never surface. Since #43 shares are **signed** by the sending device (format `LPS2`, sync-protocol.md §7.1) and adopted **only from a pinned peer**; unsigned or untrusted shares are refused and reported as alarms. Covered by `lp-sync/tests/two_device.rs` and `key_share_auth.rs`. |
 
 ### 1.6 Browser extension (Chrome/Firefox): fill + save, native messaging
@@ -156,11 +156,12 @@ tracked follow-ups. They are the real content of this document.
    folder and no sync app. Received ops go through `lp_sync::engine::ingest` —
    the function `pull` uses — so the §5 verifier and §4 merge are unchanged.
    Covered by loopback tests in `lp-sync`, `lp-daemon` and `lp-cli` (two real
-   processes). **Remaining for 1.0:** the desktop Devices screen entry point,
-   the Android pieces (the in-process backend must run the daemon's deferred
-   nearby jobs; NSD + multicast lock for discovery), mDNS discovery on desktop,
-   and a QR of the listen address. Until those land, a GUI-only user still
-   needs the CLI (or a shared folder) to sync.
+   processes). The desktop Devices screen has a "Sync with a nearby device"
+   section (wait with the address and its QR, or connect by typing or scanning
+   the address, optionally sharing a vault), and the Android / in-process
+   backend runs the same deferred network jobs as the daemon. **Remaining for
+   1.0:** mDNS discovery (NSD + multicast lock on Android), and an on-device
+   check of a phone dialing a desktop over real Wi-Fi.
 
 3. **Browser extension UI (PRD §9.1 "browser extension: fill + save").** The MV3
    WebExtension is now built (`apps/extension/`) on top of the native-messaging
