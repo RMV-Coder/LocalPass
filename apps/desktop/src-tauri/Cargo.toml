@@ -10,6 +10,7 @@ edition = "2024"
 rust-version = "1.90"
 license = "MPL-2.0"
 repository = "https://github.com/localpass/localpass"
+publish = false  # application crate; uses path deps, not published to crates.io
 # `default-run` disambiguates `cargo run` (the app binary, not the lib).
 default-run = "localpass-desktop"
 
