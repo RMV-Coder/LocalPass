@@ -257,7 +257,7 @@ pub fn serve<L: Local>(
         } else {
             match accept_one(stream, local, options) {
                 Ok(report) => return ListenEnd::Synced(Box::new(report)),
-                Err(Accepted::Authenticated(e)) => return ListenEnd::Failed(e.to_string()),
+                Err(Accepted::Authenticated(e)) => return ListenEnd::Failed(user_message(&e)),
                 Err(Accepted::NotAuthenticated(e)) => {
                     on_refused(&format!("{}: {e}", peer.ip()));
                     failures += 1;
@@ -522,7 +522,7 @@ fn connect_now<H: Deref<Target = Mutex<State>>>(state: &H, job: ConnectJob) -> R
             )
         }
         Err(e) => {
-            let message = format!("nearby sync failed: {e}");
+            let message = user_message(&e);
             (
                 WireNearbyOutcome {
                     role: "connect".into(),
@@ -539,6 +539,31 @@ fn connect_now<H: Deref<Target = Mutex<State>>>(state: &H, job: ConnectJob) -> R
     };
     *job.last.lock().unwrap_or_else(PoisonError::into_inner) = Some(outcome);
     response
+}
+
+/// A nearby-sync failure in words a person can act on (the GUI shows it as
+/// is). Secret-free: refusal reasons, socket error kinds, protocol labels.
+#[must_use]
+pub fn user_message(e: &lp_sync::Error) -> String {
+    use std::io::ErrorKind;
+    match e {
+        lp_sync::Error::Refused(r) => format!("Not synced: the other device was refused — {r}."),
+        lp_sync::Error::Io(io) => match io.kind() {
+            ErrorKind::ConnectionRefused => "Nothing is waiting at that address. Start \
+                 \"Wait for 3 minutes\" on the other device first, then connect."
+                .into(),
+            ErrorKind::TimedOut | ErrorKind::WouldBlock => "Could not reach that address. \
+                 Check that both devices are on the same Wi-Fi or Tailscale network."
+                .into(),
+            ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted | ErrorKind::BrokenPipe => {
+                "The other device closed the connection before the sync finished.".into()
+            }
+            _ => format!("Nearby sync failed: {io}"),
+        },
+        lp_sync::Error::Timeout(_) => "The other device stopped responding.".into(),
+        lp_sync::Error::Protocol(m) => format!("The connection broke: {m}."),
+        other => format!("Nearby sync failed: {other}"),
+    }
 }
 
 /// Render a finished window for `NearbyStatus`.
@@ -693,6 +718,22 @@ mod tests {
         assert!(parse_peer_address("laptop.local").is_err());
         assert!(parse_peer_address("8.8.8.8:47823").is_err());
         assert!(parse_peer_address("192.168.1.20:0").is_err());
+    }
+
+    #[test]
+    fn failures_read_as_plain_sentences() {
+        use lp_sync::Refusal;
+        let refused = user_message(&lp_sync::Error::Refused(Refusal::UntrustedPeer));
+        assert!(refused.starts_with("Not synced:"), "{refused}");
+        assert!(!refused.contains("nearby sync refused"), "{refused}");
+        let nobody = user_message(&lp_sync::Error::Io(std::io::Error::from(
+            std::io::ErrorKind::ConnectionRefused,
+        )));
+        assert!(nobody.contains("Nothing is waiting"), "{nobody}");
+        assert_eq!(
+            user_message(&lp_sync::Error::Timeout("waiting for the peer")),
+            "The other device stopped responding."
+        );
     }
 
     #[test]

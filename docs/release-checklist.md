@@ -40,11 +40,11 @@ Each of these is in PRD §9.1's "In" list but not (fully) built. For each,
 decide: **build for 1.0**, or **move to 1.x** by amending PRD §9.1 and
 recording the decision in §11.
 
-- [ ] Direct LAN / overlay live sync (Noise XX/IK + mDNS). The transport is
-  built for the core, daemon and CLI (`localpass sync nearby`,
-  [lan-transport.md](specs/lan-transport.md)). Still to do: the desktop
-  Devices entry point, the Android pieces (in-process deferred jobs, NSD +
-  multicast lock), mDNS discovery, and a QR of the listen address.
+- [ ] Direct LAN / overlay live sync (Noise XX/IK + mDNS). Built for the core,
+  daemon, CLI (`localpass sync nearby`), the desktop Devices screen and the
+  Android in-process backend ([lan-transport.md](specs/lan-transport.md)).
+  Still to do: mDNS discovery (NSD + multicast lock on Android), and verify a
+  phone dialing a desktop on real Wi-Fi.
 - [ ] SAS pairing (6-word phrase). Today: manual fingerprint comparison.
 - [ ] Desktop tray quick-search.
 - [ ] Desktop version history: browse and restore an item's versions (CLI

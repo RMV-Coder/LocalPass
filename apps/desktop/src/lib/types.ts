@@ -253,6 +253,52 @@ export interface SyncAdoptView {
   alarms: string[];
 }
 
+/** "Sync with a nearby device" (docs/specs/lan-transport.md). All of these are
+ *  secret-free: addresses, ids, local vault names, counts, alarm strings. */
+export interface NearbyListeningView {
+  /** `IP:PORT` strings to show and encode in the QR (may be empty). */
+  addresses: string[];
+  port: number;
+  expires_in_secs: number;
+}
+
+export interface NearbyVaultView {
+  vault_id: string;
+  name: string;
+  sent: number;
+  received: number;
+  pending: number;
+  files_sent: number;
+  files_received: number;
+  files_missing: number;
+}
+
+export interface NearbyReportView {
+  peer_device_id: string;
+  peer_label: string | null;
+  vaults: NearbyVaultView[];
+  /** Vault ids whose key this device handed over. */
+  shared: string[];
+  adopted: AdoptedVaultView[];
+  /** Surfaced in the alarm callout, never swallowed. */
+  alarms: string[];
+}
+
+export interface NearbyOutcomeView {
+  role: "listen" | "connect" | string;
+  result: "synced" | "failed" | "expired" | "stopped" | "too_many_failures" | string;
+  error: string | null;
+  report: NearbyReportView | null;
+}
+
+export interface NearbyStatusView {
+  listening: boolean;
+  addresses: string[];
+  port: number | null;
+  expires_in_secs: number | null;
+  last: NearbyOutcomeView | null;
+}
+
 /** One attachment row on an item. Carries NO blob bytes — just id, filename,
  *  and plaintext size. The attachment plaintext never enters the webview:
  *  adding names a source path the daemon reads, saving names a dest path the
