@@ -328,25 +328,41 @@ fn serve_connection(shared: &Arc<Shared>, mut conn: transport::Connection) -> Re
                 None => engine::handle_with(&mut state, request, &ctx),
             }
         };
-        if handled.began_agent_session && !agent.active {
+        let engine::Handled {
+            response,
+            shutdown,
+            began_agent_session,
+            deferred,
+        } = handled;
+        if began_agent_session && !agent.active {
             agent.active = true;
             if shared.verbose {
                 log("agent session started");
             }
         }
 
+        // 2b) Network work the engine validated but must not run under the
+        //     mutex (the nearby-sync dialer / listener): run it now, with the
+        //     lock released. A dial's result replaces the provisional answer.
+        let response = match deferred {
+            Some(job) => {
+                crate::nearby::run_deferred(Arc::clone(&shared.state), job).unwrap_or(response)
+            }
+            None => response,
+        };
+
         if shared.verbose {
             log(&format!(
                 "{kind} -> {} ({} us)",
-                handled.response.kind(),
+                response.kind(),
                 started.elapsed().as_micros()
             ));
         }
 
         // 3) Write the response — again outside the lock.
-        frame::write_response(&mut conn, &handled.response)?;
+        frame::write_response(&mut conn, &response)?;
 
-        if handled.shutdown {
+        if shutdown {
             // Flip running and unblock the accept loop by self-connecting.
             shared.running.store(false, Ordering::Release);
             wake_acceptor(&shared.username);
