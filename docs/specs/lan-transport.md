@@ -325,7 +325,7 @@ No JSON on this wire.
 | TCP connect (dialer) | 10 s | an unreachable address fails quickly |
 | Handshake, total | 10 s from accept/connect | enforced as a deadline across reads, so a client trickling one byte at a time cannot extend it |
 | Handshake message | 1024 bytes | real messages are ≤ 176 bytes |
-| Waiting for one application message | 120 s | covers the other side's ingest of a large batch |
+| Waiting for the next record, or writing one | 120 s | covers the other side's ingest of a large batch |
 | Noise message | 65535 bytes | the Noise maximum |
 | Messages | per-type caps, §5.2 | checked before allocation |
 | Shares per `HELLO` | 64 | |
@@ -464,8 +464,10 @@ Listening is a deliberate, time-boxed act, modelled on pairing mode
   the daemon's `NearbyListen` request (the GUI entry point, §12).
 - **Window:** 180 s by default, at most 600 s. The window bounds *accepting* a
   connection; a session that started inside it runs to completion.
-- **One session per window.** The listener closes as soon as one session
-  finishes (successfully or not past the handshake).
+- **One session per window.** The listener closes as soon as one
+  authenticated session ends, whether it completed or failed after the
+  handshake. A connection refused *in* the handshake does not end the window
+  (it counts toward the failure cap).
 - **8 failed handshakes** (unauthenticated or malformed peers, address-policy
   rejects) close the window early.
 - **The vault locking closes it.** The listener needs the unlocked session to
@@ -473,7 +475,9 @@ Listening is a deliberate, time-boxed act, modelled on pairing mode
   does not count as activity and does not hold the vault open.
 - **Stoppable:** `NearbyStop`, or Ctrl-C for the CLI.
 - **Audited:** opening and closing the window, and each completed session,
-  are recorded in the local audit log (§10).
+  are recorded in the local audit log (§10). Best-effort, like every audit
+  write: a window closed *by* the vault locking has no session left to write
+  the closing record through.
 - **While an AI agent is connected**, opening the window and any session that
   sends a share need the master password first (`mcp-server.md` §7.1), like
   pairing mode and `ShareVaultToDevice`.
@@ -615,8 +619,11 @@ Shares sent over the link are recorded by the existing `vault_share` kind
 
 ## 13. Test plan
 
-Covered in `crates/lp-sync/tests/nearby.rs`, `crates/lp-crypto` unit tests and
-`crates/lp-daemon/tests/nearby.rs`:
+Covered in `crates/lp-crypto/src/noise.rs` (unit), `crates/lp-sync/src/nearby/`
+(unit: framing, limits, proofs, a MITM that flips a bit), `crates/lp-sync/tests/nearby.rs`
+(two and three real devices over loopback TCP), `crates/lp-daemon/src/nearby.rs`
+(unit: address policy, window), `crates/lp-daemon/tests/nearby.rs` (the daemon
+requests) and `crates/lp-cli/tests/nearby.rs` (two `localpass` processes):
 
 - Two real devices over loopback TCP converge, and a following file sync
   between them applies nothing (the LAN session produced exactly the file-sync

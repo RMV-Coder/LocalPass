@@ -92,12 +92,20 @@ Full detail is in [PRD.md](PRD.md) §8 (threat model) and
   alarmed. The transport channel is fully untrusted — a malicious file host or
   relay sees only ciphertext and cannot forge, reorder, or silently drop
   operations ([docs/specs/sync-protocol.md](docs/specs/sync-protocol.md) §5;
-  PRD §8 T5, T13).
+  PRD §8 T5, T13). Syncing directly with a nearby device adds a Noise XX link
+  on top: both devices authenticate against the keys you trusted before
+  anything else is exchanged, and the ops inside are verified exactly as from a
+  folder ([docs/specs/lan-transport.md](docs/specs/lan-transport.md); PRD §8
+  T4).
 - **Against other local users, up to OS boundaries.** The background daemon
   exposes keys only over a same-user-only IPC channel (a Windows named pipe whose
   DACL grants only your SID; a Unix socket with `0700`/`0600` permissions plus a
-  `SO_PEERCRED` same-uid check). No localhost TCP port is ever opened, avoiding
-  the local-port-hijack class of bugs. The browser bridge is native-messaging,
+  `SO_PEERCRED` same-uid check). The control channel is never a TCP port,
+  avoiding the local-port-hijack class of bugs. The only TCP socket LocalPass
+  opens is the "Sync with a nearby device" listener: off by default, open only
+  for a window you start (3 minutes by default, 10 at most, one session),
+  reachable only from local-network addresses, and useless to any device you
+  have not trusted. The browser bridge is native-messaging,
   fill-scoped, and origin-re-validated server-side (PRD §8 T7, T8).
 
 ### What LocalPass cannot protect against
