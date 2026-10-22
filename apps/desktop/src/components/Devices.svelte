@@ -59,6 +59,8 @@
   } from "../lib/types";
   import { previewFingerprint } from "../lib/api";
   import CameraScan from "./CameraScan.svelte";
+  import QrSend from "./QrSend.svelte";
+  import QrReceive from "./QrReceive.svelte";
   import { copyToClipboard } from "../lib/clipboard";
   import { formatTimestamp } from "../lib/format";
   import { toast } from "../lib/toast";
@@ -220,6 +222,9 @@
   // What the scan is for: a device identity (the trust box) or a nearby-sync
   // address (the connect box). Each lands only in its own field.
   let scanTarget = $state<"identity" | "nearby">("identity");
+  // Sync by QR code (qr-transport.md): the flows live in QrSend / QrReceive.
+  let qrSend = $state<"sync" | "share" | null>(null);
+  let qrReceive = $state(false);
 
   // Dispatch the Scan button to the right backend for this platform.
   function startScan(target: "identity" | "nearby" = "identity") {
@@ -1251,11 +1256,51 @@
       {#if adoptResult}<p class="hint" role="status">{adoptResult}</p>{/if}
     </div>
   </details>
+
+  <!-- ===================== Sync by QR code (qr-transport.md) ===================== -->
+  <details class="disclosure">
+    <summary>
+      <Icon name="qr" size={16} /> Sync by QR code
+      <span class="sum-meta">· no network</span>
+      <span class="chev"><Icon name="chevron" size={14} /></span>
+    </summary>
+    <div class="body">
+      <p class="hint">
+        One device plays a moving QR code and the other films it — no network, no folder.
+        Both devices must already trust each other.
+      </p>
+      <div class="toolbar">
+        <button class="btn" onclick={() => (qrSend = "sync")}>
+          <Icon name="upload" size={14} /> Send by QR
+        </button>
+        <button class="btn" onclick={() => (qrReceive = true)}>
+          <Icon name="download" size={14} /> Receive by QR
+        </button>
+        <button class="btn btn-quiet" onclick={() => (qrSend = "share")} disabled={peers.length === 0}>
+          Share a vault by QR
+        </button>
+      </div>
+    </div>
+  </details>
 </div>
 
 <!-- Desktop webcam scanner. Decoding fills the identity box; it never trusts. -->
 {#if showCamera}
   <CameraScan onDetected={onCameraDetected} onClose={() => (showCamera = false)} />
+{/if}
+
+{#if qrSend}
+  <QrSend mode={qrSend} {vaults} {peers} onClose={() => (qrSend = null)} />
+{/if}
+{#if qrReceive}
+  <QrReceive
+    onClose={() => (qrReceive = false)}
+    onVaultsChanged={() => onVaultsChanged?.()}
+    onSyncChanged={() => {
+      onSyncChanged?.();
+      refreshStatus();
+    }}
+  />
 {/if}
 
 <style>

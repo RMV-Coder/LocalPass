@@ -69,6 +69,14 @@
       Syncthing, a USB stick). Everything in the folder is encrypted and signed, so the folder
       itself does not need to be trusted. You compare a fingerprint once when you pair.
     </p>
+    <p class="body">
+      <strong>Sync by QR code</strong> needs no network and no folder: one device plays a moving
+      QR code, the other films it with its camera. It moves a few kilobytes a second, so on the
+      receiving device show its own code first (the sender then sends only what is missing), and
+      leave attachments out unless you need them. A QR stream can also hand over a vault key.
+      Anyone who films the screen sees only encrypted data, and a stream from a device you have
+      not trusted is refused.
+    </p>
   </section>
 
   <section class="section">
