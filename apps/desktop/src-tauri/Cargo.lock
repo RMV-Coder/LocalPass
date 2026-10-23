@@ -2255,7 +2255,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "localpass-desktop"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "arboard",
  "chacha20poly1305",
@@ -2334,6 +2334,7 @@ dependencies = [
  "ssh-key",
  "thiserror 2.0.18",
  "windows-sys 0.59.0",
+ "winresource",
  "zeroize",
 ]
 
@@ -5845,6 +5846,15 @@ checksum = "cb5a765337c50e9ec252c2069be9bf91c7df47afb103b642ba3a53bf8101be97"
 dependencies = [
  "cfg-if",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "winresource"
+version = "0.1.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2bc6d36480b829272a5bdabf08e6dca8004761c1da7e35efef800540c66221b"
+dependencies = [
+ "version_check",
 ]
 
 [[package]]
