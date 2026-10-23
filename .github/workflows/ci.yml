@@ -117,6 +117,8 @@ jobs:
       # The desktop app is a separate workspace with its own lockfile, so the
       # core check never sees its dependencies (Tauri, the updater). It has its
       # own deny.toml, so Tauri's exceptions don't loosen the core's gates.
+      # cargo-deny finds that file next to the manifest; no --config needed
+      # (the action passes command-arguments as one argv entry anyway).
       # Same job, so it sits behind the same required status check; it runs
       # even when the core step fails, so one run reports both.
       - name: Desktop workspace
@@ -124,4 +126,3 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           manifest-path: apps/desktop/src-tauri/Cargo.toml
-          command-arguments: --config=apps/desktop/src-tauri/deny.toml
