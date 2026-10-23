@@ -10,6 +10,7 @@ edition = "2024"
 rust-version = "1.90"
 license = "MPL-2.0"
 repository = "https://github.com/localpass/localpass"
+publish = false  # application crate; uses path deps, not published to crates.io
 # `default-run` disambiguates `cargo run` (the app binary, not the lib).
 default-run = "localpass-desktop"
 
@@ -139,8 +140,17 @@ arboard = { version = "3", default-features = false }
 # --- against the public key compiled into tauri.conf.json (PRD §8 T10, "update
 # --- signature verification"), runs the installer, and relaunches. It is the
 # --- app's only outbound request and runs only when the user asks or opted
-# --- in. Desktop-only: mobile installs come from the APK / store. ---
-tauri-plugin-updater = "2"
+# --- in. Desktop-only: mobile installs come from the APK / store.
+# --- `default-features = false` drops the `zip` feature, keeping the default
+# --- TLS and proxy ones. On Windows it only unpacks a feed entry that is a .zip
+# --- (Tauri v1-style bundles), via `ZipArchive::extract`; our feed serves the
+# --- signed .msi / -setup.exe directly (desktop-release.yml), so it was dead
+# --- code carrying the `zip` crate and its extraction advisories. macOS's
+# --- .app.tar.gz install does not use the feature. ---
+tauri-plugin-updater = { version = "2", default-features = false, features = [
+  "rustls-tls",
+  "system-proxy",
+] }
 
 [target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
 tauri-plugin-barcode-scanner = "2"
