@@ -124,4 +124,4 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           manifest-path: apps/desktop/src-tauri/Cargo.toml
-          command-arguments: --config apps/desktop/src-tauri/deny.toml
+          command-arguments: --config=apps/desktop/src-tauri/deny.toml
