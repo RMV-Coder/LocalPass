@@ -60,7 +60,7 @@ pub(crate) fn map_sync_error(e: lp_sync::Error) -> Response {
 }
 
 /// Parse a hyphenated/simple UUID device-id string into a [`DeviceId`].
-fn parse_device_id(s: &str) -> Result<DeviceId, Response> {
+pub(crate) fn parse_device_id(s: &str) -> Result<DeviceId, Response> {
     let hex: String = s.chars().filter(|c| *c != '-').collect();
     if hex.len() != 32 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(usage("invalid device id (expected a hyphenated UUID)"));

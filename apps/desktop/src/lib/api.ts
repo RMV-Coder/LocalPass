@@ -31,6 +31,9 @@ import type {
   PeerView,
   PendingDeviceView,
   SessionState,
+  NearbyListeningView,
+  NearbyReportView,
+  NearbyStatusView,
   SyncAdoptView,
   SyncPullView,
   SyncPushView,
@@ -52,6 +55,8 @@ const PASSIVE = new Set([
   "agent_fill_secs",
   "is_mobile",
   "sync_dir_picker_available",
+  "nearby_status",
+  "nearby_address_qr_svg",
   "copy_secret",
   "preview_fingerprint",
   "generate_password",
@@ -342,6 +347,40 @@ export function syncDirPickerAvailable(): Promise<boolean> {
  *  `syncDirPickerAvailable()`; it rejects elsewhere. */
 export function pickSyncDir(): Promise<string | null> {
   return invoke<string | null>("pick_sync_dir");
+}
+
+// --- Sync with a nearby device (docs/specs/lan-transport.md) --------------
+// The service owns the socket, the handshake and the exchange; these only open
+// or close the listen window, dial an address, and report. Nothing secret.
+
+/** Open the listen window (a few minutes, one session). `peer` limits it to one
+ *  trusted device; `share` hands that device these vaults' keys (needs `peer`). */
+export function nearbyListen(peer: string | null, share: string[]): Promise<NearbyListeningView> {
+  return invoke<NearbyListeningView>("nearby_listen", { peer, share });
+}
+
+/** The listen window's state + the last outcome. Passive: safe to poll. */
+export function nearbyStatus(): Promise<NearbyStatusView> {
+  return invoke<NearbyStatusView>("nearby_status");
+}
+
+/** Close the listen window now. */
+export function nearbyStop(): Promise<void> {
+  return invoke<void>("nearby_stop");
+}
+
+/** Connect to a waiting device at `addr` (`IP` or `IP:PORT`) and sync. */
+export function nearbyConnect(
+  addr: string,
+  peer: string | null,
+  share: string[],
+): Promise<NearbyReportView> {
+  return invoke<NearbyReportView>("nearby_connect", { addr, peer, share });
+}
+
+/** The listen address as a QR (SVG markup) for the other device to scan. */
+export function nearbyAddressQrSvg(address: string): Promise<string> {
+  return invoke<string>("nearby_address_qr_svg", { address });
 }
 
 /** Enroll a vault for file-based sync under the shared folder `dir`. */

@@ -85,6 +85,16 @@ pub enum Error {
     /// on secret key material, so it is safe to describe.
     #[error("invalid TOTP input: {0}")]
     InvalidTotp(&'static str),
+
+    /// The Noise handshake or transport (`noise` module) was driven wrongly:
+    /// a message written out of turn, a record too large for one Noise message,
+    /// or a state that could not be set up.
+    ///
+    /// Depends only on the caller's own sequencing, never on received bytes or
+    /// key material — anything a peer sent that fails to authenticate is
+    /// [`Error::DecryptionFailed`] instead.
+    #[error("noise state error: {0}")]
+    NoiseState(&'static str),
 }
 
 /// Convenience alias for `Result<T, `[`Error`]`>`.

@@ -119,6 +119,73 @@ pub enum Error {
     /// not trusted, an identity string is malformed, etc.
     #[error("invalid operation: {0}")]
     Invalid(&'static str),
+
+    /// The LAN handshake refused the peer (`lan-transport.md` §4.4). Nothing
+    /// was read from it beyond the handshake.
+    #[error("nearby sync refused the other device: {0}")]
+    Refused(Refusal),
+
+    /// The LAN link broke the protocol after the handshake: a record failed
+    /// to authenticate, a message was oversize or unexpected, or the stream
+    /// ended inside a message (`lan-transport.md` §5).
+    #[error("nearby sync protocol error: {0}")]
+    Protocol(&'static str),
+
+    /// A LAN deadline passed: the handshake did not finish in time, or the
+    /// next record did not arrive (`lan-transport.md` §5.4).
+    #[error("nearby sync timed out: {0}")]
+    Timeout(&'static str),
+}
+
+/// Why a LAN handshake refused the other device (`lan-transport.md` §4.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// The peer's device id is not in `peer_devices`.
+    UntrustedPeer,
+    /// The peer is trusted but is not the device the caller asked for.
+    UnexpectedPeer,
+    /// The peer presented this device's own identity.
+    OwnIdentity,
+    /// The identity proof was malformed or did not verify under the pinned key.
+    BadProof,
+    /// The Noise handshake itself failed (wrong protocol version, altered
+    /// messages, or not a LocalPass device).
+    HandshakeFailed,
+    /// The peer closed the connection during the handshake — typically because
+    /// it does not trust this device.
+    PeerClosed,
+}
+
+impl Refusal {
+    /// A short, stable, secret-free label for `--json` / logs.
+    #[must_use]
+    pub fn code(self) -> &'static str {
+        match self {
+            Refusal::UntrustedPeer => "untrusted_peer",
+            Refusal::UnexpectedPeer => "unexpected_peer",
+            Refusal::OwnIdentity => "own_identity",
+            Refusal::BadProof => "bad_proof",
+            Refusal::HandshakeFailed => "handshake_failed",
+            Refusal::PeerClosed => "peer_closed",
+        }
+    }
+}
+
+impl core::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Refusal::UntrustedPeer => "it is not a trusted device (trust it in Devices first)",
+            Refusal::UnexpectedPeer => "it is not the device this sync was meant for",
+            Refusal::OwnIdentity => "it presented this device's own identity",
+            Refusal::BadProof => "its identity proof did not verify",
+            Refusal::HandshakeFailed => {
+                "the secure handshake failed (not a LocalPass device, or an incompatible version)"
+            }
+            Refusal::PeerClosed => {
+                "it closed the connection during the handshake (does it trust this device?)"
+            }
+        })
+    }
 }
 
 impl From<serde_json::Error> for Error {

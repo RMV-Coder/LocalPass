@@ -240,34 +240,122 @@ pub fn pull(
     let vault_id = vault.vault_id();
     let dir = open_dir(session, vault_id, factory)?;
 
-    // 1) Read every op from the channel (per-device, seq_lo order).
+    // 1) Read every op from the channel (per-device, seq_lo order), then
+    //    2-4) verify, merge and apply them (shared with the LAN transport).
     let channel_ops = dir.read_all_ops()?;
+    let ingested = ingest(session, vault, channel_ops)?;
+    let self_id = session.device_id();
 
-    // 2) Build the verifier's per-device chain state from local storage +
-    //    pinned peer keys, then filter to ops we do NOT already hold.
-    let state = build_chain_state(session, vault, vault_id, &channel_ops)?;
+    let mut report = PullReport {
+        applied: ingested.applied,
+        skipped: ingested.skipped,
+        pending: ingested.pending,
+        quarantines: ingested.quarantines,
+        ..Default::default()
+    };
+
+    // Fetch attachment blobs (sync-protocol.md §2/§7). Computed AFTER apply so
+    // newly-materialized rows are counted: referenced-but-missing = the blobs
+    // this vault needs. For each, read it from the sync dir; if present,
+    // store_attachment_blob VERIFIES blake3(bytes) == content_hash before
+    // writing (a mismatch is a surfaced ALARM, never silently accepted); if
+    // absent, it is PENDING (the peer has not shipped it yet — a later pull
+    // completes it, not an error). This runs every pull, so a blob that arrives
+    // after its metadata is picked up even when no new ops applied.
+    {
+        let referenced: BTreeSet<String> =
+            vault.referenced_attachment_hashes()?.into_iter().collect();
+        let local: BTreeSet<String> = vault.local_attachment_hashes()?.into_iter().collect();
+        for hash in referenced.difference(&local) {
+            match dir.read_attachment_blob(hash)? {
+                Some(bytes) => match vault.store_attachment_blob(hash, &bytes) {
+                    Ok(()) => report.attachments_fetched += 1,
+                    Err(lp_vault::Error::Invalid(_)) => {
+                        // Content-hash mismatch: a tampered/corrupt blob on the
+                        // untrusted channel. Surface it as an alarm (§2/§7); the
+                        // bad bytes are never stored (store_attachment_blob failed
+                        // closed), so the attachment stays pending, not poisoned.
+                        report.attachments_tampered.push(hash.clone());
+                    }
+                    Err(e) => return Err(Error::from(e)),
+                },
+                None => report.attachments_pending += 1,
+            }
+        }
+    }
+
+    // 5) A shared-VaultKey blob addressed to us? Import it (idempotent) and
+    //    clear the per-recipient blob.
+    if let Some(blob) = dir.read_key_blob(&self_id)? {
+        session.import_shared_vault_key(&vault_id, &blob)?;
+        dir.remove_key_blob(&self_id)?;
+        report.key_imported = true;
+    }
+
+    Ok(report)
+}
+
+/// The outcome of [`ingest`]: what the §5 verifier and the apply did with one
+/// batch of foreign ops.
+#[derive(Clone, Debug, Default)]
+pub struct IngestReport {
+    /// Number of foreign ops verified and applied.
+    pub applied: usize,
+    /// Number of ops skipped as idempotent re-reads (already held).
+    pub skipped: usize,
+    /// Number of ops held pending (an earlier op has not arrived yet).
+    pub pending: usize,
+    /// Quarantines (typed alarms) raised during verification.
+    pub quarantines: Vec<Quarantine>,
+}
+
+/// Verify a batch of foreign ops (§5), merge them with everything the vault
+/// already holds (§4), and apply the result in one transaction (§7.3 steps
+/// 2-3, vault-format.md §7).
+///
+/// This is the one ingest path for **every** transport: [`pull`] feeds it the
+/// ops read from the file channel, and the LAN exchange ([`crate::nearby`])
+/// feeds it the ops a peer sent over the link. A transport only frames the
+/// canonical op bytes; what is accepted, held pending, or quarantined is
+/// decided here, identically.
+///
+/// Ops this device authored are dropped first (a channel may echo them back;
+/// a device never re-ingests its own chain). Idempotent: ops already held are
+/// skipped.
+///
+/// # Errors
+///
+/// [`Error::Vault`] on a storage or decrypt failure. A verification alarm is
+/// **not** an error — it is reported in [`IngestReport::quarantines`] and halts
+/// only the offending device.
+pub fn ingest(session: &Session, vault: &Vault<'_>, ops: Vec<StoredOp>) -> Result<IngestReport> {
+    let vault_id = vault.vault_id();
+
+    // Build the verifier's per-device chain state from local storage + pinned
+    // peer keys.
+    let state = build_chain_state(session, vault, vault_id, &ops)?;
 
     // Drop this device's OWN ops from the incoming set (we authored them; the
     // channel may echo them back via store-and-forward). We only ingest peers.
     let self_id = session.device_id();
-    let incoming: Vec<StoredOp> = channel_ops
+    let incoming: Vec<StoredOp> = ops
         .into_iter()
         .filter(|o| o.device_id.as_bytes() != self_id.as_bytes())
         .collect();
 
-    // 3) Verify (§5).
+    // Verify (§5).
     let vreport = verify::verify_batch(&state, &incoming);
 
-    let mut report = PullReport {
+    let mut report = IngestReport {
         skipped: vreport.skipped_idempotent,
         pending: vreport.pending.len(),
         quarantines: vreport.quarantines.clone(),
         ..Default::default()
     };
 
-    // 4) Merge (§4) + apply (§7 atomicity). We fold the WHOLE op set — local
-    //    ops plus the newly-accepted foreign ops — so materialization is a pure
-    //    function of the complete set (convergence, §4.4).
+    // Merge (§4) + apply (§7 atomicity). We fold the WHOLE op set — local ops
+    // plus the newly-accepted foreign ops — so materialization is a pure
+    // function of the complete set (convergence, §4.4).
     if !vreport.accepted.is_empty() {
         let now = lp_vault::db::now_millis();
 
@@ -322,46 +410,22 @@ pub fn pull(
         vault.apply_foreign_ops(&mat)?;
         report.applied = vreport.accepted.len();
     }
-
-    // Fetch attachment blobs (sync-protocol.md §2/§7). Computed AFTER apply so
-    // newly-materialized rows are counted: referenced-but-missing = the blobs
-    // this vault needs. For each, read it from the sync dir; if present,
-    // store_attachment_blob VERIFIES blake3(bytes) == content_hash before
-    // writing (a mismatch is a surfaced ALARM, never silently accepted); if
-    // absent, it is PENDING (the peer has not shipped it yet — a later pull
-    // completes it, not an error). This runs every pull, so a blob that arrives
-    // after its metadata is picked up even when no new ops applied.
-    {
-        let referenced: BTreeSet<String> =
-            vault.referenced_attachment_hashes()?.into_iter().collect();
-        let local: BTreeSet<String> = vault.local_attachment_hashes()?.into_iter().collect();
-        for hash in referenced.difference(&local) {
-            match dir.read_attachment_blob(hash)? {
-                Some(bytes) => match vault.store_attachment_blob(hash, &bytes) {
-                    Ok(()) => report.attachments_fetched += 1,
-                    Err(lp_vault::Error::Invalid(_)) => {
-                        // Content-hash mismatch: a tampered/corrupt blob on the
-                        // untrusted channel. Surface it as an alarm (§2/§7); the
-                        // bad bytes are never stored (store_attachment_blob failed
-                        // closed), so the attachment stays pending, not poisoned.
-                        report.attachments_tampered.push(hash.clone());
-                    }
-                    Err(e) => return Err(Error::from(e)),
-                },
-                None => report.attachments_pending += 1,
-            }
-        }
-    }
-
-    // 5) A shared-VaultKey blob addressed to us? Import it (idempotent) and
-    //    clear the per-recipient blob.
-    if let Some(blob) = dir.read_key_blob(&self_id)? {
-        session.import_shared_vault_key(&vault_id, &blob)?;
-        dir.remove_key_blob(&self_id)?;
-        report.key_imported = true;
-    }
-
     Ok(report)
+}
+
+/// Per author device, the highest `seq` this vault holds — the "heads" a LAN
+/// peer compares to decide what to send (`lan-transport.md` §6.3).
+///
+/// # Errors
+///
+/// [`Error::Vault`] on a read failure.
+pub fn vault_heads(vault: &Vault<'_>) -> Result<BTreeMap<[u8; 16], u64>> {
+    let mut heads: BTreeMap<[u8; 16], u64> = BTreeMap::new();
+    for op in vault.stored_ops()? {
+        let e = heads.entry(*op.device_id.as_bytes()).or_insert(0);
+        *e = (*e).max(op.seq);
+    }
+    Ok(heads)
 }
 
 /// Build the §5 [`ChainState`]: for every device that appears in `incoming`
