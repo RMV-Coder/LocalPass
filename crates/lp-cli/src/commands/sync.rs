@@ -429,12 +429,38 @@ fn adopt(session: &lp_vault::Session, dir: &Path) -> Result<()> {
             vault_id.to_hyphenated()
         );
     }
+    if !report.untrusted_sender.is_empty() {
+        eprintln!(
+            "{} vault share(s) here are addressed to this device but come from a device it \
+             has not trusted, so they were not imported. If you shared them from one of your \
+             own devices, trust that device here (`localpass device trust`, comparing the \
+             fingerprint with that device's own screen) and run `sync adopt` again. If you \
+             did not share anything, ignore them: anyone who can write to this folder could \
+             have put them there.",
+            report.untrusted_sender.len()
+        );
+    }
     let adopted = report.adopted;
     if adopted.is_empty() {
         println!(
             "no shared vaults addressed to this device under {}",
             dir.display()
         );
+        if report.looks_like_vault_folder {
+            println!("  this looks like one vault's folder; pass the sync folder that contains it");
+        } else if report.vault_folders == 0 {
+            println!(
+                "  it holds no LocalPass data: use the same shared folder the sharing device \
+                 uses, and check that it has finished syncing to this device"
+            );
+        } else if report.untrusted_sender.is_empty() {
+            println!(
+                "  {} vault folder(s) here, {} share(s) for other devices; on the sharing \
+                 device, share to this one (`localpass device export-identity` shows its \
+                 fingerprint)",
+                report.vault_folders, report.shares_for_other_devices
+            );
+        }
         return Ok(());
     }
     let names = session.list_vaults().map_err(map_vault_error)?;

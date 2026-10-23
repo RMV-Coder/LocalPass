@@ -363,9 +363,12 @@ is fully untrusted (§5 protects it).
   covers `vault_id || recipient_device_id || sender_device_id ||` both
   length-prefixed sealed segments. On adopt the recipient **requires the sender
   to be a pinned peer** (or itself) and verifies the signature **before**
-  unsealing; an unsigned (old-format) share, an unpinned sender, or a bad
-  signature is refused and reported as an alarm, and the blob is left in place.
-  One refused share never blocks adopting the others. Sealing alone
+  unsealing; an unsigned (old-format) share or a bad signature is refused and
+  reported as an alarm. A share from an unpinned sender is refused the same way
+  but reported apart, not as an alarm: between a user's own devices the usual
+  cause is that only one of the two trusted the other, so the user is asked to
+  compare fingerprints and trust the sender, then adopt again. Either way the
+  blob is left in place, and one refused share never blocks adopting the others. Sealing alone
   authenticates only the recipient, so without this check anyone able to write
   the folder could plant a vault key of their choosing, or swap a genuine one
   before adoption.

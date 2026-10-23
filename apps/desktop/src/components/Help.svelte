@@ -70,6 +70,11 @@
       itself does not need to be trusted. You compare a fingerprint once when you pair.
     </p>
     <p class="body">
+      To give another device a vault: trust each device on the other one, set the vault up to
+      sync through a folder that both devices really share, then <strong>Share</strong> it on
+      this device and <strong>Receive</strong> it on the other, choosing that same folder.
+    </p>
+    <p class="body">
       <strong>Sync by QR code</strong> needs no network and no folder: one device plays a moving
       QR code, the other films it with its camera. It moves a few kilobytes a second, so on the
       receiving device show its own code first (the sender then sends only what is missing), and

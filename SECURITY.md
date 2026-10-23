@@ -200,6 +200,24 @@ in [`deny.toml`](deny.toml)):
   notice with no maintained release, not a vulnerability; it will drop when
   `age` updates its i18n stack.
 
+The desktop GUI is a separate cargo workspace, scanned in the same CI job
+against its own
+[`apps/desktop/src-tauri/deny.toml`](apps/desktop/src-tauri/deny.toml). Beyond
+RUSTSEC-2023-0071 above, which it inherits through `lp-daemon`, it accepts
+only "unmaintained" notices from Tauri's own dependency tree, none of them a
+vulnerability:
+
+- **`unic-*` Unicode tables** (RUSTSEC-2025-0075, -0080, -0081, -0098, -0100),
+  via `tauri-utils` → `urlpattern`. Tauri uses them only to match a
+  capability's remote-URL patterns, and LocalPass grants no remote
+  capabilities.
+- **`proc-macro-error`** (RUSTSEC-2024-0370), a compile-time proc-macro in the
+  gtk-rs bindings of Tauri's Linux build.
+
+The in-app updater is built without its `zip` feature (the update feed serves
+signed `.msi`/`.exe` installers directly), so the `zip` crate and its
+extraction advisories are not in the desktop build at all.
+
 ---
 
 ## External audit status

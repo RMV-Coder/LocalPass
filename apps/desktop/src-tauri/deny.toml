@@ -1,0 +1,90 @@
+# cargo-deny configuration for the desktop GUI workspace (PRD §8 T11).
+#
+# The GUI is a separate cargo workspace (see Cargo.toml) with its own lockfile,
+# so it gets its own config rather than sharing the root deny.toml: the
+# exceptions below come from Tauri's dependency tree, and keeping them here
+# means none of them loosen the gates on the AGPL core. The policy itself
+# (yanked crates, the license allowlist, bans, sources) mirrors the root
+# deny.toml; change both together. CI runs this from the repo root:
+#
+#   cargo deny --manifest-path apps/desktop/src-tauri/Cargo.toml check \
+#     --config apps/desktop/src-tauri/deny.toml
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # RUSTSEC-2023-0071 — "Marvin Attack" in `rsa`. Reached through the core's
+    # `lp-daemon` → `ssh-key` path dependency, and accepted for the same reason
+    # as in the root deny.toml (full rationale there): `rsa` is used only to
+    # SIGN in the local SSH agent, never to decrypt, so the network decryption
+    # timing oracle does not apply.
+    "RUSTSEC-2023-0071",
+    # Unmaintained-crate advisories (NOT vulnerabilities), all deep in Tauri's
+    # own tree with no maintained release to move to as of 2026-10-22.
+    #
+    # The `unic-*` Unicode tables, via `tauri-utils` → `urlpattern` 0.3.
+    # Tauri uses urlpattern only to match a capability's `remote.urls`
+    # patterns; LocalPass grants no remote capabilities (capabilities/*.json),
+    # so it parses nothing at runtime, and never untrusted input. tauri-utils
+    # 2.9.3 is the latest stable release; drop these when Tauri moves to a
+    # newer urlpattern (0.4+ uses icu_properties instead).
+    "RUSTSEC-2025-0075", # unic-char-range
+    "RUSTSEC-2025-0080", # unic-common
+    "RUSTSEC-2025-0081", # unic-char-property
+    "RUSTSEC-2025-0098", # unic-ucd-version
+    "RUSTSEC-2025-0100", # unic-ucd-ident
+    # `proc-macro-error`, via `glib-macros` 0.18 (gtk-rs, pulled by Tauri's
+    # Linux webview stack). A compile-time proc-macro for a Linux build we do
+    # not ship; it produces no runtime code. Drop it when Tauri moves off gtk
+    # 0.18.
+    "RUSTSEC-2024-0370",
+]
+
+[licenses]
+version = 2
+# Our own crates (this GUI, MPL-2.0, and the AGPL core it reaches through path
+# deps) are unpublished first-party code; skip them so the allowlist governs
+# only external dependencies.
+private = { ignore = true }
+# Same allowlist as the root deny.toml.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "Unicode-3.0",
+]
+# Two more permissive licenses, scoped to the crates that use them rather than
+# added to the allowlist.
+exceptions = [
+    # Boost Software License 1.0: permissive and GPL-compatible, and requires
+    # the notice only in source distributions. The Windows clipboard crates
+    # under `arboard` (secret copies kept out of clipboard history, T9).
+    { allow = ["BSL-1.0"], crate = "clipboard-win" },
+    { allow = ["BSL-1.0"], crate = "error-code" },
+    # Community Data License Agreement – Permissive 2.0: the license of
+    # Mozilla's root CA certificate data. Permissive; its only condition is
+    # to pass the license text along. Via `reqwest` → `rustls-platform-verifier`.
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-root-certs" },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies on the core crates have no version requirement, which
+# cargo-deny otherwise reports as a wildcard. This applies only because the
+# crate is `publish = false`; external wildcard requirements remain denied.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

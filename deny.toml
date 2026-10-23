@@ -1,5 +1,8 @@
 # cargo-deny configuration — supply-chain gates (PRD §8 T11).
 # CI fails on security advisories, unknown sources, and disallowed licenses.
+# This covers the core workspace. The desktop GUI is a separate workspace with
+# its own apps/desktop/src-tauri/deny.toml, which mirrors this policy plus
+# exceptions for Tauri's dependency tree; change both together.
 
 [graph]
 all-features = true
