@@ -3,7 +3,8 @@
 # attach them under a `desktop-v<version>` tag (the tag prefix is historical;
 # the release covers every platform the app ships on). With the updater key in
 # the repo secrets it also publishes the signed `latest.json` feed the in-app
-# "Check for updates" reads.
+# "Check for updates" reads, and with SignPath configured the Windows installers
+# are code signed first (CODE_SIGNING.md).
 #
 # Trigger model: `npm run bundle` (or bundle:minor / bundle:major) bumps the
 # version locally; the bump merges through a PR like any other change; this
@@ -22,6 +23,8 @@ on:
 
 permissions:
   contents: write
+  # SignPath's action reads the uploaded (unsigned) workflow artifact.
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -92,6 +95,121 @@ jobs:
           }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # --- Windows code signing (CODE_SIGNING.md) ----------------------------
+      # With SignPath configured, the installers are signed before release:
+      # the MSI is deep-signed (localpass-desktop.exe and localpass-daemon.exe
+      # inside it, then the MSI itself) and the NSIS installer is signed as a
+      # whole (.signpath/artifact-configurations/windows-installers.xml). Every
+      # request waits for a person to approve it in SignPath, a SignPath
+      # Foundation rule, so this job pauses until then (up to two hours).
+      # Without the configuration the release is unsigned, exactly as before.
+      #   secret   SIGNPATH_API_TOKEN            (submitter token)
+      #   variable SIGNPATH_ORGANIZATION_ID
+      #   variable SIGNPATH_PROJECT_SLUG          (default: LocalPass)
+      #   variable SIGNPATH_SIGNING_POLICY_SLUG   (default: release-signing)
+      - name: Check the code-signing setup
+        id: codesign
+        if: steps.gate.outputs.new == 'true'
+        shell: pwsh
+        env:
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+        run: |
+          if ($env:SIGNPATH_API_TOKEN -and $env:SIGNPATH_ORGANIZATION_ID) {
+            "enabled=true" >> $env:GITHUB_OUTPUT
+          } else {
+            "enabled=false" >> $env:GITHUB_OUTPUT
+            Write-Host "SignPath is not configured: the Windows installers stay unsigned"
+          }
+
+      - name: Stage the unsigned installers
+        if: steps.codesign.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          $bundle = "apps/desktop/src-tauri/target/release/bundle"
+          New-Item -ItemType Directory -Force signing/unsigned | Out-Null
+          Copy-Item "$bundle/msi/*.msi", "$bundle/nsis/*-setup.exe" signing/unsigned/
+          $files = @(Get-ChildItem signing/unsigned -File)
+          if ($files.Count -ne 2) { throw "expected one MSI and one NSIS installer, found $($files.Count) files" }
+          $files | Format-Table Name, Length
+
+      - name: Upload the unsigned installers for signing
+        id: unsigned
+        if: steps.codesign.outputs.enabled == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-installers
+          path: signing/unsigned/
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Sign with SignPath (waits for approval)
+        if: steps.codesign.outputs.enabled == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'LocalPass' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
+          artifact-configuration-slug: windows-installers
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 7200
+          output-artifact-directory: signing/signed
+          parameters: |
+            version: ${{ toJSON(steps.version.outputs.version) }}
+
+      # Verify before anything is published: both installers, and the two
+      # executables inside the MSI (unpacked with an administrative install),
+      # must carry a valid Authenticode signature. Then the signed files
+      # replace the unsigned ones, and the updater's minisign signatures are
+      # made again over the SIGNED bytes (code signing changed the files, so
+      # the ones the build wrote would no longer verify).
+      - name: Verify and use the signed installers
+        if: steps.codesign.outputs.enabled == 'true'
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          function Assert-Signed($path) {
+            $sig = Get-AuthenticodeSignature $path
+            if ($sig.Status -ne 'Valid') { throw "$(Split-Path $path -Leaf): signature status is $($sig.Status)" }
+            Write-Host "$(Split-Path $path -Leaf): signed by $($sig.SignerCertificate.Subject)"
+          }
+          $bundle = (Resolve-Path "apps/desktop/src-tauri/target/release/bundle").Path
+          $signed = @(Get-ChildItem signing/signed -Recurse -File | Where-Object { $_.Extension -in '.msi', '.exe' })
+          if ($signed.Count -ne 2) { throw "expected two signed installers back from SignPath, got $($signed.Count)" }
+
+          $placed = @()
+          foreach ($f in $signed) {
+            Assert-Signed $f.FullName
+            $dir = if ($f.Extension -eq '.msi') { "$bundle/msi" } else { "$bundle/nsis" }
+            $dest = Join-Path $dir $f.Name
+            if (-not (Test-Path $dest)) { throw "SignPath returned $($f.Name), which the build did not produce" }
+            Copy-Item $f.FullName $dest -Force
+            $placed += $dest
+          }
+
+          $msi = @($placed | Where-Object { $_ -like '*.msi' })[0]
+          $unpacked = Join-Path $env:RUNNER_TEMP "msi-contents"
+          $p = Start-Process msiexec.exe -ArgumentList "/a `"$msi`" /qn TARGETDIR=`"$unpacked`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "could not unpack the signed MSI (msiexec exit $($p.ExitCode))" }
+          foreach ($exe in 'localpass-desktop.exe', 'localpass-daemon.exe') {
+            $found = @(Get-ChildItem $unpacked -Recurse -File -Filter $exe)
+            if ($found.Count -ne 1) { throw "expected one $exe inside the MSI, found $($found.Count)" }
+            Assert-Signed $found[0].FullName
+          }
+
+          if ($env:TAURI_SIGNING_PRIVATE_KEY) {
+            Push-Location apps/desktop
+            foreach ($f in $placed) {
+              npx tauri signer sign "$f"
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+            Pop-Location
+          }
+
       - name: Tag and create the release
         if: steps.gate.outputs.new == 'true'
         shell: pwsh
@@ -107,9 +225,15 @@ jobs:
           $assets = $msi + $nsis
           if ($assets.Count -eq 0) { throw "no installer artifacts found under $bundle" }
           $sigs = @($assets | ForEach-Object { "$($_.FullName).sig" } | Where-Object { Test-Path $_ })
+          $extraNotes = @()
+          if ("${{ steps.codesign.outputs.enabled }}" -eq "true") {
+            # The download page links the code signing policy (SignPath
+            # Foundation requirement); prepended to the generated notes.
+            $extraNotes = @("--notes", "**Code signing policy:** the Windows installers are signed. Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/). See [CODE_SIGNING.md](https://github.com/${{ github.repository }}/blob/main/CODE_SIGNING.md).")
+          }
           gh release create $tag @($assets.FullName + $sigs) `
             --title "LocalPass v${{ steps.version.outputs.version }}" `
-            --generate-notes
+            --generate-notes @extraNotes
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           # The in-app updater's feed (releases/latest/download/latest.json).

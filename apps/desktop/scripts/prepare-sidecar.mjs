@@ -10,7 +10,7 @@
 // Run via `npm run bundle` (which chains `tauri build` after this).
 
 import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdirSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -33,11 +33,18 @@ const triple = hostLine.slice("host: ".length).trim();
 const isWindows = triple.includes("windows");
 const exeExt = isWindows ? ".exe" : "";
 
-// 2) Build the daemon in release from the (excluded) core workspace.
-console.log(`[sidecar] building localpass-daemon (release) for ${triple} …`);
+// 2) Build the daemon in release from the (excluded) core workspace. The app
+//    version goes in as LOCALPASS_PRODUCT_VERSION, so on Windows the daemon
+//    carries the same product name + version as the app (lp-daemon/build.rs):
+//    release signing only signs files whose metadata matches the release.
+const appVersion = JSON.parse(
+  readFileSync(join(desktopDir, "src-tauri", "tauri.conf.json"), "utf8"),
+).version;
+console.log(`[sidecar] building localpass-daemon ${appVersion} (release) for ${triple} …`);
 run("cargo", ["build", "-p", "lp-daemon", "--release"], {
   cwd: repoRoot,
   stdio: "inherit",
+  env: { ...process.env, LOCALPASS_PRODUCT_VERSION: appVersion },
 });
 
 // 3) Stage it as the Tauri sidecar source (triple-suffixed).

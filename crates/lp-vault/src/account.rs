@@ -1707,6 +1707,42 @@ impl Session {
         )
     }
 
+    /// Record an [`AuditKind::NearbySync`] (`lan-transport.md` §10): a LAN sync
+    /// session with `peer_device_id` completed.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sqlite`] / [`Error::Invalid`] on failure.
+    pub fn record_nearby_sync(&self, peer_device_id: &DeviceId) -> Result<()> {
+        self.record_audit(
+            AuditKind::NearbySync {
+                peer_device_id: *peer_device_id,
+            },
+            None,
+        )
+    }
+
+    /// Sign the LAN sync handshake's identity proof with this device's Ed25519
+    /// identity key (`docs/specs/lan-transport.md` §3).
+    ///
+    /// The context is fixed to [`lp_crypto::sign::CONTEXT_LAN_HANDSHAKE`], so
+    /// this can only ever produce a handshake proof: the framing in `lp-crypto`
+    /// makes it impossible for the signature to verify as an op or a vault-key
+    /// share. The signing key itself never leaves the session. `message` is the
+    /// proof body `lp-sync` builds (role byte, handshake hash, the
+    /// per-connection Noise static key); it carries nothing secret.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Crypto`] if signing fails (it cannot with a fixed, valid
+    /// context).
+    pub fn sign_lan_handshake(&self, message: &[u8]) -> Result<[u8; 64]> {
+        self.device
+            .signing
+            .sign(lp_crypto::sign::CONTEXT_LAN_HANDSHAKE, message)
+            .map_err(Error::from_crypto)
+    }
+
     /// The full audit log for **this device**, oldest first (ascending `seq`).
     ///
     /// # Errors

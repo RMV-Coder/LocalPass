@@ -63,6 +63,7 @@
 //! | Symmetric AEAD | XChaCha20-Poly1305 (`chacha20poly1305`) |
 //! | Asymmetric sealing | X25519 (`x25519-dalek`) + XChaCha20-Poly1305 |
 //! | Signatures | Ed25519 (`ed25519-dalek`) |
+//! | LAN sync transport | Noise `XX_25519_ChaChaPoly_SHA256` (`snow`) — see [`noise`] |
 //! | TOTP (RFC 6238) | HMAC-SHA1/256/512 (`hmac` + `sha1`/`sha2`) — see [`totp`] |
 //! | RNG | OS CSPRNG only (`getrandom` / `OsRng`) |
 //!
@@ -77,6 +78,7 @@ pub mod error;
 pub mod hash;
 pub mod kdf;
 pub mod keys;
+pub mod noise;
 pub mod params;
 pub mod seal;
 pub mod sign;
@@ -98,6 +100,7 @@ pub use keys::{
     SymmetricKey, VaultKey,
 };
 pub use muk::derive_master_unlock_key;
+pub use noise::{NoiseHandshake, NoiseTransport};
 pub use params::KdfParams;
 pub use seal::{PublicSealingKey, SealingKeyPair, seal_for, seal_key_for};
 pub use sign::{SigningKeyPair, VerifyingKey};

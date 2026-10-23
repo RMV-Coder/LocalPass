@@ -1310,6 +1310,122 @@ pub fn list_pending_devices(dir: String) -> Result<Vec<PendingDeviceView>, Strin
     }
 }
 
+// --- Nearby sync (`docs/specs/lan-transport.md`) ------------------------------
+//
+// Sync directly with a trusted device on the same Wi-Fi or Tailscale network:
+// no shared folder. The service owns the socket, the handshake and the
+// exchange; these commands only open/close the listen window, dial an address
+// the user typed or scanned, and report what happened. Nothing secret crosses.
+
+/// Open the "Sync with a nearby device" window: the service listens for one
+/// session with a trusted device, for a few minutes. `peer` limits it to one
+/// trusted device; `share` hands that device the named vaults' keys in the same
+/// session (and needs `peer`). Returns the address to show. While an AI agent
+/// is connected this needs the master password first.
+#[tauri::command]
+pub fn nearby_listen(
+    peer: Option<String>,
+    share: Vec<String>,
+) -> Result<model::NearbyListeningView, String> {
+    let profile = daemon::profile_string()?;
+    let resp = daemon::call(&Request::NearbyListen {
+        profile,
+        bind: None,
+        port: None,
+        timeout_secs: None,
+        peer,
+        share,
+    })
+    .map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    match resp {
+        Response::NearbyListening {
+            addresses,
+            port,
+            expires_in_secs,
+        } => Ok(model::NearbyListeningView {
+            addresses,
+            port,
+            expires_in_secs,
+        }),
+        other => Err(format!("unexpected daemon response: {}", other.kind())),
+    }
+}
+
+/// The listen window's state and the last outcome. A passive read: it never
+/// resets the idle auto-lock, so the screen may poll it while the window is
+/// open (LESSONS 2026-10-21).
+#[tauri::command]
+pub fn nearby_status() -> Result<model::NearbyStatusView, String> {
+    let profile = daemon::profile_string()?;
+    let resp = daemon::call(&Request::NearbyStatus { profile }).map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    match resp {
+        Response::NearbyStatus {
+            listening,
+            addresses,
+            port,
+            expires_in_secs,
+            last,
+        } => Ok(model::NearbyStatusView {
+            listening,
+            addresses,
+            port,
+            expires_in_secs,
+            last: last.map(model::nearby_outcome_view),
+        }),
+        other => Err(format!("unexpected daemon response: {}", other.kind())),
+    }
+}
+
+/// Close the listen window now.
+#[tauri::command]
+pub fn nearby_stop() -> Result<(), String> {
+    let profile = daemon::profile_string()?;
+    let resp = daemon::call(&Request::NearbyStop { profile }).map_err(|e| e.to_string())?;
+    check_response_error(&resp)
+}
+
+/// Connect to a device that is waiting at `addr` (an IP, optionally `:port`)
+/// and sync. Async and off the main thread: the session runs until both sides
+/// are done, which can take a while for a first sync.
+#[tauri::command]
+pub async fn nearby_connect(
+    addr: String,
+    peer: Option<String>,
+    share: Vec<String>,
+) -> Result<model::NearbyReportView, String> {
+    let profile = daemon::profile_string()?;
+    let request = Request::NearbyConnect {
+        profile,
+        addr,
+        peer,
+        share,
+    };
+    let resp = blocking(move || daemon::call(&request))
+        .await?
+        .map_err(|e| e.to_string())?;
+    check_response_error(&resp)?;
+    match resp {
+        Response::NearbySynced { report } => Ok(model::nearby_report_view(report)),
+        other => Err(format!("unexpected daemon response: {}", other.kind())),
+    }
+}
+
+/// The QR payload prefix for a listen address, so a scan can tell it apart
+/// from a device-identity QR (`LPDEV1-…`).
+pub const NEARBY_QR_PREFIX: &str = "LPNEAR1-";
+
+/// Render a listen address as a QR code for the other device to scan
+/// (`lan-transport.md` §8.2). Only a local-network `IP:port` is encoded: the
+/// command refuses anything else, so it cannot be used to render arbitrary
+/// text. The QR grants nothing — the handshake authenticates whoever answers.
+#[tauri::command]
+pub fn nearby_address_qr_svg(address: String) -> Result<String, String> {
+    let addr = lp_daemon::nearby::parse_peer_address(&address)?;
+    render_qr_svg(&format!("{NEARBY_QR_PREFIX}{addr}"))
+}
+
 // --- Attachments ---------------------------------------------------------
 //
 // PATH-BASED, no blob bytes cross the command boundary. `add_attachment` passes
@@ -1480,6 +1596,16 @@ mod tests {
             .is_err()
         );
         assert!(check_response_error(&Response::Pong).is_ok());
+    }
+
+    #[test]
+    fn the_address_qr_only_encodes_a_local_network_address() {
+        let svg = nearby_address_qr_svg("192.168.1.20:47823".into()).unwrap();
+        assert!(svg.contains("<svg"));
+        assert!(nearby_address_qr_svg("100.101.102.103".into()).is_ok());
+        assert!(nearby_address_qr_svg("8.8.8.8:47823".into()).is_err());
+        assert!(nearby_address_qr_svg("laptop.local".into()).is_err());
+        assert!(nearby_address_qr_svg("LPDEV1-abc".into()).is_err());
     }
 
     #[test]

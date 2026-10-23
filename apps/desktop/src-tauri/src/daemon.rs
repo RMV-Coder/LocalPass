@@ -279,12 +279,24 @@ mod backend {
     /// Dispatch a request against the in-process engine — the SAME
     /// `lp_daemon::engine::handle` the daemon uses. No IPC, no separate process,
     /// no duplicated logic. Never fails at the transport level.
+    ///
+    /// Nearby sync (`lan-transport.md` §9.1) returns network work the engine
+    /// must not run under the state mutex. Exactly as the daemon's server does,
+    /// it runs here **after** the lock is released: a listen window starts its
+    /// own thread, and a dial runs on this (command) thread, borrowing the
+    /// session back one step at a time. Dropping the job instead would leave a
+    /// dial answering an error and a listen window that never serves.
     pub fn call(request: &Request) -> Result<Response, DaemonError> {
-        let mut guard = state().lock().unwrap_or_else(PoisonError::into_inner);
-        guard.maybe_autolock();
-        Ok(super::surface_presence(
-            engine::handle(&mut guard, request.clone()).response,
-        ))
+        let handled = {
+            let mut guard = state().lock().unwrap_or_else(PoisonError::into_inner);
+            guard.maybe_autolock();
+            engine::handle(&mut guard, request.clone())
+        };
+        let response = match handled.deferred {
+            Some(job) => lp_daemon::nearby::run_deferred(state(), job).unwrap_or(handled.response),
+            None => handled.response,
+        };
+        Ok(super::surface_presence(response))
     }
 }
 
@@ -334,12 +346,169 @@ mod inprocess_tests {
             resp.kind()
         );
 
-        let resp = call(&Request::ListVaults { profile }).unwrap();
+        let resp = call(&Request::ListVaults {
+            profile: profile.clone(),
+        })
+        .unwrap();
         match resp {
             Response::Vaults { vaults } => assert!(
                 vaults.iter().any(|(_, name)| name == "personal"),
                 "default personal vault present: {vaults:?}"
             ),
+            other => panic!("expected Vaults, got {}", other.kind()),
+        }
+
+        // Same test (the in-process state is one process-wide static): nearby
+        // sync must work on this backend too. `call` has to run the engine's
+        // deferred job after releasing its lock; if it dropped it, the window
+        // would report closed at once and nobody could connect.
+        nearby_sync_runs_in_process(&profile);
+    }
+
+    /// Open a listen window through `call`, then have a second device — a plain
+    /// engine `State`, as the desktop daemon would hold it — dial in, share a
+    /// vault, and sync.
+    fn nearby_sync_runs_in_process(profile: &str) {
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        use lp_daemon::engine::{self, State};
+
+        let identity = |resp: Response| match resp {
+            Response::DeviceIdentity {
+                device_id,
+                identity_string,
+                fingerprint,
+            } => (device_id, identity_string, fingerprint),
+            other => panic!("expected DeviceIdentity, got {}", other.kind()),
+        };
+
+        // Device B: its own profile and state, outside the static.
+        let b_dir = tempfile::tempdir().unwrap();
+        let b_profile = b_dir.path().display().to_string();
+        let b = Arc::new(Mutex::new(State::new(
+            b_dir.path().to_path_buf(),
+            Duration::ZERO,
+        )));
+        let on_b = |req: Request| -> Response {
+            let handled = engine::handle(&mut b.lock().unwrap(), req);
+            match handled.deferred {
+                Some(job) => {
+                    lp_daemon::nearby::run_deferred(Arc::clone(&b), job).unwrap_or(handled.response)
+                }
+                None => handled.response,
+            }
+        };
+        assert!(matches!(
+            on_b(Request::CreateAccount {
+                profile: b_profile.clone(),
+                password: "b-device-password".into(),
+            }),
+            Response::AccountCreated { .. }
+        ));
+
+        // Pair both ways through the real ceremony.
+        let (a_id, a_ident, a_fp) = identity(
+            call(&Request::ExportIdentity {
+                profile: profile.to_string(),
+            })
+            .unwrap(),
+        );
+        let (_b_id, b_ident, b_fp) = identity(on_b(Request::ExportIdentity {
+            profile: b_profile.clone(),
+        }));
+        for (pairing, trust) in [
+            (
+                call(&Request::SetPairingMode {
+                    profile: profile.to_string(),
+                    enabled: true,
+                })
+                .unwrap(),
+                call(&Request::TrustDevice {
+                    profile: profile.to_string(),
+                    identity_string: b_ident,
+                    expected_fingerprint: b_fp,
+                    label: Some("b".into()),
+                })
+                .unwrap(),
+            ),
+            (
+                on_b(Request::SetPairingMode {
+                    profile: b_profile.clone(),
+                    enabled: true,
+                }),
+                on_b(Request::TrustDevice {
+                    profile: b_profile.clone(),
+                    identity_string: a_ident,
+                    expected_fingerprint: a_fp,
+                    label: Some("phone".into()),
+                }),
+            ),
+        ] {
+            assert!(matches!(pairing, Response::Ok { .. }), "{}", pairing.kind());
+            assert!(
+                matches!(trust, Response::PeerTrusted { .. }),
+                "{}",
+                trust.kind()
+            );
+        }
+
+        // A (in-process) opens the window on loopback.
+        let port = match call(&Request::NearbyListen {
+            profile: profile.to_string(),
+            bind: Some("127.0.0.1".into()),
+            port: Some(0),
+            timeout_secs: Some(60),
+            peer: None,
+            share: Vec::new(),
+        })
+        .unwrap()
+        {
+            Response::NearbyListening { port, .. } => port,
+            other => panic!("expected NearbyListening, got {}", other.kind()),
+        };
+        let status = || match call(&Request::NearbyStatus {
+            profile: profile.to_string(),
+        })
+        .unwrap()
+        {
+            Response::NearbyStatus {
+                listening, last, ..
+            } => (listening, last),
+            other => panic!("expected NearbyStatus, got {}", other.kind()),
+        };
+        assert!(status().0, "the window must be served, not dropped");
+
+        // B dials and shares its default vault with A.
+        let r = on_b(Request::NearbyConnect {
+            profile: b_profile.clone(),
+            addr: format!("127.0.0.1:{port}"),
+            peer: Some(a_id),
+            share: vec!["personal".into()],
+        });
+        let Response::NearbySynced { report } = r else {
+            panic!("expected NearbySynced, got {}", r.kind())
+        };
+        assert_eq!(report.shared.len(), 1);
+        assert!(report.alarms.is_empty(), "{:?}", report.alarms);
+
+        // A's window closed after its one session, having adopted B's vault.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let outcome = loop {
+            if let (false, Some(last)) = status() {
+                break last;
+            }
+            assert!(Instant::now() < deadline, "the window never closed");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert_eq!(outcome.result, "synced", "{:?}", outcome.error);
+        assert_eq!(outcome.report.unwrap().adopted.len(), 1);
+        match call(&Request::ListVaults {
+            profile: profile.to_string(),
+        })
+        .unwrap()
+        {
+            Response::Vaults { vaults } => assert_eq!(vaults.len(), 2, "{vaults:?}"),
             other => panic!("expected Vaults, got {}", other.kind()),
         }
     }

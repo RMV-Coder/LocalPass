@@ -168,6 +168,10 @@ pub struct State {
     /// How long a fresh grant lasts. [`PRESENCE_GRANT_SECS`] in production; a
     /// test shortens it with [`set_presence_ttl`](Self::set_presence_ttl).
     presence_ttl: Duration,
+    /// The "Sync with a nearby device" listen window, if open, and the last
+    /// nearby outcome (`lan-transport.md` §7.1). In memory only; closed on
+    /// every lock.
+    nearby: crate::nearby::NearbyState,
 }
 
 impl State {
@@ -209,6 +213,7 @@ impl State {
             presence_grants: Vec::new(),
             presence_failures: 0,
             presence_ttl: Duration::from_secs(PRESENCE_GRANT_SECS),
+            nearby: crate::nearby::NearbyState::default(),
         }
     }
 
@@ -293,6 +298,9 @@ impl State {
         self.pending_fill = None;
         self.presence_grants.clear();
         self.presence_failures = 0;
+        // A locked vault cannot authenticate a peer, so the nearby listen
+        // window closes with it (`lan-transport.md` §7.1).
+        self.nearby.stop_listening();
     }
 
     /// Whether any AI-agent session is open, so consent and change requests
@@ -728,6 +736,11 @@ pub struct Handled {
     /// the server must call [`State::end_agent_session`] when the connection
     /// closes.
     pub began_agent_session: bool,
+    /// Network work the request needs that must not run under the state mutex
+    /// (the nearby-sync listener or dialer). The host runs it with
+    /// [`crate::nearby::run_deferred`] after releasing the lock; a host that
+    /// drops it leaves `response` — an error for a dial — as the answer.
+    pub deferred: Option<crate::nearby::Deferred>,
 }
 
 impl Handled {
@@ -736,6 +749,7 @@ impl Handled {
             response,
             shutdown: false,
             began_agent_session: false,
+            deferred: None,
         }
     }
 }
@@ -791,6 +805,7 @@ pub fn handle_with(state: &mut State, request: Request, ctx: &RequestContext) ->
                 },
                 shutdown: true,
                 began_agent_session: false,
+                deferred: None,
             };
         }
         _ => {}
@@ -874,6 +889,7 @@ pub fn handle_with(state: &mut State, request: Request, ctx: &RequestContext) ->
                 },
                 shutdown: false,
                 began_agent_session: true,
+                deferred: None,
             }
         }
 
@@ -1290,6 +1306,44 @@ pub fn handle_with(state: &mut State, request: Request, ctx: &RequestContext) ->
             })
         }
 
+        // --- Nearby sync (`lan-transport.md` §7, §9) ------------------------
+        // Validated here, under the mutex; the listener / dialer runs as a
+        // deferred job with the mutex released.
+        Request::NearbyListen {
+            bind,
+            port,
+            timeout_secs,
+            peer,
+            share,
+            ..
+        } => handle_nearby_listen(
+            state,
+            bind.as_deref(),
+            port,
+            timeout_secs,
+            peer.as_deref(),
+            &share,
+        ),
+
+        Request::NearbyConnect {
+            addr, peer, share, ..
+        } => handle_nearby_connect(state, &addr, peer.as_deref(), &share),
+
+        Request::NearbyStatus { .. } => {
+            if state.is_unlocked() {
+                Handled::reply(state.nearby.status())
+            } else {
+                Handled::reply(Response::Locked)
+            }
+        }
+
+        Request::NearbyStop { .. } => {
+            state.nearby.stop_listening();
+            Handled::reply(Response::Ok {
+                message: Some("stopped listening for a nearby device".into()),
+            })
+        }
+
         // --- Attachments (path-based; no blob bytes cross the pipe) ---------
         Request::AddAttachment {
             vault,
@@ -1441,6 +1495,8 @@ fn audits_denial(request: &Request) -> bool {
             // whole exchange IS audited, which is the record that matters.
             | Request::TakeFillIntent { .. }
             | Request::PollFillOutcome { .. }
+            // A UI polls the nearby window's status the same way.
+            | Request::NearbyStatus { .. }
     )
 }
 
@@ -1497,6 +1553,9 @@ fn counts_as_activity(request: &Request) -> bool {
         // keep-alive `Status` would be. The `ArmFillIntent` and
         // `ReportFillOutcome` around them are real work and do count.
         Request::TakeFillIntent { .. } | Request::PollFillOutcome { .. } => false,
+        // Watching the nearby window is an observation too; and the window
+        // itself never holds the vault open (`lan-transport.md` §7.1).
+        Request::NearbyStatus { .. } => false,
         // Registering is bookkeeping, not a person using the vault.
         Request::BeginAgentSession { .. } => false,
         _ => true,
@@ -1576,6 +1635,143 @@ fn handle_set_pairing_mode(state: &mut State, enabled: bool) -> Handled {
     // The `&Session` borrow has ended — now flip the pairing-mode window.
     state.set_pairing_mode(enabled);
     Handled::reply(Response::Ok { message: None })
+}
+
+// --- Nearby sync (`lan-transport.md`) --------------------------------------
+
+/// Resolve a nearby request's `peer` / `share` into session options: the peer
+/// must be pinned, every vault must exist, and sharing needs the peer named.
+fn nearby_options(
+    session: &Session,
+    peer: Option<&str>,
+    share: &[String],
+) -> Result<lp_sync::nearby::SessionOptions, Response> {
+    let expected_peer = match peer {
+        None => None,
+        Some(p) => {
+            let id = crate::sync::parse_device_id(p)?;
+            if session.peer_device(&id).map_err(vault_err)?.is_none() {
+                return Err(usage(
+                    "that device is not trusted on this device (trust it in Devices first)",
+                ));
+            }
+            Some(id)
+        }
+    };
+    let share = share
+        .iter()
+        .map(|v| resolve_vault_id(session, v))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !share.is_empty() && expected_peer.is_none() {
+        return Err(usage(
+            "sharing a vault over the local network needs the device it is for (peer)",
+        ));
+    }
+    Ok(lp_sync::nearby::SessionOptions {
+        expected_peer,
+        share,
+        limits: lp_sync::nearby::Limits::default(),
+    })
+}
+
+/// Handle [`Request::NearbyListen`]: validate, bind, open the window, and hand
+/// the listener to the host as a deferred job (`lan-transport.md` §7.1).
+fn handle_nearby_listen(
+    state: &mut State,
+    bind: Option<&str>,
+    port: Option<u16>,
+    timeout_secs: Option<u64>,
+    peer: Option<&str>,
+    share: &[String],
+) -> Handled {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let options = {
+        let Some(session) = state.session_ref() else {
+            return Handled::reply(Response::Locked);
+        };
+        match nearby_options(session, peer, share) {
+            Ok(o) => o,
+            Err(r) => return Handled::reply(r),
+        }
+    };
+    if state.nearby.listening() {
+        return Handled::reply(usage("already listening for a nearby device"));
+    }
+    let ip: IpAddr = match bind {
+        None => Ipv4Addr::UNSPECIFIED.into(),
+        Some(b) => match b.trim().trim_matches(['[', ']']).parse() {
+            Ok(ip) => ip,
+            Err(_) => return Handled::reply(usage("the bind address must be an IP address")),
+        },
+    };
+    if !ip.is_unspecified() && !crate::nearby::is_local_address(ip) {
+        return Handled::reply(usage(
+            "the bind address must be a local-network address (LAN or Tailscale)",
+        ));
+    }
+    let port = port.unwrap_or(crate::nearby::DEFAULT_PORT);
+    let window = Duration::from_secs(
+        timeout_secs
+            .unwrap_or(crate::nearby::DEFAULT_LISTEN_SECS)
+            .clamp(1, crate::nearby::MAX_LISTEN_SECS),
+    );
+    let listener = match crate::nearby::bind(SocketAddr::new(ip, port)) {
+        Ok(l) => l,
+        Err(e) => {
+            return Handled::reply(usage(format!(
+                "could not listen on {}: {e}",
+                SocketAddr::new(ip, port)
+            )));
+        }
+    };
+    match state.nearby.open(listener, window, options) {
+        Ok((job, response)) => {
+            if let Some(session) = state.session_ref() {
+                // Best-effort: the gate is the window itself, not the log line.
+                session
+                    .record_audit(lp_vault::AuditKind::NearbyListenEnabled, None)
+                    .ok();
+            }
+            Handled {
+                response,
+                shutdown: false,
+                began_agent_session: false,
+                deferred: Some(job),
+            }
+        }
+        Err(message) => Handled::reply(usage(message)),
+    }
+}
+
+/// Handle [`Request::NearbyConnect`]: validate the address and options, then
+/// hand the dial to the host as a deferred job; its result replaces the
+/// provisional error below.
+fn handle_nearby_connect(
+    state: &mut State,
+    addr: &str,
+    peer: Option<&str>,
+    share: &[String],
+) -> Handled {
+    let options = {
+        let Some(session) = state.session_ref() else {
+            return Handled::reply(Response::Locked);
+        };
+        match nearby_options(session, peer, share) {
+            Ok(o) => o,
+            Err(r) => return Handled::reply(r),
+        }
+    };
+    let addr = match crate::nearby::parse_peer_address(addr) {
+        Ok(a) => a,
+        Err(message) => return Handled::reply(usage(message)),
+    };
+    Handled {
+        response: usage("nearby sync is not available in this host"),
+        shutdown: false,
+        began_agent_session: false,
+        deferred: Some(state.nearby.connect(addr, options)),
+    }
 }
 
 // --- Agent-triggered autofill (`agent-fill.md`) ---------------------------
