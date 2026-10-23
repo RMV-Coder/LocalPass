@@ -1,6 +1,8 @@
-//! `localpass sync setup|push|pull|status` — file-based op-log sync
-//! (sync-protocol.md §7; PRD §11 #6). Always uses the direct-unlock path (the
-//! daemon has no sync proxying in the MVP).
+//! `localpass sync setup|push|pull|status|adopt` — file-based op-log sync
+//! (sync-protocol.md §7; PRD §11 #6) — and `sync nearby`, direct sync with a
+//! trusted device over the local network (`lan-transport.md`). Always uses the
+//! direct-unlock path (the daemon has no sync proxying in the MVP; the
+//! listener and dialer are `lp_daemon::nearby`, run in this process).
 //!
 //! # The channel is always the filesystem here
 //!
@@ -47,7 +49,194 @@ pub fn run(profile_dir: &Path, src: PasswordSource, command: &SyncCommand) -> Re
         SyncCommand::Pull { vault, json } => pull(&session, vault, *json),
         SyncCommand::Status { vault, json } => status(&session, vault, *json),
         SyncCommand::Adopt { dir } => adopt(&session, dir),
+        SyncCommand::Nearby {
+            listen,
+            connect,
+            bind,
+            port,
+            timeout,
+            peer,
+            share,
+            json,
+        } => {
+            let options = nearby_options(&session, peer.as_deref(), share)?;
+            if *listen {
+                nearby_listen(&session, bind.as_deref(), *port, *timeout, &options, *json)
+            } else {
+                let addr = connect.as_deref().unwrap_or_default();
+                nearby_connect(&session, addr, &options, *json)
+            }
+        }
     }
+}
+
+/// Resolve `--peer` / `--share` into session options.
+fn nearby_options(
+    session: &lp_vault::Session,
+    peer: Option<&str>,
+    share: &[String],
+) -> Result<lp_sync::nearby::SessionOptions> {
+    let expected_peer = match peer {
+        None => None,
+        Some(p) => {
+            let uuid = uuid::Uuid::parse_str(p.trim())
+                .map_err(|_| CliError::usage("--peer must be a device id (a UUID)"))?;
+            let id = lp_vault::Id::from_bytes(*uuid.as_bytes());
+            if session.peer_device(&id).map_err(map_vault_error)?.is_none() {
+                bail!(CliError::usage(
+                    "--peer is not a trusted device here (run `device trust` first)"
+                ));
+            }
+            Some(id)
+        }
+    };
+    let mut ids = Vec::with_capacity(share.len());
+    for v in share {
+        ids.push(crate::resolve::open_vault(session, v)?.vault_id());
+    }
+    if !ids.is_empty() && expected_peer.is_none() {
+        bail!(CliError::usage(
+            "--share needs --peer: the device the vault key is for"
+        ));
+    }
+    Ok(lp_sync::nearby::SessionOptions {
+        expected_peer,
+        share: ids,
+        limits: lp_sync::nearby::Limits::default(),
+    })
+}
+
+/// `sync nearby --listen` — open a one-session listen window in this process.
+fn nearby_listen(
+    session: &lp_vault::Session,
+    bind: Option<&str>,
+    port: Option<u16>,
+    timeout: Option<u64>,
+    options: &lp_sync::nearby::SessionOptions,
+    json_out: bool,
+) -> Result<()> {
+    use lp_daemon::nearby::{self as lan, ListenEnd};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let ip: IpAddr = match bind {
+        None => Ipv4Addr::UNSPECIFIED.into(),
+        Some(b) => b
+            .trim()
+            .trim_matches(['[', ']'])
+            .parse()
+            .map_err(|_| CliError::usage("--bind must be an IP address"))?,
+    };
+    if !ip.is_unspecified() && !lan::is_local_address(ip) {
+        bail!(CliError::usage(
+            "--bind must be a local-network address (LAN or Tailscale)"
+        ));
+    }
+    let secs = timeout
+        .unwrap_or(lan::DEFAULT_LISTEN_SECS)
+        .clamp(1, lan::MAX_LISTEN_SECS);
+    let addr = SocketAddr::new(ip, port.unwrap_or(lan::DEFAULT_PORT));
+    let listener =
+        lan::bind(addr).map_err(|e| CliError::usage(format!("could not listen on {addr}: {e}")))?;
+    let bound = listener.local_addr()?;
+    let shown = lan::display_addresses(bound);
+    if !json_out {
+        println!(
+            "Waiting {secs}s for a trusted device on port {} (one session).",
+            bound.port()
+        );
+        if shown.is_empty() {
+            println!("On the other device, connect to this device's LAN or Tailscale IP:");
+            println!("  localpass sync nearby --connect <IP>:{}", bound.port());
+        } else {
+            println!("On the other device run:");
+            for a in &shown {
+                println!("  localpass sync nearby --connect {a}");
+            }
+        }
+    }
+    session
+        .record_audit(lp_vault::AuditKind::NearbyListenEnabled, None)
+        .ok();
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    let end = lan::serve(&listener, session, options, until, &stop, |why| {
+        eprintln!("refused a connection from {why}");
+    });
+    drop(listener);
+    session
+        .record_audit(lp_vault::AuditKind::NearbyListenDisabled, None)
+        .ok();
+    match end {
+        ListenEnd::Synced(report) => print_nearby(session, &report, json_out),
+        ListenEnd::Failed(e) => bail!(CliError::usage(format!("nearby sync failed: {e}"))),
+        ListenEnd::Expired | ListenEnd::Stopped => bail!(CliError::usage(format!(
+            "no trusted device connected within {secs}s"
+        ))),
+        ListenEnd::TooManyFailures => bail!(CliError::usage(
+            "stopped listening after repeated failed connection attempts"
+        )),
+    }
+}
+
+/// `sync nearby --connect IP[:PORT]` — dial a listening device.
+fn nearby_connect(
+    session: &lp_vault::Session,
+    addr: &str,
+    options: &lp_sync::nearby::SessionOptions,
+    json_out: bool,
+) -> Result<()> {
+    let addr = lp_daemon::nearby::parse_peer_address(addr).map_err(CliError::usage)?;
+    let report = lp_daemon::nearby::dial(addr, session, options).map_err(map_sync_error)?;
+    print_nearby(session, &report, json_out)
+}
+
+/// Print a session report; exit non-zero on any alarm, like `sync pull`.
+fn print_nearby(
+    session: &lp_vault::Session,
+    report: &lp_sync::nearby::SessionReport,
+    json_out: bool,
+) -> Result<()> {
+    let wire = lp_daemon::nearby::render_report(report, Some(session));
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&wire)?);
+    } else {
+        let who = wire
+            .peer_label
+            .as_deref()
+            .map_or_else(String::new, |l| format!(" ({l})"));
+        println!("Synced with device {}{who}.", wire.peer_device_id);
+        for v in &wire.shared {
+            println!("  shared the key of vault {v}");
+        }
+        for v in &wire.adopted {
+            println!("  adopted vault \"{}\" ({})", v.name, v.vault_id);
+        }
+        if wire.vaults.is_empty() {
+            println!("  no vault in common yet (share one with --share VAULT --peer DEVICE)");
+        }
+        for v in &wire.vaults {
+            println!(
+                "  vault \"{}\": sent {} op(s), applied {}, pending {}; attachments sent {}, received {}, missing {}",
+                v.name,
+                v.ops_sent,
+                v.applied,
+                v.pending,
+                v.blobs_sent,
+                v.blobs_fetched,
+                v.blobs_pending
+            );
+        }
+        for a in &wire.alarms {
+            eprintln!("ALARM: {a}");
+        }
+    }
+    if !wire.alarms.is_empty() {
+        bail!(CliError::usage(format!(
+            "{} alarm(s) during nearby sync (see above)",
+            wire.alarms.len()
+        )));
+    }
+    Ok(())
 }
 
 /// `sync setup` — enroll a vault under a shared sync-root directory.

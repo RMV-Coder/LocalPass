@@ -527,6 +527,24 @@ pub enum AuditKind {
     /// [`AgentFillModeEnabled`](AuditKind::AgentFillModeEnabled); it carries no
     /// id.
     AgentFillModeDisabled,
+    /// **"Sync with a nearby device" was turned on** — the time-boxed window in
+    /// which this device listens for a pinned peer on the local network was
+    /// opened (`lan-transport.md` §7.1). A device-local on/off event that
+    /// references no id, like [`PairingModeEnabled`](AuditKind::PairingModeEnabled).
+    NearbyListenEnabled,
+    /// **The nearby-sync listen window closed** — stopped by the user, expired,
+    /// served its one session, hit the failed-handshake cap, or the vault locked
+    /// (`lan-transport.md` §7.1). The unit counterpart of
+    /// [`NearbyListenEnabled`](AuditKind::NearbyListenEnabled).
+    NearbyListenDisabled,
+    /// A **nearby-sync session** with a pinned peer completed its handshake and
+    /// exchange over the local network (`lan-transport.md` §6). Records only the
+    /// peer's (public) device id; what was synced is in the sync report, not the
+    /// log.
+    NearbySync {
+        /// The authenticated peer device on the other end.
+        peer_device_id: DeviceId,
+    },
     /// An operation was **refused** — the vault was locked, the caller named a
     /// profile this daemon does not serve, or the caller was not authorized.
     ///
@@ -562,6 +580,9 @@ impl AuditKind {
             AuditKind::AccessDenied { .. } => 13,
             AuditKind::AgentFillModeEnabled => 14,
             AuditKind::AgentFillModeDisabled => 15,
+            AuditKind::NearbyListenEnabled => 16,
+            AuditKind::NearbyListenDisabled => 17,
+            AuditKind::NearbySync { .. } => 18,
         }
     }
 
@@ -585,6 +606,9 @@ impl AuditKind {
             AuditKind::AccessDenied { .. } => "access_denied",
             AuditKind::AgentFillModeEnabled => "agent_fill_mode_enabled",
             AuditKind::AgentFillModeDisabled => "agent_fill_mode_disabled",
+            AuditKind::NearbyListenEnabled => "nearby_listen_enabled",
+            AuditKind::NearbyListenDisabled => "nearby_listen_disabled",
+            AuditKind::NearbySync { .. } => "nearby_sync",
         }
     }
 
@@ -629,7 +653,8 @@ impl AuditKind {
     pub fn peer_device_id(&self) -> Option<&DeviceId> {
         match self {
             AuditKind::VaultShare { peer_device_id, .. }
-            | AuditKind::DeviceTrust { peer_device_id } => Some(peer_device_id),
+            | AuditKind::DeviceTrust { peer_device_id }
+            | AuditKind::NearbySync { peer_device_id } => Some(peer_device_id),
             _ => None,
         }
     }
@@ -684,7 +709,9 @@ impl AuditRecord {
             | AuditKind::PairingModeEnabled
             | AuditKind::PairingModeDisabled
             | AuditKind::AgentFillModeEnabled
-            | AuditKind::AgentFillModeDisabled => {}
+            | AuditKind::AgentFillModeDisabled
+            | AuditKind::NearbyListenEnabled
+            | AuditKind::NearbyListenDisabled => {}
             AuditKind::ItemSecretRead {
                 item_id,
                 vault_id,
@@ -712,7 +739,8 @@ impl AuditRecord {
                 out.extend_from_slice(vault_id.as_bytes());
                 out.extend_from_slice(peer_device_id.as_bytes());
             }
-            AuditKind::DeviceTrust { peer_device_id } => {
+            AuditKind::DeviceTrust { peer_device_id }
+            | AuditKind::NearbySync { peer_device_id } => {
                 out.extend_from_slice(peer_device_id.as_bytes());
             }
             AuditKind::AccessDenied { reason } => out.push(reason.code()),
@@ -847,6 +875,11 @@ pub(crate) fn kind_from_row(
         Some(12) => AuditKind::PairingModeDisabled,
         Some(14) => AuditKind::AgentFillModeEnabled,
         Some(15) => AuditKind::AgentFillModeDisabled,
+        Some(16) => AuditKind::NearbyListenEnabled,
+        Some(17) => AuditKind::NearbyListenDisabled,
+        Some(18) => AuditKind::NearbySync {
+            peer_device_id: req_id(peer_device_id, "audit row missing peer_device_id")?,
+        },
         Some(13) => AuditKind::AccessDenied {
             reason: deny_reason
                 .and_then(|c| u8::try_from(c).ok())
@@ -1082,6 +1115,11 @@ mod tests {
             },
             AuditKind::AgentFillModeEnabled,
             AuditKind::AgentFillModeDisabled,
+            AuditKind::NearbyListenEnabled,
+            AuditKind::NearbyListenDisabled,
+            AuditKind::NearbySync {
+                peer_device_id: dev(),
+            },
         ];
         let mut codes: Vec<u8> = kinds.iter().map(AuditKind::code).collect();
         codes.sort_unstable();
@@ -1185,5 +1223,56 @@ mod tests {
             .expect("decodes");
             assert_eq!(back, kind);
         }
+    }
+
+    /// The nearby-sync kinds (`lan-transport.md` §10) round-trip through a row
+    /// and encode like their pairing-mode / device-trust siblings.
+    #[test]
+    fn nearby_kinds_round_trip_and_encode_like_their_siblings() {
+        let peer = Id::from_bytes([4u8; 16]);
+        for kind in [
+            AuditKind::NearbyListenEnabled,
+            AuditKind::NearbyListenDisabled,
+            AuditKind::NearbySync {
+                peer_device_id: peer,
+            },
+        ] {
+            let peer_col = kind.peer_device_id().map(|p| p.as_bytes().to_vec());
+            let back = kind_from_row(
+                i64::from(kind.code()),
+                None,
+                None,
+                peer_col.as_deref(),
+                None,
+                0,
+                None,
+                None,
+            )
+            .expect("decodes");
+            assert_eq!(back, kind);
+        }
+        let rec = |kind| AuditRecord {
+            seq: 2,
+            prev_hash: [1u8; 32],
+            timestamp: 7,
+            device_id: dev(),
+            kind,
+            detail: None,
+            origin: None,
+        };
+        // A nearby session encodes as kind code + the peer id, exactly the
+        // DeviceTrust shape with a different code.
+        let trust = rec(AuditKind::DeviceTrust {
+            peer_device_id: peer,
+        })
+        .canonical_bytes();
+        let mut nearby = rec(AuditKind::NearbySync {
+            peer_device_id: peer,
+        })
+        .canonical_bytes();
+        let code_at = 8 + 32 + 8 + 16;
+        assert_eq!(nearby[code_at], 18);
+        nearby[code_at] = 10;
+        assert_eq!(nearby, trust);
     }
 }

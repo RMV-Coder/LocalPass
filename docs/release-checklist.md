@@ -23,12 +23,15 @@ in review (#49). No §1 gate has moved.
 
 - [ ] **External security audit passed**, all criticals and highs resolved
   (PRD §10 R1, §2.2). Scope at least: `lp-crypto` and the key hierarchy, the
-  vault and sync formats, daemon IPC, the MCP server, the native host and
+  vault and sync formats, the LAN transport (handshake identity binding,
+  record layer, listener), daemon IPC, the MCP server, the native host and
   extension, the Tauri command boundary, and (new in #47) the Windows Hello
   unlock and the in-app updater.
 - [ ] **Fuzzing corpus green.** No fuzz harness exists yet. Targets: the
   KDBX, 1PUX, Bitwarden, LastPass/CSV and `.env` importers; sync segment and
-  op ingest; the vault-key share blob; the native-messaging frame decoder.
+  op ingest; the vault-key share blob; the native-messaging frame decoder;
+  the LAN transport's record layer and message decoders
+  (`lp_sync::nearby`).
   Run the corpus in CI.
 - [ ] **Performance targets met** (PRD §2.2), measured by a benchmark that runs
   in CI: unlock < 1.5 s and search < 50 ms p95 with 10k items on a mid-range
@@ -37,7 +40,7 @@ in review (#49). No §1 gate has moved.
   concurrent delete vs edit (mvp-acceptance.md §3 #7). Nothing is lost today
   (edit wins, losers are preserved), but it is a tracked pre-1.0 fix.
 - [ ] **Signed releases for all platforms** — see §4. Windows code signing is
-  in review (#49).
+  merged (#49) and waits for SignPath to approve the project.
 
 ## 2. MVP scope — build, or formally re-scope
 
@@ -45,8 +48,11 @@ Each of these is in PRD §9.1's "In" list but not (fully) built. For each,
 decide: **build for 1.0**, or **move to 1.x** by amending PRD §9.1 and
 recording the decision in §11.
 
-- [ ] Direct LAN / overlay live sync (Noise XX/IK + mDNS). Only file-based
-  sync exists (the PRD's default onboarding path, §11 #6).
+- [ ] Direct LAN / overlay live sync (Noise XX/IK + mDNS). Built for the core,
+  daemon, CLI (`localpass sync nearby`), the desktop Devices screen and the
+  Android in-process backend ([lan-transport.md](specs/lan-transport.md)).
+  Still to do: mDNS discovery (NSD + multicast lock on Android), and verify a
+  phone dialing a desktop on real Wi-Fi.
 - [ ] SAS pairing (6-word phrase). Today: manual fingerprint comparison.
 - [ ] Desktop tray quick-search.
 - [ ] Desktop version history: browse and restore an item's versions (CLI
@@ -127,17 +133,19 @@ unfixed are held privately, per [SECURITY.md](../SECURITY.md):
 
 ## 4. Release engineering (PRD §6.9)
 
-Today `desktop-release.yml` builds an unsigned Windows bundle and a signed
-Android APK, plus (once the updater key is in the repo secrets) a
-minisign-signed feed for the in-app updater ([updates.md](updates.md)). That
-signature protects the update channel; it is not Windows code signing, and
-nothing else below exists.
+Today `desktop-release.yml` builds the Windows bundle and a signed Android
+APK, plus (once the updater key is in the repo secrets) a minisign-signed feed
+for the in-app updater ([updates.md](updates.md)). Windows code signing through
+SignPath Foundation is wired into the workflow ([CODE_SIGNING.md](../CODE_SIGNING.md))
+but stays off until the project's SignPath application is approved and its
+secret and variables are set; until then the Windows installers ship unsigned.
+Nothing else below exists.
 
 - [ ] Release pipeline (`cargo-dist` or equivalent) for the CLI, daemon and
   native host on Windows, macOS (universal) and Linux (static musl).
 - [ ] Desktop app: code-signed Windows MSI/NSIS; notarized macOS `.dmg`; Linux
-  AppImage plus `.deb`/`.rpm`. Windows: SignPath Foundation signing is in
-  review (#49) and needs the project's SignPath application approved first.
+  AppImage plus `.deb`/`.rpm`. Windows: SignPath Foundation signing is
+  merged (#49) and needs the project's SignPath application approved first.
 - [ ] Release signatures: Ed25519 (minisign-compatible) and Sigstore, keys
   published in the repo and on the website and cross-attested; produce and
   verify them under `lp-crypto`'s `CONTEXT_RELEASE`. The updater's minisign

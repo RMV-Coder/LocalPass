@@ -12,6 +12,14 @@ repository.workspace = true
 name = "localpass-daemon"
 path = "src/bin/localpass-daemon.rs"
 
+[build-dependencies]
+# --- Windows VERSIONINFO for the release daemon (build.rs). Release signing
+# --- (SignPath, CODE_SIGNING.md) only signs files whose product name/version
+# --- match the release, and Rust binaries carry none by default. Active only
+# --- when LOCALPASS_PRODUCT_VERSION is set (the desktop release build sets it);
+# --- `default-features = false` drops its optional `toml` dependency. MIT. ---
+winresource = { version = "0.1", default-features = false }
+
 [dependencies]
 # --- The storage/crypto core the daemon holds unlocked. The daemon is the ONLY
 # --- long-lived holder of an lp-vault Session; it consumes lp-vault's high-level

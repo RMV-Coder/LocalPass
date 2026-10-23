@@ -20,8 +20,8 @@
 //! to unit-test exhaustively — see the tests at the bottom.
 
 use lp_daemon::protocol::{
-    LockState, Response, WireAuditRecord, WireField, WireItem, WireItemSummary, WirePasswordHealth,
-    WireTrashEntry,
+    LockState, Response, WireAuditRecord, WireField, WireItem, WireItemSummary, WireNearbyOutcome,
+    WireNearbyReport, WirePasswordHealth, WireTrashEntry,
 };
 use serde::Serialize;
 
@@ -625,10 +625,191 @@ pub fn session_state_from_status(resp: &Response) -> SessionState {
     }
 }
 
+// --- Nearby sync (`docs/specs/lan-transport.md`) ----------------------------
+//
+// Everything here is secret-free by construction: device and vault ids, the
+// local vault names (vault metadata, same as the sidebar shows), counts, and
+// alarm descriptions. The ops and keys that moved during a session never reach
+// the GUI process at all.
+
+/// A listen window just opened (`nearby_listen`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NearbyListeningView {
+    /// `IP:PORT` strings to show and to put in the QR; may be empty when the
+    /// address could not be determined (the user then uses their LAN or
+    /// Tailscale address with `port`).
+    pub addresses: Vec<String>,
+    /// The bound port.
+    pub port: u16,
+    /// Seconds until the window closes on its own.
+    pub expires_in_secs: u64,
+}
+
+/// One vault's line in a [`NearbyReportView`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NearbyVaultView {
+    /// The vault id (hyphenated).
+    pub vault_id: String,
+    /// The local vault name (may be empty).
+    pub name: String,
+    /// Changes this device sent.
+    pub sent: usize,
+    /// Changes received, verified and applied here.
+    pub received: usize,
+    /// Changes received but waiting for an earlier one.
+    pub pending: usize,
+    /// Attachments sent.
+    pub files_sent: usize,
+    /// Attachments received and verified.
+    pub files_received: usize,
+    /// Attachments still missing here.
+    pub files_missing: usize,
+}
+
+/// What a finished nearby session did.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NearbyReportView {
+    /// The other device's id.
+    pub peer_device_id: String,
+    /// Its label in the trusted list, if any.
+    pub peer_label: Option<String>,
+    /// One entry per vault both devices hold.
+    pub vaults: Vec<NearbyVaultView>,
+    /// Vault ids whose key this device handed over.
+    pub shared: Vec<String>,
+    /// Vaults the other device handed over and this one adopted.
+    pub adopted: Vec<AdoptedVaultView>,
+    /// Secret-free alarm descriptions; surfaced like sync alarms.
+    pub alarms: Vec<String>,
+}
+
+/// How the last listen window or connection ended.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NearbyOutcomeView {
+    /// `"listen"` or `"connect"`.
+    pub role: String,
+    /// `"synced"`, `"failed"`, `"expired"`, `"stopped"` or
+    /// `"too_many_failures"`.
+    pub result: String,
+    /// A secret-free error for `"failed"`.
+    pub error: Option<String>,
+    /// The report for `"synced"`.
+    pub report: Option<NearbyReportView>,
+}
+
+/// The listen window's state, polled while it is open (`nearby_status`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NearbyStatusView {
+    /// Whether the window is open right now.
+    pub listening: bool,
+    /// Its display addresses (empty when closed).
+    pub addresses: Vec<String>,
+    /// Its port, when open.
+    pub port: Option<u16>,
+    /// Seconds left, when open.
+    pub expires_in_secs: Option<u64>,
+    /// The last finished window or connection since the service started.
+    pub last: Option<NearbyOutcomeView>,
+}
+
+/// Render a daemon nearby report for the webview.
+#[must_use]
+pub fn nearby_report_view(r: WireNearbyReport) -> NearbyReportView {
+    NearbyReportView {
+        peer_device_id: r.peer_device_id,
+        peer_label: r.peer_label,
+        vaults: r
+            .vaults
+            .into_iter()
+            .map(|v| NearbyVaultView {
+                vault_id: v.vault_id,
+                name: v.name,
+                sent: v.ops_sent,
+                received: v.applied,
+                pending: v.pending,
+                files_sent: v.blobs_sent,
+                files_received: v.blobs_fetched,
+                files_missing: v.blobs_pending,
+            })
+            .collect(),
+        shared: r.shared,
+        adopted: r
+            .adopted
+            .into_iter()
+            .map(|a| AdoptedVaultView {
+                vault_id: a.vault_id,
+                name: a.name,
+            })
+            .collect(),
+        alarms: r.alarms,
+    }
+}
+
+/// Render a daemon nearby outcome for the webview.
+#[must_use]
+pub fn nearby_outcome_view(o: WireNearbyOutcome) -> NearbyOutcomeView {
+    NearbyOutcomeView {
+        role: o.role,
+        result: o.result,
+        error: o.error,
+        report: o.report.map(nearby_report_view),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use lp_daemon::protocol::{WireField, WireItem};
+
+    #[test]
+    fn nearby_report_renders_counts_names_and_alarms() {
+        use lp_daemon::protocol::{WireAdoptedVault, WireNearbyVault};
+        let wire = WireNearbyReport {
+            peer_device_id: "dev-1".into(),
+            peer_label: Some("Laptop".into()),
+            vaults: vec![WireNearbyVault {
+                vault_id: "v-1".into(),
+                name: "personal".into(),
+                ops_sent: 3,
+                applied: 5,
+                pending: 1,
+                blobs_sent: 2,
+                blobs_fetched: 4,
+                blobs_pending: 0,
+            }],
+            shared: vec!["v-2".into()],
+            adopted: vec![WireAdoptedVault {
+                vault_id: "v-3".into(),
+                name: "family".into(),
+            }],
+            alarms: vec!["device x quarantined".into()],
+        };
+        let view = nearby_report_view(wire.clone());
+        assert_eq!(view.peer_label.as_deref(), Some("Laptop"));
+        let v = &view.vaults[0];
+        assert_eq!(
+            (
+                v.sent,
+                v.received,
+                v.pending,
+                v.files_sent,
+                v.files_received,
+                v.files_missing
+            ),
+            (3, 5, 1, 2, 4, 0)
+        );
+        assert_eq!(view.shared, vec!["v-2".to_string()]);
+        assert_eq!(view.adopted[0].name, "family");
+        assert_eq!(view.alarms, vec!["device x quarantined".to_string()]);
+
+        let outcome = nearby_outcome_view(WireNearbyOutcome {
+            role: "listen".into(),
+            result: "synced".into(),
+            error: None,
+            report: Some(wire),
+        });
+        assert_eq!(outcome.report.unwrap().vaults[0].received, 5);
+    }
 
     fn wire_item_with_secret() -> WireItem {
         WireItem {

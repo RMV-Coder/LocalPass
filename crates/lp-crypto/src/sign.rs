@@ -46,6 +46,10 @@ pub const CONTEXT_SYNC_OP: &str = "localpass/v1/sign/sync-op";
 pub const CONTEXT_MEMBERSHIP: &str = "localpass/v1/sign/membership";
 /// Suggested signing context for release metadata.
 pub const CONTEXT_RELEASE: &str = "localpass/v1/sign/release";
+/// Signing context for the LAN sync handshake's identity proof: a device's
+/// Ed25519 identity key certifies the per-connection Noise static key and the
+/// handshake transcript (`docs/specs/lan-transport.md` §3).
+pub const CONTEXT_LAN_HANDSHAKE: &str = "localpass/v1/sign/lan-handshake";
 
 /// Frame `(context, message)` into the injective signed payload.
 ///
