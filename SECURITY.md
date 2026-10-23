@@ -214,6 +214,17 @@ vulnerability:
 - **`proc-macro-error`** (RUSTSEC-2024-0370), a compile-time proc-macro in the
   gtk-rs bindings of Tauri's Linux build.
 
+GitHub's Dependabot also reports one notice that `cargo deny` leaves out,
+because it reports unsoundness only in crates we depend on directly:
+
+- **`glib` 0.18 unsoundness** (RUSTSEC-2024-0429, GHSA-wrw7-89jp-8q8g):
+  `VariantStrIter`'s iterator impls are unsound. `glib` comes only from the
+  GTK 3 bindings of Tauri's Linux build. The fix is in `glib` 0.20, which
+  belongs to the GTK 4 bindings that Tauri 2 does not use, so it cannot be
+  upgraded from here. LocalPass never calls `glib` itself, and the release
+  workflow builds Windows and Android only, so no shipped binary contains it.
+  It goes away when Tauri moves its Linux backend off GTK 3.
+
 The in-app updater is built without its `zip` feature (the update feed serves
 signed `.msi`/`.exe` installers directly), so the `zip` crate and its
 extraction advisories are not in the desktop build at all.
