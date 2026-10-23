@@ -441,6 +441,11 @@ is skipped (content-addressed).
   a Noise XX link between pinned devices; received ops go through the same
   ingest function `pull` uses (`lp_sync::engine::ingest`), so the §5 verifier
   and §4 merge are unchanged. QUIC remains P2.
+- **Offline transport — specified and built:** [`qr-transport.md`](qr-transport.md)
+  carries signed `LPS2` shares and the same §7.1 segment bodies in a one-way
+  bundle, played as an animated QR stream (a RaptorQ fountain code) or moved as
+  a file. The channel is untrusted exactly like this folder; ingest is the same
+  `lp_sync::engine::ingest`.
 - **Relay (P2):** stores the same per-device segments as opaque blobs keyed by
   `device_id`+`seq`; pairing-code-gated enrollment (PRD §11 #7). The relay sees
   only ciphertext + `device_id`/`seq` (all §5 protections apply); it is a

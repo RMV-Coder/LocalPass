@@ -631,6 +631,60 @@ pub enum Request {
         /// The profile directory being operated on.
         profile: String,
     },
+    /// **Sync by QR code (`qr-transport.md` §4, §10.2):** this device's "what I
+    /// have" code — per vault, per author device, the highest seq held — as the
+    /// `LPHAVE1-…` text the GUI renders as a still QR. Answered by
+    /// [`Response::QrHaveCode`]. Public metadata only (ids and counters).
+    QrHaveCode {
+        /// The profile directory being operated on.
+        profile: String,
+        /// Vaults (names or ids) to list. Empty = every vault.
+        #[serde(default)]
+        vaults: Vec<String>,
+    },
+    /// **Sync by QR code (`qr-transport.md` §3, §10.2):** build a bundle and
+    /// write it to `out_path` (the daemon writes the file itself; no bundle
+    /// bytes cross the pipe). Answered by [`Response::QrExported`]. Sharing a
+    /// vault needs a person present while an AI agent is connected.
+    QrExport {
+        /// The profile directory being operated on.
+        profile: String,
+        /// Where to write the bundle (`.lpqr`).
+        out_path: String,
+        /// Vaults (names or ids) whose ops to send. Empty = every vault.
+        #[serde(default)]
+        vaults: Vec<String>,
+        /// The receiver's "what I have" code (`LPHAVE1-…`), to send only what
+        /// it lacks. Unauthenticated: it only changes what is selected.
+        #[serde(default)]
+        have: Option<String>,
+        /// The pinned device (hyphenated id) to share `share` with.
+        #[serde(default)]
+        peer: Option<String>,
+        /// Vaults (names or ids) whose key to seal to `peer`. Requires `peer`.
+        #[serde(default)]
+        share: Vec<String>,
+        /// Include attachment blobs (off by default; QR is slow).
+        #[serde(default)]
+        attachments: bool,
+        /// Overwrite `out_path` if it exists.
+        #[serde(default)]
+        force: bool,
+    },
+    /// **Sync by QR code (`qr-transport.md` §9):** read a received bundle from
+    /// `path` and ingest it — shares through the signed-share import, ops
+    /// through the §5 verifier and §4 merge. Answered by
+    /// [`Response::QrImported`].
+    QrImport {
+        /// The profile directory being operated on.
+        profile: String,
+        /// The bundle file.
+        path: String,
+        /// The transfer id the QR frames carried (16 hex chars), when the
+        /// bundle came from a QR stream; it must match the bundle.
+        #[serde(default)]
+        transfer_id: Option<String>,
+    },
     /// **Attachments (path-based; no blob bytes cross this channel):** attach a
     /// file to an item. The caller passes a SOURCE file **path**; the daemon
     /// reads that file itself (it is the same user) and stores it encrypted via
@@ -838,6 +892,9 @@ impl Request {
             Request::NearbyConnect { .. } => "NearbyConnect",
             Request::NearbyStatus { .. } => "NearbyStatus",
             Request::NearbyStop { .. } => "NearbyStop",
+            Request::QrHaveCode { .. } => "QrHaveCode",
+            Request::QrExport { .. } => "QrExport",
+            Request::QrImport { .. } => "QrImport",
             Request::AddAttachment { .. } => "AddAttachment",
             Request::ListAttachments { .. } => "ListAttachments",
             Request::GetAttachment { .. } => "GetAttachment",
@@ -899,6 +956,9 @@ impl Request {
             | Request::NearbyConnect { profile, .. }
             | Request::NearbyStatus { profile }
             | Request::NearbyStop { profile }
+            | Request::QrHaveCode { profile, .. }
+            | Request::QrExport { profile, .. }
+            | Request::QrImport { profile, .. }
             | Request::AddAttachment { profile, .. }
             | Request::ListAttachments { profile, .. }
             | Request::GetAttachment { profile, .. }
@@ -930,6 +990,8 @@ impl Request {
             // Opening a listener grants network reach; a session that hands a
             // vault key to another device is a share.
             Request::NearbyConnect { share, .. } => !share.is_empty(),
+            // A QR bundle that carries a vault key is a share.
+            Request::QrExport { share, .. } => !share.is_empty(),
             Request::NearbyListen { .. }
             | Request::TrustDevice { .. }
             | Request::ShareVaultToDevice { .. }
@@ -1219,6 +1281,91 @@ pub struct WireNearbyVault {
     /// Attachment blobs still missing here.
     #[serde(default)]
     pub blobs_pending: usize,
+}
+
+/// What a QR bundle contains ([`Response::QrExported`]). Secret-free: ids,
+/// vault names, counts.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct WireQrExport {
+    /// The bundle's size in bytes.
+    pub bytes: usize,
+    /// The transfer id its frames carry (16 hex chars).
+    pub transfer_id: String,
+    /// The device it was built for (hyphenated), if known.
+    #[serde(default)]
+    pub recipient: Option<String>,
+    /// That device's label in this device's trusted list.
+    #[serde(default)]
+    pub recipient_label: Option<String>,
+    /// Ops per vault.
+    #[serde(default)]
+    pub vaults: Vec<WireQrVault>,
+    /// Vault ids whose key travels.
+    #[serde(default)]
+    pub shared: Vec<String>,
+    /// Attachment blobs included.
+    #[serde(default)]
+    pub blobs: usize,
+    /// Attachment blobs left out because the bundle would have been too large.
+    #[serde(default)]
+    pub blobs_left_out: usize,
+}
+
+/// One vault's line in a [`WireQrExport`] or [`WireQrImport`].
+#[derive(Clone, Serialize, Deserialize)]
+pub struct WireQrVault {
+    /// The vault id (hyphenated).
+    pub vault_id: String,
+    /// The local vault name (may be empty).
+    #[serde(default)]
+    pub name: String,
+    /// Ops the bundle carries for it.
+    #[serde(default)]
+    pub ops: usize,
+    /// Import only: ops verified and applied.
+    #[serde(default)]
+    pub applied: usize,
+    /// Import only: ops already held.
+    #[serde(default)]
+    pub skipped: usize,
+    /// Import only: ops held pending.
+    #[serde(default)]
+    pub pending: usize,
+    /// Import only: attachment blobs verified and stored.
+    #[serde(default)]
+    pub blobs_stored: usize,
+    /// Import only: attachments still lacking their blob here.
+    #[serde(default)]
+    pub blobs_missing: usize,
+}
+
+/// What a QR import did ([`Response::QrImported`]). Secret-free.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct WireQrImport {
+    /// The device that built the bundle, **as the bundle claims** (hyphenated).
+    pub sender_device_id: String,
+    /// Its label here, if it is a trusted device.
+    #[serde(default)]
+    pub sender_label: Option<String>,
+    /// Whether the claimed sender is a trusted device here.
+    #[serde(default)]
+    pub sender_trusted: bool,
+    /// Whether the bundle was built for a different device.
+    #[serde(default)]
+    pub for_another_device: bool,
+    /// Per vault whose ops were ingested.
+    #[serde(default)]
+    pub vaults: Vec<WireQrVault>,
+    /// Vault ids in the bundle this device does not hold.
+    #[serde(default)]
+    pub not_held: Vec<String>,
+    /// Vaults shared to this device and adopted.
+    #[serde(default)]
+    pub adopted: Vec<WireAdoptedVault>,
+    /// Secret-free alarm descriptions (quarantines, refused shares, tampered
+    /// blobs). Empty when clean.
+    #[serde(default)]
+    pub alarms: Vec<String>,
 }
 
 /// How the last listen window or dial ended ([`Response::NearbyStatus`]).
@@ -1798,6 +1945,23 @@ pub enum Response {
         /// What the session did.
         report: WireNearbyReport,
     },
+    /// This device's "what I have" code (answer to [`Request::QrHaveCode`]).
+    QrHaveCode {
+        /// The `LPHAVE1-…` text (lowercase hex of the code's bytes).
+        code: String,
+        /// How many vaults it lists.
+        vaults: usize,
+    },
+    /// A bundle was written (answer to [`Request::QrExport`]).
+    QrExported {
+        /// What it contains.
+        summary: WireQrExport,
+    },
+    /// A bundle was ingested (answer to [`Request::QrImport`]).
+    QrImported {
+        /// What was accepted, skipped and refused.
+        report: WireQrImport,
+    },
     /// The announced-but-untrusted devices found under a sync root's `pairing/`
     /// folder (answer to [`Request::ListPendingDevices`], `device-pairing.md`
     /// §5). Everything here is **public**; the list is a discovery hint the user
@@ -1961,6 +2125,9 @@ impl Response {
             Response::NearbyListening { .. } => "NearbyListening",
             Response::NearbyStatus { .. } => "NearbyStatus",
             Response::NearbySynced { .. } => "NearbySynced",
+            Response::QrHaveCode { .. } => "QrHaveCode",
+            Response::QrExported { .. } => "QrExported",
+            Response::QrImported { .. } => "QrImported",
             Response::Attachment { .. } => "Attachment",
             Response::Attachments { .. } => "Attachments",
             Response::AttachmentSaved { .. } => "AttachmentSaved",

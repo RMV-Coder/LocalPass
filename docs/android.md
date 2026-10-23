@@ -145,6 +145,17 @@ customizing.
   `_localpass-sync._tcp` (not built yet). The phone typically *dials* the
   desktop — scanning the address QR the desktop shows while it waits — which is
   the simpler side (no inbound socket on the phone).
+- **Sync by QR code** ([qr-transport.md](specs/qr-transport.md)) needs no
+  network and no folder. Continuous camera scanning works in the app's own
+  WebView: the page is a secure context (`http://tauri.localhost`), so
+  `getUserMedia` opens the back camera, and the `WebChromeClient` that `wry`
+  generates (`gen/android/.../generated/RustWebChromeClient.kt`) turns the
+  page's request into the `CAMERA` runtime permission — the manifest already
+  declares it through the barcode-scanner plugin. Verified on a real phone with
+  a throwaway app (§12.1 of the spec); no native camera plugin and no ML Kit.
+  If a future `tauri android init` drops the barcode-scanner plugin, keep
+  `<uses-permission android:name="android.permission.CAMERA" />` in the
+  manifest or the camera request is denied silently.
 - **Signing & Play Store.** A release keystore + Play App Signing; out of scope
   until the desktop 1.0 gates (audit, format freeze) pass.
 

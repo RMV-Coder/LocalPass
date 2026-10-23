@@ -222,7 +222,7 @@ fn round<S: Stream>(
 
 /// Seal each requested vault's key to the authenticated peer (`LPS2`, signed by
 /// this device).
-fn build_shares(
+pub(crate) fn build_shares(
     session: &Session,
     peer: &PeerDevice,
     share: &[VaultId],
@@ -287,7 +287,7 @@ fn inventory(session: &Session) -> Result<Inventory> {
 
 /// The ops of `vault_id` the peer lacks according to `their_heads`, minus the
 /// peer's own (`lan-transport.md` §6.3), ascending by `(device_id, seq)`.
-fn ops_to_send(
+pub(crate) fn ops_to_send(
     session: &Session,
     vault_id: &[u8; 16],
     their_heads: &BTreeMap<[u8; 16], u64>,

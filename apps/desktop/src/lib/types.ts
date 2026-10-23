@@ -342,6 +342,82 @@ export interface HelloStatusView {
   enrolled: boolean;
 }
 
+// --- Sync by QR code (qr-transport.md §10.4) -------------------------------
+// Secret-free: ids, vault names, counts, alarm descriptions, and QR module
+// matrices of ciphertext frames.
+
+/** One vault's line in a QR export or import. */
+export interface QrVaultView {
+  vault_id: string;
+  name: string;
+  ops: number;
+  applied: number;
+  skipped: number;
+  pending: number;
+  blobs_stored: number;
+  blobs_missing: number;
+}
+
+/** What a QR bundle carries. */
+export interface QrExportView {
+  bytes: number;
+  transfer_id: string;
+  recipient: string | null;
+  recipient_label: string | null;
+  vaults: QrVaultView[];
+  shared: string[];
+  blobs: number;
+  blobs_left_out: number;
+}
+
+/** A stream ready to play. */
+export interface QrSendView {
+  summary: QrExportView;
+  frames_needed: number;
+  symbol_size: number;
+  qr_version: number;
+  fps: number;
+}
+
+/** This device's "what I have" code. */
+export interface QrHaveView {
+  text: string;
+  vaults: number;
+  qr: import("./qrstream").QrMatrix;
+}
+
+/** A scanned or pasted "what I have" code, checked by the backend. */
+export interface QrHaveInfo {
+  text: string;
+  /** The device it CLAIMS to be from — unauthenticated. */
+  device_id: string;
+  vaults: number;
+}
+
+/** Where a receive stands. */
+export interface QrProgressView {
+  locked: boolean;
+  bundle_len: number;
+  received: number;
+  needed: number;
+  invalid: number;
+  other_transfer: number;
+  complete: boolean;
+  failed: string | null;
+}
+
+/** What a QR import did. */
+export interface QrImportView {
+  sender_device_id: string;
+  sender_label: string | null;
+  sender_trusted: boolean;
+  for_another_device: boolean;
+  vaults: QrVaultView[];
+  not_held: string[];
+  adopted: AdoptedVaultView[];
+  alarms: string[];
+}
+
 /** A newer signed release found by the updater. */
 export interface UpdateInfoView {
   version: string;

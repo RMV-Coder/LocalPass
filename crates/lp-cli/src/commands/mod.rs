@@ -23,6 +23,7 @@ pub mod item;
 pub mod kit;
 pub mod pairing;
 pub mod password;
+pub mod qr;
 pub mod run;
 pub mod search;
 pub mod ssh;

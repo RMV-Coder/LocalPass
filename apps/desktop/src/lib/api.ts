@@ -42,8 +42,14 @@ import type {
   TrashEntryView,
   UpdateInfoView,
   HelloStatusView,
+  QrHaveInfo,
+  QrHaveView,
+  QrImportView,
+  QrProgressView,
+  QrSendView,
   VaultView,
 } from "./types";
+import type { QrMatrix } from "./qrstream";
 
 /** Commands that never reach the daemon as an *active* request, so they cannot
  *  have moved the idle auto-lock deadline: the passive status reads, and the
@@ -68,6 +74,16 @@ const PASSIVE = new Set([
   "lock",
   "unlock",
   "hello_unlock",
+  // Sync by QR code: local work in the backend (rendering, frame checks),
+  // never a daemon request.
+  "qr_have_parse",
+  "qr_default_code_size",
+  "qr_send_frames",
+  "qr_send_stop",
+  "qr_receive_start",
+  "qr_receive_frames",
+  "qr_receive_progress",
+  "qr_receive_cancel",
 ]);
 
 /** Every command goes through here. While an AI agent is connected, a change
@@ -421,6 +437,79 @@ export function syncAdopt(dir: string): Promise<SyncAdoptView> {
  *  resolves to an empty list, so it is safe to call whenever a folder is set. */
 export function listPendingDevices(dir: string): Promise<PendingDeviceView[]> {
   return invoke<PendingDeviceView[]>("list_pending_devices", { dir });
+}
+
+// --- Sync by QR code (qr-transport.md §10.4) ------------------------------
+//
+// The webview draws the QR matrices the backend renders and passes up the raw
+// bytes jsQR reads off the camera; the backend checks every frame and code,
+// and the daemon builds and ingests bundles by path. Nothing here is secret.
+
+/** This device's "what I have" code for `vaults` (empty = all). */
+export function qrHaveCode(vaults: string[] = []): Promise<QrHaveView> {
+  return invoke<QrHaveView>("qr_have_code", { vaults });
+}
+
+/** Check a scanned (raw bytes) or pasted (`LPHAVE1-…`) "what I have" code. */
+export function qrHaveParse(code: { bytes?: number[]; text?: string }): Promise<QrHaveInfo> {
+  return invoke<QrHaveInfo>("qr_have_parse", {
+    bytes: code.bytes ?? null,
+    text: code.text ?? null,
+  });
+}
+
+/** Build a bundle and get ready to play it. Sharing needs `peer`. */
+export function qrSendStart(opts: {
+  vaults: string[];
+  have: string | null;
+  peer: string | null;
+  share: string[];
+  attachments: boolean;
+  /** "large" (version 25, for a phone camera) or "small" (version 15, for a
+   *  laptop webcam). */
+  codeSize: QrCodeSize;
+}): Promise<QrSendView> {
+  return invoke<QrSendView>("qr_send_start", opts);
+}
+
+export type QrCodeSize = "large" | "small";
+
+/** The code size this platform sends by default: large on desktop (a phone
+ *  films it), small on a phone (a laptop webcam films it). */
+export function qrDefaultCodeSize(): Promise<QrCodeSize> {
+  return invoke<QrCodeSize>("qr_default_code_size");
+}
+
+/** The next `count` frames, from encoding symbol `start`. */
+export function qrSendFrames(start: number, count: number): Promise<QrMatrix[]> {
+  return invoke<QrMatrix[]>("qr_send_frames", { start, count });
+}
+
+export function qrSendStop(): Promise<void> {
+  return invoke<void>("qr_send_stop");
+}
+
+export function qrReceiveStart(): Promise<void> {
+  return invoke<void>("qr_receive_start");
+}
+
+/** Hand over a batch of decoded codes (raw bytes). */
+export function qrReceiveFrames(frames: number[][]): Promise<QrProgressView> {
+  return invoke<QrProgressView>("qr_receive_frames", { frames });
+}
+
+/** Where the receive stands (also runs the stall / overall timeouts). */
+export function qrReceiveProgress(): Promise<QrProgressView> {
+  return invoke<QrProgressView>("qr_receive_progress");
+}
+
+/** The bundle is complete: import it (hash check, §5 verifier, merge). */
+export function qrReceiveFinish(): Promise<QrImportView> {
+  return invoke<QrImportView>("qr_receive_finish");
+}
+
+export function qrReceiveCancel(): Promise<void> {
+  return invoke<void>("qr_receive_cancel");
 }
 
 // --- Attachments ---------------------------------------------------------

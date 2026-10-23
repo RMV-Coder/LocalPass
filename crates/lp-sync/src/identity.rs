@@ -161,7 +161,9 @@ fn from_hex(s: &str) -> Option<Vec<u8>> {
 /// A small, dependency-free CRC-32 (IEEE 802.3 polynomial) for the identity
 /// string's typo check. Not a security control — the trust decision rests on
 /// the out-of-band fingerprint comparison.
-fn crc32(data: &[u8]) -> u32 {
+/// CRC-32 (IEEE 802.3), also the QR transport's per-frame check
+/// (`qr-transport.md` §6).
+pub(crate) fn crc32(data: &[u8]) -> u32 {
     let mut crc: u32 = 0xFFFF_FFFF;
     for &byte in data {
         crc ^= u32::from(byte);
