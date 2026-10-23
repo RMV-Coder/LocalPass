@@ -16,9 +16,10 @@ core.
   that the app verifies against the public key compiled into
   `tauri.conf.json` (`plugins.updater.pubkey`) before running anything. A feed
   or installer that is not signed with the matching private key is rejected.
-  This is release-artifact integrity (PRD §8 T10), not Windows code signing:
-  SmartScreen still sees an unsigned installer until a code-signing certificate
-  exists (release-checklist.md §4).
+  This is release-artifact integrity (PRD §8 T10), not Windows code signing,
+  which is separate ([CODE_SIGNING.md](../CODE_SIGNING.md)). When a release is
+  code signed, the workflow makes these signatures again over the signed
+  installers, since Authenticode changes the file bytes.
 - **Network:** the check is the app's only outbound request. It runs when the
   user presses *Check for updates*, or at unlock only if they turned on
   *Check when LocalPass unlocks* (off by default). It sends nothing but the
@@ -55,6 +56,36 @@ shipping a release with a new public key that every user installs by hand once.
 
 Builds from `npm run bundle` stay unsigned unless `TAURI_SIGNING_PRIVATE_KEY`
 is set in the shell and `--config src-tauri/tauri.updater.conf.json` is passed.
+
+### Windows code signing (SignPath, one time)
+
+The policy is [CODE_SIGNING.md](../CODE_SIGNING.md). To turn it on:
+
+1. Apply for the free open-source plan at [signpath.org](https://signpath.org/)
+   and wait for approval.
+2. In SignPath: install the SignPath GitHub App on this repository, link the
+   *GitHub.com* trusted build system to the project, and create the project
+   (slug `LocalPass`), a release signing policy (slug `release-signing`) with
+   manual approval, and an artifact configuration (slug `windows-installers`)
+   holding the contents of
+   [`.signpath/artifact-configurations/windows-installers.xml`](../.signpath/artifact-configurations/windows-installers.xml).
+   Turn on MFA for every SignPath user.
+3. Create a submitter API token in SignPath and set it and the organization id
+   in GitHub:
+
+```sh
+gh secret set SIGNPATH_API_TOKEN
+gh variable set SIGNPATH_ORGANIZATION_ID --body "<organization id>"
+# only if the slugs differ from the defaults above
+gh variable set SIGNPATH_PROJECT_SLUG --body "<project slug>"
+gh variable set SIGNPATH_SIGNING_POLICY_SLUG --body "<policy slug>"
+```
+
+From the next version bump, the release job stops at *Sign with SignPath*
+until the request is approved in SignPath (it waits up to two hours, then
+fails without publishing anything). Edit the XML file in a pull request first
+and then paste it into SignPath, so the reviewed copy stays the source of
+truth.
 
 ## Windows Hello unlock
 

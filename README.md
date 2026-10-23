@@ -100,7 +100,11 @@ There is no tool to create, edit, delete, or export anything. Full tool referenc
 
 The [`apps/desktop`](apps/desktop) Tauri app is a zero-terminal way to use LocalPass — create your account, browse and edit items, reveal/copy secrets, read live TOTP codes, manage `.env` documents and attachments, and link + sync devices. It's a thin daemon **client** and holds no key material; secret handling stays in Rust behind an explicit-gesture boundary. See [apps/desktop/README.md](apps/desktop/README.md) for the architecture and security notes.
 
-There is no pre-built download yet, so you build the installer from source.
+**Download:** the Windows installer (`.msi`, or the NSIS `-setup.exe`) and the Android APK are on the [Releases](https://github.com/RMV-Coder/LocalPass/releases) page. Once installed, *Settings → Updates* keeps the desktop app current (signed updates; see [docs/updates.md](docs/updates.md)).
+
+**Code signing policy:** Windows releases are code signed through SignPath. Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/). What is signed, who approves it, and the privacy policy are in [CODE_SIGNING.md](CODE_SIGNING.md). Signing starts with the first release after the project's SignPath application is approved; earlier releases are unsigned, so SmartScreen or Defender may warn about them.
+
+To build the installer from source instead:
 
 **Prerequisites (Windows):** stable Rust (MSVC toolchain), [Node.js](https://nodejs.org) v24+, and WebView2 (already bundled with Windows 11).
 
@@ -112,7 +116,7 @@ npm run bundle          # builds the daemon, stages it as a sidecar, runs `tauri
 
 The installer is written to `apps/desktop/src-tauri/target/release/bundle/` as an NSIS `.exe` (and/or MSI). Run it to install. The daemon ships **inside** the install and the app auto-starts it on launch, so the installed app is fully self-contained — nothing else to set up.
 
-> The installer is **unsigned** (pre-1.0), so Windows SmartScreen shows an "unrecognized app" prompt — click **More info → Run anyway**.
+> An installer you build yourself is **unsigned**, so Windows SmartScreen shows an "unrecognized app" prompt — click **More info → Run anyway**.
 
 Two shortcuts if you'd rather not build a full installer:
 
