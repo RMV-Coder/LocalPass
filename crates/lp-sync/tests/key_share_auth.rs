@@ -69,18 +69,17 @@ fn only_shares_signed_by_a_pinned_device_are_adopted() {
     // --- adopt: the genuine share is adopted, the planted one refused --------
     let report = engine::adopt_report(&session_b, &root_str, &FsStoreFactory).unwrap();
     assert_eq!(report.adopted, vec![genuine], "only A's vault is adopted");
+    // M's share is refused as coming from an untrusted sender, which is
+    // reported apart from authentication failures (the UI asks the user to
+    // compare fingerprints rather than raising a tamper alarm).
     assert_eq!(
-        report.rejected.len(),
-        1,
-        "M's share is refused: {:?}",
-        report.rejected
+        report.untrusted_sender,
+        vec![planted],
+        "M's share is refused: {report:?}"
     );
-    assert_eq!(report.rejected[0].0, planted);
-    assert!(
-        report.rejected[0].1.contains("not trusted"),
-        "the reason names the untrusted sender: {}",
-        report.rejected[0].1
-    );
+    assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+    assert_eq!(report.vault_folders, 2);
+    assert_eq!(report.shares_for_other_devices, 0);
     let b_vaults: Vec<_> = session_b
         .list_vaults()
         .unwrap()
@@ -94,7 +93,7 @@ fn only_shares_signed_by_a_pinned_device_are_adopted() {
     // adopted vault while M's share stays refused.
     let again = engine::adopt_report(&session_b, &root_str, &FsStoreFactory).unwrap();
     assert!(again.adopted.is_empty());
-    assert_eq!(again.rejected.len(), 1);
+    assert_eq!(again.untrusted_sender, vec![planted]);
 
     // --- blob-level checks ------------------------------------------------------
     let second = session_a.create_vault("second").unwrap();

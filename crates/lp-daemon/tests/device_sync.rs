@@ -341,8 +341,13 @@ fn two_device_share_adopt_and_bidirectional_sync_through_daemons() {
             adopted,
             applied_total,
             alarms,
+            untrusted_shares,
+            vault_folders,
+            ..
         } => {
             assert_eq!(adopted.len(), 1, "B adopted exactly one vault");
+            assert_eq!(untrusted_shares, 0, "B trusts A");
+            assert_eq!(vault_folders, 1, "the root holds A's vault folder");
             assert!(applied_total >= 1, "B applied A's op(s)");
             assert!(alarms.is_empty(), "no alarms on a clean adopt");
             adopted[0].vault_id.clone()

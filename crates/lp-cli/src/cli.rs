@@ -618,7 +618,9 @@ does. An alarm exits non-zero."
 Scans <DIR>/<vault-id>/keys/ for VaultKey blobs sealed to THIS device (shipped \
 by `vault share-to-device` on the sharing device), imports each one (registering \
 the vault locally), enrolls the vault for sync under <DIR>, and pulls its items. \
-Run this on a second device after it has been trusted by the first.")]
+Run this on a second device after the two devices have trusted EACH OTHER (a \
+share from a device this one has not trusted is refused), with <DIR> being the \
+same shared folder the sharing device syncs the vault through.")]
     Adopt {
         /// The shared sync-root directory.
         #[arg(long, value_name = "DIR")]

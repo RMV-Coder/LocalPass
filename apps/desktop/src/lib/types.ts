@@ -250,7 +250,16 @@ export interface AdoptedVaultView {
 export interface SyncAdoptView {
   adopted: AdoptedVaultView[];
   applied_total: number;
+  /** Quarantines from the first pulls, and shares that failed authentication. */
   alarms: string[];
+  /** Shares for this device from a device it has not trusted yet (refused). */
+  untrusted_shares: number;
+  /** Vault folders in the chosen folder (0: no LocalPass data there). */
+  vault_folders: number;
+  /** Shares in the folder addressed to other devices. */
+  shares_for_other_devices: number;
+  /** The chosen folder looks like one vault's folder, not the sync root. */
+  looks_like_vault_folder: boolean;
 }
 
 /** "Sync with a nearby device" (docs/specs/lan-transport.md). All of these are

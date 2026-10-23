@@ -1264,6 +1264,10 @@ pub fn sync_adopt(dir: String) -> Result<SyncAdoptView, String> {
             adopted,
             applied_total,
             alarms,
+            untrusted_shares,
+            vault_folders,
+            shares_for_other_devices,
+            looks_like_vault_folder,
         } => Ok(SyncAdoptView {
             adopted: adopted
                 .into_iter()
@@ -1274,6 +1278,10 @@ pub fn sync_adopt(dir: String) -> Result<SyncAdoptView, String> {
                 .collect(),
             applied_total,
             alarms,
+            untrusted_shares,
+            vault_folders,
+            shares_for_other_devices,
+            looks_like_vault_folder,
         }),
         other => Err(format!("unexpected daemon response: {}", other.kind())),
     }
