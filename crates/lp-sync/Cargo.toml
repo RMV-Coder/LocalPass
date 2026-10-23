@@ -25,6 +25,12 @@ uuid = { version = "1", features = ["v7"] }
 # --- compact device-identity string for pairing are (de)serialized with serde. ---
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# --- The QR transport's fountain code (qr-transport.md §5): RaptorQ, RFC 6330.
+# --- Apache-2.0, no required dependencies. An erasure code, not a crypto
+# --- primitive, so it lives here rather than behind the lp-crypto boundary.
+# --- Its decoder asserts on malformed input, so `qr::frame` validates every
+# --- field before a symbol reaches it. ---
+raptorq = "2.0.1"
 # --- One error enum; typed sync alarms + no secret in any message
 # --- (workspace-pinned). ---
 thiserror = { workspace = true }

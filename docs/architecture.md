@@ -36,7 +36,7 @@ holds long-term key material; the daemon does.
 |-------------|---------------------------|-------------------------|------------|---------|
 | **lp-crypto** | The only crate allowed to touch crypto primitives; misuse-resistant high-level API (KDF, AEAD envelopes, key wrapping, X25519 sealing, Ed25519 signing, TOTP, BLAKE3, the Noise XX handshake/transport for LAN sync). | `derive_master_unlock_key`, `SymmetricKey::{seal,open,derive_subkey}`, `MasterUnlockKey`/`AccountKey`/`VaultKey`/`ItemKey`, `wrap_key`/`unwrap_key`, `seal_for`/`seal_key_for`, `SealingKeyPair::{open,open_key}`, `SigningKeyPair::{sign}`/`VerifyingKey::verify`, `noise::{NoiseHandshake,NoiseTransport}`, `totp::code`, `blake3_256`, `SecretKey` | RustCrypto + dalek primitives, and `snow` (Noise) built on the same primitive versions (see §7 note) | AGPL-3.0 |
 | **lp-vault** | On-disk storage core: account store, per-vault SQLite files, item versioning, folders, trash, local op-log authoring, encrypted incremental search index, backups. | `AccountStore::{create,unlock}`, `Session::{create_vault,open_vault,list_vaults,change_password,lock}`, `Vault::{create_item,get_item,update_item,delete_item,restore_version,history,list_items,search,storage_stats,prune_versions,verify_local_chain}`, `foreign::{Materialization,StoredOp}` + `Vault::apply_foreign_ops`, `backup::{create,verify,restore,restore_single_item}` | `lp-crypto`, `rusqlite` (bundled SQLite) | AGPL-3.0 |
-| **lp-sync** | Op-log sync: ingest verification (signature/seq/hash-chain/Lamport), deterministic total-merge, file-based log shipping, the transport-agnostic LAN sync protocol, offline device-pairing groundwork. | `engine::{setup,push,pull,status,adopt,share_vault_to_device,import_shared_key,ingest}` (`ingest` is the one verify→merge→apply path every transport uses), `nearby::{run,handshake,Linked,Local,Stream,SessionOptions,SessionReport}` (the [LAN transport](specs/lan-transport.md): handshake, record layer, exchange — over any stream, borrowing the session through `Local`), `verify::verify_batch`, `merge::materialize`, `shipping::SyncDir`, `store::{Store,FsStore,StoreFactory,FsStoreFactory,StorePath}` (the channel-I/O seam; every `engine` entry point takes a `&dyn StoreFactory` and resolves the vault's opaque enrolled root string through it, so a host outside the crate can inject a non-filesystem backend; `FsStoreFactory`/`FsStore` is the only backend today), `identity::DeviceIdentity::{to_export_string,from_export_string,fingerprint}` | `lp-vault`, `lp-crypto` | AGPL-3.0 |
+| **lp-sync** | Op-log sync: ingest verification (signature/seq/hash-chain/Lamport), deterministic total-merge, file-based log shipping, the transport-agnostic LAN sync protocol, the offline QR transport (bundles, "what I have" codes, RaptorQ frames), offline device-pairing groundwork. | `engine::{setup,push,pull,status,adopt,share_vault_to_device,import_shared_key,ingest}` (`ingest` is the one verify→merge→apply path every transport uses), `nearby::{run,handshake,Linked,Local,Stream,SessionOptions,SessionReport}` (the [LAN transport](specs/lan-transport.md): handshake, record layer, exchange — over any stream, borrowing the session through `Local`), `qr::{bundle::{export,import,parse},HaveCode,FrameEncoder,FrameDecoder}` (the [QR transport](specs/qr-transport.md): bytes only, no camera or rendering), `verify::verify_batch`, `merge::materialize`, `shipping::SyncDir`, `store::{Store,FsStore,StoreFactory,FsStoreFactory,StorePath}` (the channel-I/O seam; every `engine` entry point takes a `&dyn StoreFactory` and resolves the vault's opaque enrolled root string through it, so a host outside the crate can inject a non-filesystem backend; `FsStoreFactory`/`FsStore` is the only backend today), `identity::DeviceIdentity::{to_export_string,from_export_string,fingerprint}` | `lp-vault`, `lp-crypto`, `raptorq` (RFC 6330 fountain code, Apache-2.0) | AGPL-3.0 |
 | **lp-porter** | Import foreign exports into `ItemPayload`s; write the recoverable age archive and guarded plaintext exports. Pure format I/O — never opens a vault, never persists. | `import::{onepux,bitwarden,lastpass,csv_generic,dotenv}::parse_*`, `import::kdbx::parse_file`, `export::archive::{encrypt_archive,decrypt_archive}`, `export::plaintext::{to_json,to_csv}`, `export::dotenv::to_dotenv` | `lp-vault` (item model), `age` (foreign-format exception) | AGPL-3.0 |
 | **lp-daemon** | Per-user background process holding one unlocked `Session` behind a same-user-only IPC channel; also serves a vault-backed SSH agent on a second endpoint; server-side origin authority for autofill; the LAN sync listener and dialer. | binary `localpass-daemon`; `protocol::{Request,Response}`, `client::{call,probe}`, `spawn`, `server`, `engine`, `origin::registrable_domain`, `sshagent`, `nearby::{dial,bind,serve,is_local_address,run_deferred}` | `lp-vault`, `lp-crypto`, `ssh-key` (foreign-format), `windows-sys`/`libc` | AGPL-3.0 |
 | **lp-cli** | The `localpass` binary: init, vault/item CRUD, generate, run/env/reference resolution, ssh, backup, import/export, sync, device, browser registration, and an MCP stdio server for AI coding agents. A daemon client + direct-unlock fallback. | binary `localpass`; command tree in `cli.rs`; MCP server in `mcp/` (masking choke point `mcp::mask::item_view_masked`) | `lp-vault`, `lp-crypto`, `lp-daemon`, `lp-porter`, `lp-sync`, `lp-native-host`, `clap` | AGPL-3.0 |
@@ -128,14 +128,18 @@ graph TB
     CORE <-- "file-based E2EE op log<br/>(sign + hash-chain verified)" --> FILES
     FILES <--> DEV2
     CORE <-- "Noise XX over TCP, pinned peers only,<br/>opt-in time-boxed listen window<br/>(lan-transport.md)" --> DEV2
+    CORE <-- "animated QR stream, one-way, no network<br/>RaptorQ frames of an E2EE bundle<br/>(qr-transport.md)" --> DEV2
     CORE -. "P2 — not built" .-> RELAY
     CORE -. "P2 — not built" .-> TEAM
 ```
 
-Compare with PRD §7.1: the shape is the same. Two sync transports exist: the
-**file-based op log** shipped over a dumb channel, and the **direct LAN
+Compare with PRD §7.1: the shape is the same. Three sync transports exist: the
+**file-based op log** shipped over a dumb channel, the **direct LAN
 transport** ([lan-transport.md](specs/lan-transport.md)) — Noise XX between two
-already-pinned devices on the same network, carrying the same canonical op bytes
+already-pinned devices on the same network — and the **QR transport**
+([qr-transport.md](specs/qr-transport.md)): one device plays an animated QR
+stream (a RaptorQ fountain code over a bundle of shares and ops), the other
+films it, with no network at all. All three carry the same canonical op bytes
 through the same ingest path. mDNS discovery, the relay, and the team server are
 not built (see [sync-protocol.md](specs/sync-protocol.md) §7.4).
 
@@ -237,6 +241,7 @@ Mirrors PRD §7.3, narrowed to what is built:
 | Daemon ↔ CLI / GUI / native-host | control IPC | Same-user-only channel: **Windows** named pipe `\\.\pipe\localpass-<user>` with a DACL granting only the current user's SID + `PIPE_REJECT_REMOTE_CLIENTS`; **Unix** UDS at `$XDG_RUNTIME_DIR/localpass/daemon.sock`, dir `0700` / socket `0600` + `SO_PEERCRED` euid check. The OS-enforced same-user restriction *is* the authentication (PRD §8 T8). The native-host client is further capability-scoped to fill-only. |
 | Webview ↔ Rust | Tauri commands | The `#[tauri::command]` set is the whole bridge. `get_item` calls the daemon with `reveal=false` **and** re-masks via the single `#[must_use]` `model::item_view_masked` choke point (a test asserts the serialized JSON never contains a planted secret). Secrets cross only via `reveal_field` / `totp` / the generator, on an explicit gesture; strict CSP, no remote content, no eval. |
 | Device ↔ device | sync op log | Every op is Ed25519-signed over its full canonical form *including ciphertext* (sign-after-encrypt) and encrypted under the VaultKey; a per-device `seq` + BLAKE3 `prev_hash` chain + Lamport monotonicity make drop/replay/rollback/tamper detectable and alarmed on ingest (sync-protocol.md §5). Transports: the file channel, and the LAN link (lan-transport.md), where both sides authenticate against `peer_devices` inside a Noise XX handshake — a per-connection static key certified by the device's Ed25519 identity key — before any application data is read. SAS pairing is not built (manual fingerprint compare). |
+| Camera ↔ app | QR stream | Untrusted like the sync folder: every frame is checked (size, magic, version, CRC, declared sizes) before it reaches the RaptorQ decoder; the rebuilt bundle is refused whole unless its BLAKE3 hash matches; shares need a pinned sender's signature and ops the §5 verifier. A filmed screen shows ciphertext and sync metadata only (qr-transport.md §11). |
 | Network ↔ daemon | LAN sync listener | The daemon's only TCP socket, open only inside an opt-in, time-boxed "Sync with a nearby device" window (one session; closes on lock). Accepts only local-network peer addresses, refuses unpinned devices in the handshake, and speaks only the sync exchange — never a daemon request. All network I/O runs outside the state mutex. |
 | Browser ↔ host | native messaging | Host holds no keys; issues only `Status`/`MatchLogins`/`FillLogin`. Candidate lists never carry a password; on `FillLogin` the **daemon** re-validates the item's URL against the requested origin's registrable domain (`lp_daemon::origin`) server-side before releasing the secret — the extension's claim is not trusted (PRD §8 T7). |
 | AI agent ↔ vault | `localpass mcp` tools | **No MCP tool result ever carries a raw secret value** — anything returned lands in an agent transcript, which must be treated as permanent disclosure. Items are re-masked through the single `#[must_use]` `mcp::mask::item_view_masked` choke point (the raw `ItemView` is deliberately not `Serialize`) *and*, on the daemon route, fetched with `reveal = false` so the daemon masks first. A value leaves the vault only into a child process's environment via `run_with_secrets`, which then redacts every occurrence of it from the captured stdout/stderr and re-checks before answering. No write/export tool exists. See [mcp-server.md](specs/mcp-server.md). |
@@ -317,11 +322,19 @@ Notes grounded in the specs and code:
   **plaintext metadata only** — ids, kinds, timestamps, field *names* — and
   never a secret value or a vault/item name. Read it with `localpass audit`
   (`--since`, `--json`, `--verify`) or, from a daemon client, `Request::AuditList`.
-- **Sync has two transports**: the file channel and the direct LAN link
-  (`localpass sync nearby`, daemon `Nearby*` requests; lan-transport.md). The
-  desktop/Android entry points and mDNS discovery for the LAN link are
-  follow-ups; the relay and team sharing/roles/revocation are Phase 2
-  (sync-protocol.md §6, §7.4, §10).
+- **Sync has three transports**: the file channel, the direct LAN link
+  (Devices → Sync with a nearby device; `localpass sync nearby`, daemon
+  `Nearby*` requests; lan-transport.md) and the QR stream (Devices → Sync by
+  QR code; `localpass sync qr`, daemon `QrHaveCode`/`QrExport`/`QrImport`;
+  qr-transport.md). mDNS discovery for the LAN link is a follow-up; the relay
+  and team sharing/roles/revocation are Phase 2 (sync-protocol.md §6, §7.4,
+  §10).
+- **The QR transport moves bundles by path.** The daemon writes and reads the
+  bundle file (like attachments), so bundle bytes never cross the IPC pipe;
+  the GUI backend runs the RaptorQ encoder/decoder (`lp_sync::qr`) and renders
+  frames with the `qrcode` crate; the webview only draws module matrices and
+  runs the camera + jsQR loop (in Web Workers) — on Android too, through the
+  WebView's own getUserMedia.
 - **The LAN transport keeps the network out of the state mutex.** The engine
   validates a `NearbyListen`/`NearbyConnect` under the lock and returns a
   deferred job (`Handled::deferred`); the server runs it after releasing the

@@ -28,8 +28,8 @@
 //! so a daemon can lend its session mutex without a slow peer ever holding it.
 
 mod channel;
-mod exchange;
-mod message;
+pub(crate) mod exchange;
+pub(crate) mod message;
 
 use std::io::{Read, Write};
 use std::time::Duration;

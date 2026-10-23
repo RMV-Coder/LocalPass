@@ -56,10 +56,10 @@ pub(super) fn cap_for(kind: u8) -> Option<usize> {
 }
 
 /// Per vault id, per author device id, the highest seq held.
-pub(super) type Inventory = BTreeMap<[u8; 16], BTreeMap<[u8; 16], u64>>;
+pub(crate) type Inventory = BTreeMap<[u8; 16], BTreeMap<[u8; 16], u64>>;
 
 /// Per vault id, the blob hashes wanted (ascending).
-pub(super) type BlobWants = BTreeMap<[u8; 16], Vec<[u8; 32]>>;
+pub(crate) type BlobWants = BTreeMap<[u8; 16], Vec<[u8; 32]>>;
 
 // --- Encoders ----------------------------------------------------------------
 
@@ -76,7 +76,7 @@ fn put_u32(out: &mut Vec<u8>, n: usize) -> Result<()> {
 }
 
 /// `HELLO`: `u16 n || n × (vault_id || u32 len || share blob)`.
-pub(super) fn encode_hello(shares: &[(VaultId, Vec<u8>)]) -> Result<Vec<u8>> {
+pub(crate) fn encode_hello(shares: &[(VaultId, Vec<u8>)]) -> Result<Vec<u8>> {
     if shares.len() > MAX_SHARES {
         return Err(Error::Invalid("too many vaults to share in one session"));
     }
@@ -91,7 +91,7 @@ pub(super) fn encode_hello(shares: &[(VaultId, Vec<u8>)]) -> Result<Vec<u8>> {
 }
 
 /// `INVENTORY`: `u16 n || n × (vault_id || u16 m || m × (device_id || u64 seq))`.
-pub(super) fn encode_inventory(inv: &Inventory) -> Result<Vec<u8>> {
+pub(crate) fn encode_inventory(inv: &Inventory) -> Result<Vec<u8>> {
     if inv.len() > MAX_VAULTS {
         return Err(Error::Invalid("too many vaults for one nearby session"));
     }
@@ -112,7 +112,7 @@ pub(super) fn encode_inventory(inv: &Inventory) -> Result<Vec<u8>> {
 }
 
 /// `OPS`: `vault_id || segment body` (§7.1 framing).
-pub(super) fn encode_ops(vault_id: &VaultId, ops: &[StoredOp]) -> Vec<u8> {
+pub(crate) fn encode_ops(vault_id: &VaultId, ops: &[StoredOp]) -> Vec<u8> {
     let mut out = Vec::with_capacity(16);
     out.extend_from_slice(vault_id.as_bytes());
     out.extend_from_slice(&wire::encode_segment(ops));
@@ -120,7 +120,7 @@ pub(super) fn encode_ops(vault_id: &VaultId, ops: &[StoredOp]) -> Vec<u8> {
 }
 
 /// `BLOB_WANT`: `u16 n || n × (vault_id || u32 k || k × hash)`.
-pub(super) fn encode_blob_want(wants: &BlobWants) -> Result<Vec<u8>> {
+pub(crate) fn encode_blob_want(wants: &BlobWants) -> Result<Vec<u8>> {
     let total: usize = wants.values().map(Vec::len).sum();
     if total > MAX_WANTED_BLOBS || wants.len() > MAX_VAULTS {
         return Err(Error::Invalid(
@@ -140,7 +140,7 @@ pub(super) fn encode_blob_want(wants: &BlobWants) -> Result<Vec<u8>> {
 }
 
 /// `BLOB`: `vault_id || hash || bytes`.
-pub(super) fn encode_blob(vault_id: &VaultId, hash: &[u8; 32], bytes: &[u8]) -> Vec<u8> {
+pub(crate) fn encode_blob(vault_id: &VaultId, hash: &[u8; 32], bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(BLOB_HEADER_LEN + bytes.len());
     out.extend_from_slice(vault_id.as_bytes());
     out.extend_from_slice(hash);
@@ -220,7 +220,7 @@ fn ascending<T: Ord>(prev: Option<&T>, next: &T) -> Result<()> {
 }
 
 /// Decode `HELLO`.
-pub(super) fn decode_hello(body: &[u8]) -> Result<Vec<(VaultId, Vec<u8>)>> {
+pub(crate) fn decode_hello(body: &[u8]) -> Result<Vec<(VaultId, Vec<u8>)>> {
     let mut c = Cursor::new(body);
     let n = c.u16()?;
     if n > MAX_SHARES {
@@ -239,7 +239,7 @@ pub(super) fn decode_hello(body: &[u8]) -> Result<Vec<(VaultId, Vec<u8>)>> {
 }
 
 /// Decode `INVENTORY`.
-pub(super) fn decode_inventory(body: &[u8]) -> Result<Inventory> {
+pub(crate) fn decode_inventory(body: &[u8]) -> Result<Inventory> {
     let mut c = Cursor::new(body);
     let n = c.u16()?;
     if n > MAX_VAULTS {
@@ -270,7 +270,7 @@ pub(super) fn decode_inventory(body: &[u8]) -> Result<Inventory> {
 }
 
 /// Decode `OPS`: the vault id and its ops, each of which must belong to it.
-pub(super) fn decode_ops(body: &[u8]) -> Result<(VaultId, Vec<StoredOp>)> {
+pub(crate) fn decode_ops(body: &[u8]) -> Result<(VaultId, Vec<StoredOp>)> {
     let mut c = Cursor::new(body);
     let vault_id = Id::from_bytes(c.id()?);
     let ops = wire::decode_segment(c.rest())
@@ -282,7 +282,7 @@ pub(super) fn decode_ops(body: &[u8]) -> Result<(VaultId, Vec<StoredOp>)> {
 }
 
 /// Decode `BLOB_WANT`.
-pub(super) fn decode_blob_want(body: &[u8]) -> Result<BlobWants> {
+pub(crate) fn decode_blob_want(body: &[u8]) -> Result<BlobWants> {
     let mut c = Cursor::new(body);
     let n = c.u16()?;
     if n > MAX_VAULTS {
@@ -313,7 +313,7 @@ pub(super) fn decode_blob_want(body: &[u8]) -> Result<BlobWants> {
 }
 
 /// Decode `BLOB`.
-pub(super) fn decode_blob(body: &[u8]) -> Result<(VaultId, [u8; 32], &[u8])> {
+pub(crate) fn decode_blob(body: &[u8]) -> Result<(VaultId, [u8; 32], &[u8])> {
     let mut c = Cursor::new(body);
     let vault = Id::from_bytes(c.id()?);
     let hash = c.hash()?;
@@ -322,7 +322,7 @@ pub(super) fn decode_blob(body: &[u8]) -> Result<(VaultId, [u8; 32], &[u8])> {
 
 /// Lowercase hex of a 32-byte hash (the form `lp-vault`'s attachment API
 /// takes).
-pub(super) fn hash_hex(hash: &[u8; 32]) -> String {
+pub(crate) fn hash_hex(hash: &[u8; 32]) -> String {
     use std::fmt::Write as _;
     let mut s = String::with_capacity(64);
     for b in hash {
@@ -332,7 +332,7 @@ pub(super) fn hash_hex(hash: &[u8; 32]) -> String {
 }
 
 /// Parse a 64-char hex hash; `None` on anything else.
-pub(super) fn hash_from_hex(s: &str) -> Option<[u8; 32]> {
+pub(crate) fn hash_from_hex(s: &str) -> Option<[u8; 32]> {
     if s.len() != 64 {
         return None;
     }
