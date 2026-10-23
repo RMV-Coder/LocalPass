@@ -208,17 +208,20 @@ tracked follow-ups. They are the real content of this document.
    losers preserved as versions), but strengthening the causality model is a
    tracked pre-1.0 follow-up (LESSONS.md 2026-07-04; sync-protocol.md §4).
 
-8. **TOTP title-from-URI (tracked follow-up).** A minor open item: deriving an
-   item title from an `otpauth://` URI's issuer/account. Tracked; not a
-   correctness issue (the URI's secret/issuer/account/algo/digits/period are all
-   parsed correctly).
+8. **TOTP title-from-URI. — RESOLVED.** `item add --type totp --otpauth-uri`
+   without `--title` names the item from the URI's issuer/account label
+   ("Issuer (account)", or whichever half is present) since `470ac88`
+   (2026-07-04), tested in `crates/lp-cli/tests/totp.rs`. This note was stale
+   until the 2026-10-22 checklist review.
 
 9. **age-CLI manual verification (LESSONS.md).** Exit-hatch compatibility of the
    age export archive is proven by construction (exact `age-encryption.org/v1`
    magic + standard scrypt stanza + official-crate provenance + in-crate
-   round-trip). The standalone `age` CLI cannot decrypt non-interactively
-   (passphrase input is TTY-only), so a **one-time manual `age -d backup.age`
-   check by a human is still worth doing before 1.0.**
+   round-trip). **Verified with the standalone CLI on 2026-10-22:** age v1.3.1
+   ships `age-plugin-batchpass`, which takes the passphrase from
+   `AGE_PASSPHRASE`, so `age -d -j batchpass` decrypted a `localpass export
+   age` archive from a test profile to a tar holding `vault.json` with the
+   exported item.
 
 10. **Cross-device VaultKey unwrap primitive. — RESOLVED.** Shares unwrap
     through `lp-crypto`'s typed key transport (`seal_key_for` →
@@ -228,8 +231,10 @@ tracked follow-ups. They are the real content of this document.
 
 11. **Signed releases / release engineering (PRD §9.1, §5.1, §6.9).** Only an
     unsigned Windows bundle and a signed Android APK are built
-    (`desktop-release.yml`); no macOS/Linux builds, release signing, SBOM, or
-    provenance yet. Deferred until the audit and format-freeze gates pass.
+    (`desktop-release.yml`), plus, since #47, a minisign-signed feed for the
+    in-app updater; Windows code signing through SignPath is in review (#49).
+    No macOS/Linux builds, release signing, SBOM, or provenance yet. Deferred
+    until the audit and format-freeze gates pass.
 
 12. **Automatic backup scheduling (PRD §4.11).** The backup *mechanism* (create,
     rotate/`--keep`, verify, restore) is complete, but the "default daily"
