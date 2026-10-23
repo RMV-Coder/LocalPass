@@ -1889,8 +1889,27 @@ pub enum Response {
         adopted: Vec<WireAdoptedVault>,
         /// Total ops applied across all adopted vaults' initial pulls.
         applied_total: usize,
-        /// Secret-free alarm descriptions raised during the adopt pulls.
+        /// Secret-free alarm descriptions raised during the adopt pulls, and
+        /// shares refused for failing authentication.
         alarms: Vec<String>,
+        /// Shares addressed to this device from a device it has not trusted
+        /// yet: refused (nothing imported) and left in place, so they are
+        /// picked up once the user compares fingerprints and trusts the
+        /// sender. Not an alarm. This and the fields below explain an empty
+        /// result; all are `#[serde(default)]`, so an older daemon's answer
+        /// still decodes.
+        #[serde(default)]
+        untrusted_shares: usize,
+        /// How many vault folders `dir` holds (zero: not a LocalPass sync
+        /// folder, or not synced to this device yet).
+        #[serde(default)]
+        vault_folders: usize,
+        /// Shares in `dir` addressed to other devices.
+        #[serde(default)]
+        shares_for_other_devices: usize,
+        /// `dir` looks like one vault's folder rather than the sync root.
+        #[serde(default)]
+        looks_like_vault_folder: bool,
     },
     /// A nearby-sync listen window is open (answer to
     /// [`Request::NearbyListen`]).

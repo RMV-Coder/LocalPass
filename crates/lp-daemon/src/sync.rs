@@ -308,8 +308,11 @@ pub(crate) fn sync_adopt(
     let names = session.list_vaults().unwrap_or_default();
     let mut wire = Vec::with_capacity(report.adopted.len());
     let mut applied_total = 0usize;
-    // A refused share is an alarm: something in the untrusted folder offered
-    // this device a vault key it could not authenticate.
+    // A share that fails authentication is an alarm: something in the
+    // untrusted folder offered this device a vault key it could not verify.
+    // A share from a device this one has not trusted yet is reported apart
+    // (`untrusted_shares`): usually only one of the two devices trusted the
+    // other, which the user fixes by comparing fingerprints.
     let mut alarms: Vec<String> = report
         .rejected
         .iter()
@@ -341,6 +344,10 @@ pub(crate) fn sync_adopt(
         adopted: wire,
         applied_total,
         alarms,
+        untrusted_shares: report.untrusted_sender.len(),
+        vault_folders: report.vault_folders,
+        shares_for_other_devices: report.shares_for_other_devices,
+        looks_like_vault_folder: report.looks_like_vault_folder,
     })
 }
 

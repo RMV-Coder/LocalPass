@@ -257,6 +257,33 @@ impl SyncDir {
         self.store.read(&path)
     }
 
+    /// The devices that sealed VaultKey blobs in `keys/` are addressed to,
+    /// parsed from the file names (`<device_id>-<vault_id>.wrapped`). Only a
+    /// diagnostic for [`crate::engine::adopt_report`]: names are untrusted and
+    /// a malformed one is skipped.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] on a directory read failure other than not-found.
+    pub fn list_key_blob_recipients(&self) -> Result<Vec<DeviceId>> {
+        let dir = self.root.join(KEYS_DIR);
+        let entries = match self.store.list_dir(&dir) {
+            Ok(e) => e,
+            Err(e) if is_not_found(&e) => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let suffix = format!("-{}.wrapped", self.vault_id.to_hyphenated());
+        Ok(entries
+            .into_iter()
+            .filter(|e| !e.is_dir)
+            .filter_map(|e| {
+                let device = e.name.strip_suffix(&suffix)?;
+                let uuid = uuid::Uuid::parse_str(device).ok()?;
+                Some(DeviceId::from_bytes(*uuid.as_bytes()))
+            })
+            .collect())
+    }
+
     // --- Attachment blobs (§7 file channel, content-addressed) ------------
 
     /// Write a content-addressed attachment blob to

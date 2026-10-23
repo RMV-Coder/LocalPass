@@ -663,22 +663,37 @@ pub fn adopt(
     Ok(adopt_report(session, sync_root, factory)?.adopted)
 }
 
-/// What [`adopt_report`] did.
+/// What [`adopt_report`] did, and enough about the folder to explain an empty
+/// result ("nothing was shared to this device" has several different causes).
 #[derive(Debug, Default)]
 pub struct AdoptReport {
     /// Vaults imported and enrolled.
     pub adopted: Vec<VaultId>,
-    /// Shares refused, with the reason. Their blobs are left in place (nothing
-    /// was imported or enrolled) so the user can inspect them; a genuine
-    /// sharer can re-share after the devices trust each other.
+    /// Shares refused because they failed authentication: unsigned (old
+    /// format), a bad signature, tampered, or not unsealable. Their blobs are
+    /// left in place (nothing was imported or enrolled).
     pub rejected: Vec<(VaultId, String)>,
+    /// Shares addressed to this device from a device it has not trusted.
+    /// Refused exactly like `rejected` (nothing imported), but reported apart:
+    /// the usual cause is that only one of the two devices trusted the other,
+    /// which the user fixes by comparing fingerprints and trusting it. Left in
+    /// place, so a later adopt picks the share up once the sender is trusted.
+    pub untrusted_sender: Vec<VaultId>,
+    /// How many vault folders the root holds (zero: not a LocalPass sync
+    /// folder, or not synced to this device yet).
+    pub vault_folders: usize,
+    /// How many shares in the folder are addressed to other devices.
+    pub shares_for_other_devices: usize,
+    /// The folder looks like one vault's folder (`keys/`, `ops/`) rather than
+    /// the sync root that holds the vault folders.
+    pub looks_like_vault_folder: bool,
 }
 
-/// [`adopt`], also reporting the shares it refused. A share is refused when it
-/// is unsigned (old format), comes from a device this one has not pinned, or
-/// fails signature verification or unsealing. One bad blob never blocks the
-/// rest: the sync folder is untrusted, so a planted blob must not be able to
-/// stop a legitimate adopt either.
+/// [`adopt`], also reporting the shares it refused and what it saw. A share is
+/// refused when it is unsigned (old format), comes from a device this one has
+/// not pinned, or fails signature verification or unsealing. One bad blob never
+/// blocks the rest: the sync folder is untrusted, so a planted blob must not be
+/// able to stop a legitimate adopt either.
 ///
 /// # Errors
 ///
@@ -693,7 +708,11 @@ pub fn adopt_report(
     // The scan and every per-vault dir below share one channel backend, so the
     // whole adopt walk goes through a single `Store` seam (one factory call).
     let store = factory.open(sync_root)?;
-    for entry in store.list_dir(&StorePath::root())? {
+    let entries = store.list_dir(&StorePath::root())?;
+    report.looks_like_vault_folder = ["keys", "ops"]
+        .iter()
+        .all(|name| entries.iter().any(|e| e.is_dir && e.name == *name));
+    for entry in entries {
         if !entry.is_dir {
             continue;
         }
@@ -703,11 +722,23 @@ pub fn adopt_report(
             continue;
         };
         let vault_id = VaultId::from_bytes(*uuid.as_bytes());
+        report.vault_folders += 1;
 
         let dir = SyncDir::with_store(std::sync::Arc::clone(&store), vault_id)?;
+        report.shares_for_other_devices += dir
+            .list_key_blob_recipients()?
+            .iter()
+            .filter(|d| **d != self_id)
+            .count();
         if let Some(blob) = dir.read_key_blob(&self_id)? {
             match session.import_shared_vault_key(&vault_id, &blob) {
                 Ok(_) => {}
+                Err(lp_vault::Error::Invalid(msg))
+                    if msg == lp_vault::account::UNTRUSTED_SHARE_SENDER =>
+                {
+                    report.untrusted_sender.push(vault_id);
+                    continue;
+                }
                 Err(e @ (lp_vault::Error::Invalid(_) | lp_vault::Error::DecryptionFailed)) => {
                     report.rejected.push((vault_id, e.to_string()));
                     continue;
