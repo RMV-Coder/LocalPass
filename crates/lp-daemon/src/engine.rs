@@ -1344,6 +1344,44 @@ pub fn handle_with(state: &mut State, request: Request, ctx: &RequestContext) ->
             })
         }
 
+        // --- Sync by QR code (`qr-transport.md` §10.2) ----------------------
+        // Path-based like attachments: the daemon writes and reads the bundle
+        // file itself. Nothing here waits on another device (the camera and
+        // the player live in the client), so it runs under the lock like a
+        // folder push or pull.
+        Request::QrHaveCode { vaults, .. } => with_session(state, |session| {
+            crate::qr::have_code(session, &vaults, &resolve_vault_id)
+        }),
+
+        Request::QrExport {
+            out_path,
+            vaults,
+            have,
+            peer,
+            share,
+            attachments,
+            force,
+            ..
+        } => with_session(state, |session| {
+            crate::qr::export(
+                session,
+                &out_path,
+                &vaults,
+                have.as_deref(),
+                peer.as_deref(),
+                &share,
+                attachments,
+                force,
+                &resolve_vault_id,
+            )
+        }),
+
+        Request::QrImport {
+            path, transfer_id, ..
+        } => with_session(state, |session| {
+            crate::qr::import(session, &path, transfer_id.as_deref())
+        }),
+
         // --- Attachments (path-based; no blob bytes cross the pipe) ---------
         Request::AddAttachment {
             vault,

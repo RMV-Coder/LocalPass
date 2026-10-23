@@ -49,6 +49,7 @@ pub fn run(profile_dir: &Path, src: PasswordSource, command: &SyncCommand) -> Re
         SyncCommand::Pull { vault, json } => pull(&session, vault, *json),
         SyncCommand::Status { vault, json } => status(&session, vault, *json),
         SyncCommand::Adopt { dir } => adopt(&session, dir),
+        SyncCommand::Qr { command } => crate::commands::qr::run(&session, command),
         SyncCommand::Nearby {
             listen,
             connect,
@@ -457,7 +458,7 @@ fn adopt(session: &lp_vault::Session, dir: &Path) -> Result<()> {
 pub fn map_sync_error(e: lp_sync::Error) -> CliError {
     match e {
         lp_sync::Error::Vault(v) => map_vault_error(v),
-        lp_sync::Error::Invalid(m) => CliError::Usage(m.to_string()),
+        lp_sync::Error::Invalid(m) | lp_sync::Error::Qr(m) => CliError::Usage(m.to_string()),
         other => CliError::Internal(anyhow::anyhow!("{other}")),
     }
 }

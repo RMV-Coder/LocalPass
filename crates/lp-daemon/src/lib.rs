@@ -92,6 +92,7 @@ pub mod nearby;
 pub mod origin;
 pub mod presence;
 pub mod protocol;
+pub mod qr;
 pub mod render;
 pub mod server;
 pub mod spawn;

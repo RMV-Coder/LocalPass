@@ -23,6 +23,7 @@ pub mod generate;
 pub mod hello;
 pub mod item_input;
 pub mod model;
+pub mod qrsync;
 #[cfg(target_os = "android")]
 pub mod safstore;
 pub mod updates;
@@ -169,6 +170,18 @@ pub fn run() {
             commands::hello_unlock,
             updates::update_check,
             updates::update_install,
+            // Sync by QR code (qr-transport.md §10.4).
+            qrsync::qr_have_code,
+            qrsync::qr_have_parse,
+            qrsync::qr_send_start,
+            qrsync::qr_default_code_size,
+            qrsync::qr_send_frames,
+            qrsync::qr_send_stop,
+            qrsync::qr_receive_start,
+            qrsync::qr_receive_frames,
+            qrsync::qr_receive_progress,
+            qrsync::qr_receive_finish,
+            qrsync::qr_receive_cancel,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the LocalPass desktop application");
