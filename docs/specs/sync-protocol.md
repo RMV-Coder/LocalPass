@@ -13,9 +13,11 @@ envelope, the deterministic total-merge algorithm (field-level LWW with
 loser-preservation), the per-peer sequence hash chain that detects
 rollback/tamper/drop (PRD §8 T13), a brief device-pairing trust summary, and the
 **file-based log-shipping layout** — the MVP-default "dumb file channel" sync
-(PRD §11 #6). Live network transports (Noise XX/IK over TCP/QUIC) and the P2
-relay are out of scope here except where the on-disk log layout constrains them;
-only their extension points are noted.
+(PRD §11 #6). The live LAN transport is specified separately in
+[`lan-transport.md`](lan-transport.md) (it carries these same canonical op bytes
+and reuses §4/§5 unchanged); QUIC and the P2 relay are out of scope here except
+where the on-disk log layout constrains them; only their extension points are
+noted.
 
 Fixed contracts honored: ops are encrypted with **Envelope v1** under the
 `VaultKey`; ops are **signed with the device Ed25519 key** over the full op
@@ -304,8 +306,11 @@ T13 for a zero-trust channel.
   handshake transcript; the user compares them out-of-band (PRD §4.5). Match →
   each device stores the other's long-term **static** Ed25519 + X25519 public
   keys in `peer_devices` (`vault-format.md` §2), `verified_at` set.
-- All live sync is **mutually authenticated** by those pinned static keys
-  (Noise XX/IK, PRD §5.2/§6.4) — MITM (T4) is defeated by the pinning + SAS.
+- All live sync is **mutually authenticated** against those pinned keys: the
+  LAN transport runs Noise XX with a per-connection static key that each side
+  certifies with its pinned Ed25519 identity key ([`lan-transport.md`](lan-transport.md)
+  §3–§4) — MITM (T4) is defeated by the pinning + the out-of-band fingerprint
+  compare.
 - Only paired devices' `device_id`s are accepted as op authors (§5 step 1).
 - The same rule gates **vault-key shares** (§7.1 `keys/`): a share is signed by
   the sharing device and accepted only from a pinned peer.
@@ -431,9 +436,11 @@ is skipped (content-addressed).
 
 ### 7.4 Extension points (out of scope, noted)
 
-- **Live transport (Noise XX/IK over TCP, QUIC P2):** ships the same canonical op
-  bytes over a mutually-authenticated stream instead of files; the ingest
-  verifier (§5) and merge (§4) are transport-agnostic and unchanged.
+- **Live transport — now specified and built:** [`lan-transport.md`](lan-transport.md)
+  ships the same canonical op bytes (the §7.1 segment body, byte for byte) over
+  a Noise XX link between pinned devices; received ops go through the same
+  ingest function `pull` uses (`lp_sync::engine::ingest`), so the §5 verifier
+  and §4 merge are unchanged. QUIC remains P2.
 - **Relay (P2):** stores the same per-device segments as opaque blobs keyed by
   `device_id`+`seq`; pairing-code-gated enrollment (PRD §11 #7). The relay sees
   only ciphertext + `device_id`/`seq` (all §5 protections apply); it is a
@@ -488,9 +495,9 @@ is skipped (content-addressed).
 
 ## 10. Non-goals
 
-- **Live network transport internals** (Noise handshake state machine, mDNS
-  discovery, QUIC): out of scope; only the shared op format and the ingest
-  contract are fixed here.
+- **Live network transport internals** (handshake, framing, discovery): in
+  [`lan-transport.md`](lan-transport.md), not here; QUIC is P2. Only the shared
+  op format and the ingest contract are fixed here.
 - **Relay protocol details** (enrollment API, store-and-forward GC): P2; only
   the extension point and its zero-trust posture are noted (§7.4).
 - **Team membership / roles / revocation cryptography:** P2 (PRD §4.5); MVP is

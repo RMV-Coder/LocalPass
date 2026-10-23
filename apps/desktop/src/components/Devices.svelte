@@ -16,6 +16,13 @@
   vault-key share is sealed inside the daemon/engine; this screen only ever names
   a device id. Sync alarms (quarantine/tamper) are surfaced prominently below the
   Pull button, never swallowed.
+
+  NEARBY SYNC (docs/specs/lan-transport.md): "Sync with a nearby device" talks to
+  a trusted device directly over the local network. The service owns the
+  socket, the handshake and the exchange; this screen only opens or closes the
+  short listen window, dials an address the user typed or scanned, and shows the
+  report. The address QR carries only `IP:port` — whoever answers is still
+  authenticated against the trusted devices by the handshake.
 -->
 <script lang="ts">
   import {
@@ -35,9 +42,16 @@
     syncDirPickerAvailable,
     pickSyncDir,
     listPendingDevices,
+    nearbyListen,
+    nearbyStatus,
+    nearbyStop,
+    nearbyConnect,
+    nearbyAddressQrSvg,
   } from "../lib/api";
   import type {
     DeviceIdentityView,
+    NearbyReportView,
+    NearbyStatusView,
     PeerView,
     PendingDeviceView,
     SyncStatusView,
@@ -49,6 +63,7 @@
   import { formatTimestamp } from "../lib/format";
   import { toast } from "../lib/toast";
   import { summarizeSync } from "../lib/syncsummary";
+  import { isIdentityQr, listenEndMessage, parseNearbyQr, summarizeNearby } from "../lib/nearby";
   import { adoptOutcome, folderUsedByAnotherDevice, type Outcome } from "../lib/vaultshare";
   import Icon from "./Icon.svelte";
 
@@ -207,10 +222,15 @@
   let scanBusy = $state(false);
   let scanError = $state("");
   let showCamera = $state(false); // desktop webcam modal open
+  // What the scan is for: a device identity (the trust box) or a nearby-sync
+  // address (the connect box). Each lands only in its own field.
+  let scanTarget = $state<"identity" | "nearby">("identity");
 
   // Dispatch the Scan button to the right backend for this platform.
-  function startScan() {
+  function startScan(target: "identity" | "nearby" = "identity") {
+    scanTarget = target;
     scanError = "";
+    if (target === "nearby") nearbyError = "";
     if (mobile) {
       doScan();
     } else {
@@ -218,10 +238,24 @@
     }
   }
 
+  /** Put a decoded QR where the scan was started from. */
+  function useScan(data: string) {
+    if (scanTarget === "nearby") {
+      useNearbyScan(data);
+    } else {
+      pasted = data; // → fingerprint preview re-runs, confirmation resets
+    }
+  }
+
+  function setScanError(message: string) {
+    if (scanTarget === "nearby") nearbyError = message;
+    else scanError = message;
+  }
+
   // Desktop: the CameraScan modal decoded a QR. Same effect as a paste.
   function onCameraDetected(data: string) {
     showCamera = false;
-    pasted = data; // → fingerprint preview re-runs, confirmation resets
+    useScan(data);
   }
 
   async function loadIsMobile() {
@@ -251,21 +285,21 @@
         perm = await requestPermissions();
       }
       if (perm !== "granted") {
-        scanError = "Camera access is needed to scan a QR code.";
+        setScanError("Camera access is needed to scan a QR code.");
         return;
       }
       const result = await scan({ windowed: false, formats: [Format.QRCode] });
       const content = result?.content?.trim();
       if (!content) {
-        scanError = "Nothing was scanned.";
+        setScanError("Nothing was scanned.");
         return;
       }
-      pasted = content; // → fingerprint preview re-runs, confirmation resets
+      useScan(content);
     } catch (err) {
       // A user-cancelled scan is not an error worth shouting about.
       const msg = typeof err === "string" ? err : ((err as Error)?.message ?? "");
       if (!/cancel/i.test(msg)) {
-        scanError = msg || "Could not scan a QR code.";
+        setScanError(msg || "Could not scan a QR code.");
       }
     } finally {
       scanBusy = false;
@@ -363,6 +397,8 @@
   // QR, so the control flips to OFF exactly when the window closes.
   $effect(() => {
     const id = setInterval(() => {
+      // The nearby window's countdown (the poll below re-syncs it).
+      if (nearbySecs !== null && nearbySecs > 0) nearbySecs -= 1;
       if (pairingSecs === null) return;
       if (pairingSecs <= 1) {
         pairingSecs = null;
@@ -595,6 +631,155 @@
     }
   }
 
+  // --- Sync with a nearby device (docs/specs/lan-transport.md) ---
+  // A direct, encrypted link to a trusted device on the same Wi-Fi or Tailscale
+  // network: no folder. Waiting is a short window the service closes by itself
+  // (after one session, on expiry, or when the vault locks); while it is open we
+  // poll its PASSIVE status, which never holds the vault open.
+  let nearbyOpen = $state(false);
+  let nearbyListening = $state(false);
+  let nearbyAddresses = $state<string[]>([]);
+  let nearbyPort = $state<number | null>(null);
+  let nearbySecs = $state<number | null>(null);
+  let nearbyQrSvg = $state("");
+  let nearbyAddr = $state("");
+  // Which action is running, for its button label; `nearbyBusy` gates both.
+  let nearbyAction = $state<"" | "listen" | "connect">("");
+  const nearbyBusy = $derived(nearbyAction !== "");
+  let nearbyError = $state("");
+  let nearbyLines = $state<string[]>([]);
+  let nearbyShareOn = $state(false);
+  let nearbyShareVault = $state("");
+  let nearbySharePeer = $state("");
+  // Rendered by the Rust backend; shown through a data: URI, like the pairing QR.
+  const nearbyQrUri = $derived(
+    nearbyQrSvg ? `data:image/svg+xml;utf8,${encodeURIComponent(nearbyQrSvg)}` : "",
+  );
+  // Sharing needs both the vault and the device it is for.
+  const nearbyShareReady = $derived(
+    !nearbyShareOn || (nearbyShareVault !== "" && nearbySharePeer !== ""),
+  );
+
+  /** `[peer, share]` for the service: a share always names its device. */
+  function nearbyShareArgs(): [string | null, string[]] {
+    return nearbyShareOn ? [nearbySharePeer, [nearbyShareVault]] : [null, []];
+  }
+
+  /** Show a finished session: what moved, any alarms, and refresh what changed. */
+  function showNearbyReport(report: NearbyReportView) {
+    nearbyLines = summarizeNearby(report, peers);
+    if (report.alarms.length) alarms = report.alarms;
+    if (report.adopted.length) onVaultsChanged?.();
+    onSyncChanged?.();
+    void refreshStatus();
+  }
+
+  async function showListening(addresses: string[], port: number | null, secs: number | null) {
+    nearbyListening = true;
+    nearbyAddresses = addresses;
+    nearbyPort = port;
+    nearbySecs = secs;
+    nearbyQrSvg = "";
+    if (addresses[0]) {
+      try {
+        nearbyQrSvg = await nearbyAddressQrSvg(addresses[0]);
+      } catch {
+        nearbyQrSvg = ""; // the address text is still shown
+      }
+    }
+  }
+
+  async function startNearby() {
+    if (nearbyBusy || nearbyListening || !nearbyShareReady) return;
+    nearbyAction = "listen";
+    nearbyError = "";
+    nearbyLines = [];
+    try {
+      const [peer, share] = nearbyShareArgs();
+      const r = await nearbyListen(peer, share);
+      await showListening(r.addresses, r.port, r.expires_in_secs);
+    } catch (err) {
+      nearbyError = typeof err === "string" ? err : "Could not start waiting for a device.";
+    } finally {
+      nearbyAction = "";
+    }
+  }
+
+  async function stopNearby() {
+    try {
+      await nearbyStop();
+    } catch {
+      // The poll below reports the real state either way.
+    }
+    await pollNearby();
+  }
+
+  /** Re-read the window (passive). Once it has closed, say how it ended. */
+  async function pollNearby() {
+    let st: NearbyStatusView;
+    try {
+      st = await nearbyStatus();
+    } catch {
+      return; // locked or unavailable: the app shell handles that
+    }
+    if (st.listening) {
+      if (!nearbyListening) await showListening(st.addresses, st.port, st.expires_in_secs);
+      else nearbySecs = st.expires_in_secs;
+      return;
+    }
+    const wasListening = nearbyListening;
+    nearbyListening = false;
+    nearbySecs = null;
+    nearbyQrSvg = "";
+    if (wasListening && st.last?.role === "listen") {
+      if (st.last.report) {
+        showNearbyReport(st.last.report);
+      } else if (st.last.result === "failed") {
+        nearbyError = listenEndMessage(st.last) ?? "The nearby sync failed.";
+      } else {
+        const m = listenEndMessage(st.last);
+        nearbyLines = m ? [m] : [];
+      }
+    }
+  }
+
+  // Poll while the window is open (every 2 s, passive).
+  $effect(() => {
+    if (!nearbyListening) return;
+    const id = setInterval(() => void pollNearby(), 2000);
+    return () => clearInterval(id);
+  });
+
+  async function connectNearby(e: Event) {
+    e.preventDefault();
+    const addr = nearbyAddr.trim();
+    if (!addr || nearbyBusy || nearbyListening || !nearbyShareReady) return;
+    nearbyAction = "connect";
+    nearbyError = "";
+    nearbyLines = [];
+    try {
+      const [peer, share] = nearbyShareArgs();
+      showNearbyReport(await nearbyConnect(addr, peer, share));
+    } catch (err) {
+      nearbyError = typeof err === "string" ? err : "Could not sync with that device.";
+    } finally {
+      nearbyAction = "";
+    }
+  }
+
+  /** A scanned QR for the address box: only a nearby address fills it. */
+  function useNearbyScan(content: string) {
+    const addr = parseNearbyQr(content);
+    if (addr) {
+      nearbyAddr = addr;
+      nearbyError = "";
+      return;
+    }
+    nearbyError = isIdentityQr(content)
+      ? "That is a device's identity QR. Scan the one shown under Waiting on the other device."
+      : "That QR code is not a nearby-sync address.";
+  }
+
   const summary = $derived(summarizeSync(status, peers));
   const deviceSync = $derived(new Map(summary.devices.map((d) => [d.device_id, d])));
   let setupOpen = $state(false);
@@ -606,6 +791,8 @@
     const fallback = selectedVault || vaults[0]?.id || "";
     syncVault = fallback;
     shareVault = fallback;
+    nearbyShareVault = fallback;
+    void pollNearby(); // a window opened earlier may still be waiting
     loadIdentity();
     loadIsMobile();
     loadPeers();
@@ -628,7 +815,7 @@
   <div class="page-head">
     <div>
       <h2>Devices and sync</h2>
-      <p class="sub">Your devices share an encrypted folder. The folder is never trusted.</p>
+      <p class="sub">Your devices sync through an encrypted folder or straight over your network. Neither is trusted.</p>
     </div>
     <div class="actions">
       {#if vaults.length > 1}
@@ -743,6 +930,119 @@
     {/if}
   </section>
 
+  <!-- ===================== Nearby (direct LAN) ===================== -->
+  <!-- Sync straight to a trusted device on the same Wi-Fi or Tailscale network
+       (docs/specs/lan-transport.md). The service listens only inside the short
+       window started here, accepts only devices this one already trusts, and
+       refuses addresses outside the local network. -->
+  <details class="disclosure" bind:open={nearbyOpen}>
+    <summary>
+      <Icon name="sync" size={16} /> Sync with a nearby device
+      {#if nearbyListening}<span class="sum-meta">· waiting <span class="mono">{formatCountdown(nearbySecs)}</span></span>{/if}
+      <span class="chev"><Icon name="chevron" size={14} /></span>
+    </summary>
+    <div class="body">
+      <p class="hint" style="margin-top:0">
+        No folder needed. Both devices must trust each other and be on the same Wi-Fi or Tailscale network.
+      </p>
+      {#if peers.length === 0}
+        <p class="hint">Trust the other device first (Add a device, below).</p>
+      {/if}
+      <div class="nearby-grid">
+        <div class="nearby-pane">
+          <span class="step-t">Let the other device connect</span>
+          {#if nearbyListening}
+            <div class="share-row">
+              {#if nearbyQrUri}
+                <div class="qr-plate">
+                  <img src={nearbyQrUri} alt="QR code with this device's nearby-sync address" />
+                </div>
+              {/if}
+              <div class="share-main">
+                {#if nearbyAddresses.length}
+                  <span class="label">On the other device, connect to</span>
+                  {#each nearbyAddresses as a (a)}<strong class="mono fp big">{a}</strong>{/each}
+                {:else}
+                  <p class="hint">
+                    Connect to this device's Wi-Fi or Tailscale address, port <span class="mono">{nearbyPort}</span>.
+                  </p>
+                {/if}
+                <p class="hint">Waiting · <span class="mono">{formatCountdown(nearbySecs)}</span></p>
+                <button class="btn btn-sm btn-quiet" onclick={stopNearby}>Stop waiting</button>
+              </div>
+            </div>
+          {:else}
+            <div>
+              <button class="btn" onclick={startNearby} disabled={nearbyBusy || peers.length === 0 || !nearbyShareReady}>
+                {nearbyAction === "listen" ? "…" : "Wait for 3 minutes"}
+              </button>
+            </div>
+          {/if}
+        </div>
+        <form class="nearby-pane" onsubmit={connectNearby}>
+          <label for="nearby-addr" class="step-t">Or connect to a waiting device</label>
+          <div class="dir-row">
+            <input
+              id="nearby-addr"
+              type="text"
+              bind:value={nearbyAddr}
+              placeholder="192.168.1.20:47823"
+              autocomplete="off"
+              spellcheck="false"
+              class="mono"
+            />
+            <button
+              type="button"
+              class="btn"
+              onclick={() => startScan("nearby")}
+              disabled={scanBusy}
+              aria-label="Scan the other device's QR code"
+              title="Scan its QR code"
+            >
+              <Icon name="camera" size={14} />
+            </button>
+          </div>
+          <div>
+            <button
+              class="btn btn-primary"
+              type="submit"
+              disabled={nearbyBusy || nearbyListening || peers.length === 0 || !nearbyAddr.trim() || !nearbyShareReady}
+            >
+              {nearbyAction === "connect" ? "Syncing…" : "Connect and sync"}
+            </button>
+          </div>
+        </form>
+      </div>
+      <label class="check nearby-share-toggle">
+        <input type="checkbox" bind:checked={nearbyShareOn} disabled={nearbyListening || nearbyBusy} />
+        <span>Also give the other device a vault</span>
+      </label>
+      {#if nearbyShareOn}
+        <div class="share-grid two">
+          <div>
+            <label for="nearby-share-vault" class="label">Vault</label>
+            <select id="nearby-share-vault" bind:value={nearbyShareVault} disabled={nearbyListening || nearbyBusy}>
+              {#each vaults as v (v.id)}<option value={v.id}>{v.name}</option>{/each}
+            </select>
+          </div>
+          <div>
+            <label for="nearby-share-peer" class="label">Device</label>
+            <select id="nearby-share-peer" bind:value={nearbySharePeer} disabled={nearbyListening || nearbyBusy}>
+              <option value="" disabled>Choose a trusted device…</option>
+              {#each peers as p (p.device_id)}<option value={p.device_id}>{p.label || p.fingerprint}</option>{/each}
+            </select>
+          </div>
+        </div>
+      {/if}
+      {#if nearbyLines.length}
+        <div class="nearby-result" role="status">
+          {#each nearbyLines as line, i (i)}<p>{line}</p>{/each}
+        </div>
+      {/if}
+      {#if nearbyError}<div class="error" role="alert">{nearbyError}</div>{/if}
+    </div>
+  </details>
+
   <!-- ===================== Add a device (pairing) ===================== -->
   <details class="disclosure" bind:open={pairOpen}>
     <summary>
@@ -812,7 +1112,7 @@
                re-arms the fingerprint confirmation. It never trusts on its own
                (device-pairing.md §3.3). -->
           <div class="toolbar">
-            <button type="button" class="btn btn-sm" onclick={startScan} disabled={scanBusy}>
+            <button type="button" class="btn btn-sm" onclick={() => startScan("identity")} disabled={scanBusy}>
               <Icon name="camera" size={14} /> {scanBusy ? "Scanning…" : "Scan its QR code"}
             </button>
             <span class="faint">or paste its identity below</span>
@@ -1272,8 +1572,37 @@
     gap: 8px;
     align-items: end;
   }
+  .share-grid.two {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    margin-top: 6px;
+  }
+  .nearby-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 16px;
+    margin-top: 6px;
+  }
+  .nearby-pane {
+    display: grid;
+    gap: 8px;
+    align-content: start;
+    min-width: 0;
+  }
+  .nearby-share-toggle {
+    margin-top: 14px;
+  }
+  .nearby-result {
+    margin-top: 10px;
+    font-size: 13px;
+    color: var(--success);
+  }
+  .nearby-result p + p {
+    margin-top: 2px;
+  }
   @media (max-width: 719px) {
-    .share-grid {
+    .share-grid,
+    .share-grid.two,
+    .nearby-grid {
       grid-template-columns: 1fr;
     }
     .dir-row {

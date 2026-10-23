@@ -567,6 +567,70 @@ pub enum Request {
         /// The shared sync-root directory whose `pairing/` folder to scan.
         dir: String,
     },
+    /// **Nearby sync (`lan-transport.md` §7.1, §9.1):** open the time-boxed
+    /// "Sync with a nearby device" window — listen on the local network for one
+    /// session with a **pinned** device. Answered by
+    /// [`Response::NearbyListening`] once bound; the session itself runs in the
+    /// background and its outcome is reported by
+    /// [`NearbyStatus`](Request::NearbyStatus). The window closes after one
+    /// session, on expiry, after repeated failed handshakes, on
+    /// [`NearbyStop`](Request::NearbyStop), or when the vault locks. Opening it
+    /// needs a person present while an AI agent is connected.
+    NearbyListen {
+        /// The profile directory being operated on.
+        profile: String,
+        /// The address to bind (an IP literal). `None` = all IPv4 interfaces
+        /// (`0.0.0.0`); peers are still held to the local-address policy.
+        #[serde(default)]
+        bind: Option<String>,
+        /// The port. `None` = [`crate::nearby::DEFAULT_PORT`]; `0` = any free
+        /// port.
+        #[serde(default)]
+        port: Option<u16>,
+        /// How long to wait for a device, in seconds. `None` =
+        /// [`crate::nearby::DEFAULT_LISTEN_SECS`]; capped at
+        /// [`crate::nearby::MAX_LISTEN_SECS`].
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+        /// Only accept this pinned device (hyphenated id). Required with
+        /// `share`.
+        #[serde(default)]
+        peer: Option<String>,
+        /// Vaults (names or ids) whose key to share with `peer` in the session.
+        #[serde(default)]
+        share: Vec<String>,
+    },
+    /// **Nearby sync:** connect to a listening pinned device at `addr` (an IP
+    /// literal, optionally `:PORT`, on a local network) and run one session.
+    /// Answered by [`Response::NearbySynced`] when it completes. The state
+    /// mutex is never held across network I/O. Sharing a vault needs a person
+    /// present while an AI agent is connected.
+    NearbyConnect {
+        /// The profile directory being operated on.
+        profile: String,
+        /// `IP` or `IP:PORT` of the listening device.
+        addr: String,
+        /// Only complete the session with this pinned device. Required with
+        /// `share`.
+        #[serde(default)]
+        peer: Option<String>,
+        /// Vaults (names or ids) whose key to share with `peer`.
+        #[serde(default)]
+        share: Vec<String>,
+    },
+    /// **Nearby sync:** whether a listen window is open, and the last
+    /// session's outcome. Answered by [`Response::NearbyStatus`]. Passive: it
+    /// does not reset the idle auto-lock (a UI polls it).
+    NearbyStatus {
+        /// The profile directory being operated on.
+        profile: String,
+    },
+    /// **Nearby sync:** close the listen window now. Answered by
+    /// [`Response::Ok`].
+    NearbyStop {
+        /// The profile directory being operated on.
+        profile: String,
+    },
     /// **Attachments (path-based; no blob bytes cross this channel):** attach a
     /// file to an item. The caller passes a SOURCE file **path**; the daemon
     /// reads that file itself (it is the same user) and stores it encrypted via
@@ -770,6 +834,10 @@ impl Request {
             Request::ShareVaultToDevice { .. } => "ShareVaultToDevice",
             Request::SyncAdopt { .. } => "SyncAdopt",
             Request::ListPendingDevices { .. } => "ListPendingDevices",
+            Request::NearbyListen { .. } => "NearbyListen",
+            Request::NearbyConnect { .. } => "NearbyConnect",
+            Request::NearbyStatus { .. } => "NearbyStatus",
+            Request::NearbyStop { .. } => "NearbyStop",
             Request::AddAttachment { .. } => "AddAttachment",
             Request::ListAttachments { .. } => "ListAttachments",
             Request::GetAttachment { .. } => "GetAttachment",
@@ -827,6 +895,10 @@ impl Request {
             | Request::ShareVaultToDevice { profile, .. }
             | Request::SyncAdopt { profile, .. }
             | Request::ListPendingDevices { profile, .. }
+            | Request::NearbyListen { profile, .. }
+            | Request::NearbyConnect { profile, .. }
+            | Request::NearbyStatus { profile }
+            | Request::NearbyStop { profile }
             | Request::AddAttachment { profile, .. }
             | Request::ListAttachments { profile, .. }
             | Request::GetAttachment { profile, .. }
@@ -855,7 +927,11 @@ impl Request {
         match self {
             Request::SetAgentFillMode { on, .. } => *on,
             Request::SetPairingMode { enabled, .. } => *enabled,
-            Request::TrustDevice { .. }
+            // Opening a listener grants network reach; a session that hands a
+            // vault key to another device is a share.
+            Request::NearbyConnect { share, .. } => !share.is_empty(),
+            Request::NearbyListen { .. }
+            | Request::TrustDevice { .. }
             | Request::ShareVaultToDevice { .. }
             | Request::SyncSetup { .. }
             | Request::CreateVault { .. }
@@ -1091,6 +1167,74 @@ pub struct WireAdoptedVault {
     pub vault_id: String,
     /// The vault name once known locally (may be empty until first pull).
     pub name: String,
+}
+
+/// What one nearby-sync session did ([`Response::NearbySynced`],
+/// [`WireNearbyOutcome`]). Secret-free: ids, vault names, counts, alarms.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct WireNearbyReport {
+    /// The authenticated peer (hyphenated device id).
+    pub peer_device_id: String,
+    /// The peer's label in this device's trusted list.
+    #[serde(default)]
+    pub peer_label: Option<String>,
+    /// Per vault both devices hold.
+    #[serde(default)]
+    pub vaults: Vec<WireNearbyVault>,
+    /// Vault ids whose key this device sent.
+    #[serde(default)]
+    pub shared: Vec<String>,
+    /// Vaults the peer shared to this device and that were adopted.
+    #[serde(default)]
+    pub adopted: Vec<WireAdoptedVault>,
+    /// Secret-free alarm descriptions (quarantines, tampered blobs, refused
+    /// shares). Empty when clean.
+    #[serde(default)]
+    pub alarms: Vec<String>,
+}
+
+/// One vault's line in a [`WireNearbyReport`].
+#[derive(Clone, Serialize, Deserialize)]
+pub struct WireNearbyVault {
+    /// The vault id (hyphenated).
+    pub vault_id: String,
+    /// The local vault name (vault metadata; may be empty).
+    #[serde(default)]
+    pub name: String,
+    /// Ops this device sent.
+    #[serde(default)]
+    pub ops_sent: usize,
+    /// Ops received, verified and applied.
+    #[serde(default)]
+    pub applied: usize,
+    /// Ops received but held pending.
+    #[serde(default)]
+    pub pending: usize,
+    /// Attachment blobs sent.
+    #[serde(default)]
+    pub blobs_sent: usize,
+    /// Attachment blobs received and verified.
+    #[serde(default)]
+    pub blobs_fetched: usize,
+    /// Attachment blobs still missing here.
+    #[serde(default)]
+    pub blobs_pending: usize,
+}
+
+/// How the last listen window or dial ended ([`Response::NearbyStatus`]).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct WireNearbyOutcome {
+    /// `"listen"` or `"connect"`.
+    pub role: String,
+    /// `"synced"`, `"failed"`, `"expired"`, `"stopped"` or
+    /// `"too_many_failures"`.
+    pub result: String,
+    /// A secret-free error message for `"failed"`.
+    #[serde(default)]
+    pub error: Option<String>,
+    /// The session report for `"synced"`.
+    #[serde(default)]
+    pub report: Option<WireNearbyReport>,
 }
 
 /// One attachment listing entry rendered for the wire
@@ -1620,6 +1764,40 @@ pub enum Response {
         #[serde(default)]
         looks_like_vault_folder: bool,
     },
+    /// A nearby-sync listen window is open (answer to
+    /// [`Request::NearbyListen`]).
+    NearbyListening {
+        /// The address(es) to show the user / type on the other device
+        /// (`IP:PORT`). Empty if none could be determined (the user then uses
+        /// their LAN or Tailscale address with `port`).
+        addresses: Vec<String>,
+        /// The bound port.
+        port: u16,
+        /// How long the window stays open.
+        expires_in_secs: u64,
+    },
+    /// Nearby-sync state (answer to [`Request::NearbyStatus`]).
+    NearbyStatus {
+        /// Whether a listen window is open right now.
+        listening: bool,
+        /// The window's display addresses (empty when not listening).
+        #[serde(default)]
+        addresses: Vec<String>,
+        /// The window's port, when listening.
+        #[serde(default)]
+        port: Option<u16>,
+        /// Seconds left in the window, when listening.
+        #[serde(default)]
+        expires_in_secs: Option<u64>,
+        /// The last finished window or dial, if any since the daemon started.
+        #[serde(default)]
+        last: Option<WireNearbyOutcome>,
+    },
+    /// A nearby-sync session completed (answer to [`Request::NearbyConnect`]).
+    NearbySynced {
+        /// What the session did.
+        report: WireNearbyReport,
+    },
     /// The announced-but-untrusted devices found under a sync root's `pairing/`
     /// folder (answer to [`Request::ListPendingDevices`], `device-pairing.md`
     /// §5). Everything here is **public**; the list is a discovery hint the user
@@ -1780,6 +1958,9 @@ impl Response {
             Response::SyncStatus { .. } => "SyncStatus",
             Response::SyncAdopted { .. } => "SyncAdopted",
             Response::PendingDevices { .. } => "PendingDevices",
+            Response::NearbyListening { .. } => "NearbyListening",
+            Response::NearbyStatus { .. } => "NearbyStatus",
+            Response::NearbySynced { .. } => "NearbySynced",
             Response::Attachment { .. } => "Attachment",
             Response::Attachments { .. } => "Attachments",
             Response::AttachmentSaved { .. } => "AttachmentSaved",

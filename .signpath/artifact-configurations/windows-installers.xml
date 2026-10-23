@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SignPath artifact configuration for the Windows release installers.
+
+  This file is the reviewed source of truth; paste it into the SignPath
+  project's artifact configuration (slug: windows-installers) whenever it
+  changes. See CODE_SIGNING.md.
+
+  The release workflow uploads one ZIP holding:
+    LocalPass_<version>_x64_en-US.msi   (WiX; deep-signed: both executables
+                                          inside it, then the MSI itself)
+    LocalPass_<version>_x64-setup.exe   (NSIS; outer installer only, NSIS
+                                          packages cannot be deep-signed)
+
+  Every signed file must carry product name "LocalPass" and the release
+  version (SignPath Foundation requirement). The app and the installers get
+  it from tauri.conf.json; the background service from lp-daemon/build.rs
+  (LOCALPASS_PRODUCT_VERSION, set by apps/desktop/scripts/prepare-sidecar.mjs).
+
+  Paths inside the MSI follow its administrative-install layout, checked with
+  `msiexec /a <msi> /qn TARGETDIR=<dir>`: both executables sit in
+  PFiles/LocalPass/. If SignPath's first (test) signing request reports that a
+  nested file did not match, compare with the file list it shows and adjust.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <msi-file path="LocalPass_${version}_x64_en-US.msi" subject="LocalPass">
+      <pe-file path="PFiles/LocalPass/localpass-desktop.exe" product-name="LocalPass" product-version="${version}">
+        <authenticode-sign />
+      </pe-file>
+      <pe-file path="PFiles/LocalPass/localpass-daemon.exe" product-name="LocalPass" product-version="${version}">
+        <authenticode-sign />
+      </pe-file>
+      <authenticode-sign />
+    </msi-file>
+    <pe-file path="LocalPass_${version}_x64-setup.exe" product-name="LocalPass" product-version="${version}">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>
