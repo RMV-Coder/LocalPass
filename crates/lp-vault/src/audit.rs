@@ -545,6 +545,16 @@ pub enum AuditKind {
         /// The authenticated peer device on the other end.
         peer_device_id: DeviceId,
     },
+    /// An **AI agent connected**: an MCP server process registered its first
+    /// agent session with the daemon (`mcp-server.md` §7). A process holds more
+    /// than one connection, but it is logged once. The origin names the process.
+    AgentConnected,
+    /// That **agent process's last session ended**. The record's `detail` is a
+    /// closed token saying why (`lp_daemon::protocol::AgentEndReason`).
+    AgentDisconnected,
+    /// An AI agent **called an MCP tool**. The record's `detail` is the tool
+    /// *name* (with a `:failed` suffix if the call failed), never an argument.
+    AgentToolCall,
     /// An operation was **refused** — the vault was locked, the caller named a
     /// profile this daemon does not serve, or the caller was not authorized.
     ///
@@ -583,6 +593,9 @@ impl AuditKind {
             AuditKind::NearbyListenEnabled => 16,
             AuditKind::NearbyListenDisabled => 17,
             AuditKind::NearbySync { .. } => 18,
+            AuditKind::AgentConnected => 19,
+            AuditKind::AgentDisconnected => 20,
+            AuditKind::AgentToolCall => 21,
         }
     }
 
@@ -609,6 +622,9 @@ impl AuditKind {
             AuditKind::NearbyListenEnabled => "nearby_listen_enabled",
             AuditKind::NearbyListenDisabled => "nearby_listen_disabled",
             AuditKind::NearbySync { .. } => "nearby_sync",
+            AuditKind::AgentConnected => "agent_connected",
+            AuditKind::AgentDisconnected => "agent_disconnected",
+            AuditKind::AgentToolCall => "agent_tool_call",
         }
     }
 
@@ -711,7 +727,10 @@ impl AuditRecord {
             | AuditKind::AgentFillModeEnabled
             | AuditKind::AgentFillModeDisabled
             | AuditKind::NearbyListenEnabled
-            | AuditKind::NearbyListenDisabled => {}
+            | AuditKind::NearbyListenDisabled
+            | AuditKind::AgentConnected
+            | AuditKind::AgentDisconnected
+            | AuditKind::AgentToolCall => {}
             AuditKind::ItemSecretRead {
                 item_id,
                 vault_id,
@@ -880,6 +899,9 @@ pub(crate) fn kind_from_row(
         Some(18) => AuditKind::NearbySync {
             peer_device_id: req_id(peer_device_id, "audit row missing peer_device_id")?,
         },
+        Some(19) => AuditKind::AgentConnected,
+        Some(20) => AuditKind::AgentDisconnected,
+        Some(21) => AuditKind::AgentToolCall,
         Some(13) => AuditKind::AccessDenied {
             reason: deny_reason
                 .and_then(|c| u8::try_from(c).ok())
@@ -1120,6 +1142,9 @@ mod tests {
             AuditKind::NearbySync {
                 peer_device_id: dev(),
             },
+            AuditKind::AgentConnected,
+            AuditKind::AgentDisconnected,
+            AuditKind::AgentToolCall,
         ];
         let mut codes: Vec<u8> = kinds.iter().map(AuditKind::code).collect();
         codes.sort_unstable();
@@ -1222,6 +1247,38 @@ mod tests {
             )
             .expect("decodes");
             assert_eq!(back, kind);
+        }
+    }
+
+    /// The agent-activity kinds carry nothing but the shared detail slot, so
+    /// they round-trip from their code alone and encode as bare unit records.
+    #[test]
+    fn agent_activity_kinds_round_trip_and_encode_as_unit_records() {
+        for (kind, code) in [
+            (AuditKind::AgentConnected, 19u8),
+            (AuditKind::AgentDisconnected, 20u8),
+            (AuditKind::AgentToolCall, 21u8),
+        ] {
+            let back = kind_from_row(i64::from(code), None, None, None, None, 0, None, None)
+                .expect("decodes");
+            assert_eq!(back, kind);
+            let rec = AuditRecord {
+                seq: 3,
+                prev_hash: [8u8; 32],
+                timestamp: 1_700_000_000_001,
+                device_id: dev(),
+                kind,
+                detail: Some("list_items".into()),
+                origin: None,
+            };
+            let mut expect = Vec::new();
+            expect.extend_from_slice(&3u64.to_le_bytes());
+            expect.extend_from_slice(&[8u8; 32]);
+            expect.extend_from_slice(&1_700_000_000_001i64.to_le_bytes());
+            expect.extend_from_slice(dev().as_bytes());
+            expect.push(code);
+            push_opt_str(&mut expect, Some("list_items"));
+            assert_eq!(rec.canonical_bytes(), expect);
         }
     }
 

@@ -142,6 +142,16 @@
     };
   });
 
+  // Keep the "AI agent connected" indicators current while the app is in view.
+  // A passive status read, so an open window never holds the vault unlocked.
+  $effect(() => {
+    if (session?.state !== "unlocked") return;
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") refresh();
+    }, 10_000);
+    return () => clearInterval(timer);
+  });
+
   // Re-check on window focus/visibility: a laptop that slept past the timeout
   // should show the unlock screen the moment the user comes back.
   $effect(() => {

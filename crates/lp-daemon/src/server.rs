@@ -241,16 +241,26 @@ fn start_ssh_agent(
 struct AgentSessionGuard<'a> {
     shared: &'a Shared,
     active: bool,
+    /// The registering request's attribution, so the end is logged against the
+    /// same process.
+    origin: Option<lp_vault::AuditOrigin>,
 }
 
 impl Drop for AgentSessionGuard<'_> {
     fn drop(&mut self) {
         if self.active {
-            self.shared
+            let mut state = self
+                .shared
                 .state
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .end_agent_session();
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match self.origin.take() {
+                Some(origin) => {
+                    lp_vault::audit::with_origin(origin, || state.end_agent_session());
+                }
+                None => state.end_agent_session(),
+            }
+            drop(state);
             if self.shared.verbose {
                 log("agent session ended (connection closed)");
             }
@@ -267,6 +277,7 @@ fn serve_connection(shared: &Arc<Shared>, mut conn: transport::Connection) -> Re
     let mut agent = AgentSessionGuard {
         shared,
         active: false,
+        origin: None,
     };
     loop {
         // 1) Read the full request off the wire — NO lock held here, so a slow
@@ -309,6 +320,7 @@ fn serve_connection(shared: &Arc<Shared>, mut conn: transport::Connection) -> Re
         };
         let kind = request.kind();
         let started = std::time::Instant::now();
+        let request_origin = origin.clone();
 
         // 2) Handle under the lock (brief; no client IO inside), with the
         //    client's self-reported attribution in force on THIS thread — so an
@@ -336,6 +348,7 @@ fn serve_connection(shared: &Arc<Shared>, mut conn: transport::Connection) -> Re
         } = handled;
         if began_agent_session && !agent.active {
             agent.active = true;
+            agent.origin = request_origin;
             if shared.verbose {
                 log("agent session started");
             }

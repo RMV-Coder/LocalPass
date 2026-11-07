@@ -56,6 +56,7 @@ import type { QrMatrix } from "./qrstream";
  *  purely local helpers. Everything else does reset the timer server-side. */
 const PASSIVE = new Set([
   "status",
+  "audit_list",
   "ensure_service",
   "pairing_mode_secs",
   "agent_fill_secs",

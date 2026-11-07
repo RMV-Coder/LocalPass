@@ -95,9 +95,9 @@ jobs:
       - name: Frontend tests
         working-directory: apps/desktop
         run: npm test
-      # tauri.conf.json declares the daemon as an externalBin sidecar, so the
-      # Rust build refuses to configure until it is staged.
-      - name: Stage the daemon sidecar
+      # tauri.conf.json declares the daemon and CLI as externalBin sidecars, so
+      # the Rust build refuses to configure until they are staged.
+      - name: Stage the sidecars
         working-directory: apps/desktop
         run: node scripts/prepare-sidecar.mjs
       - name: Clippy

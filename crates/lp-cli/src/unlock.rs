@@ -43,6 +43,16 @@ pub struct PasswordSource {
     pub stdin: bool,
 }
 
+/// Whether [`acquire_password`] has anywhere to get a password from: the env var,
+/// `--password-stdin`, or a terminal it may prompt on. A host-launched `localpass
+/// mcp` has none of these, and waits for a person to unlock the daemon instead.
+#[must_use]
+pub fn password_available(src: PasswordSource) -> bool {
+    std::env::var_os(PASSWORD_ENV).is_some()
+        || src.stdin
+        || (!src.no_input && std::io::stdin().is_terminal())
+}
+
 /// Acquire the master password from (in order) the env var, stdin, or a hidden
 /// prompt.
 ///

@@ -97,8 +97,8 @@ jobs:
 
       # --- Windows code signing (CODE_SIGNING.md) ----------------------------
       # With SignPath configured, the installers are signed before release:
-      # the MSI is deep-signed (localpass-desktop.exe and localpass-daemon.exe
-      # inside it, then the MSI itself) and the NSIS installer is signed as a
+      # the MSI is deep-signed (localpass-desktop.exe, localpass-daemon.exe and
+      # localpass.exe inside it, then the MSI itself) and the NSIS installer is signed as a
       # whole (.signpath/artifact-configurations/windows-installers.xml). Every
       # request waits for a person to approve it in SignPath, a SignPath
       # Foundation rule, so this job pauses until then (up to two hours).
@@ -195,7 +195,7 @@ jobs:
           $unpacked = Join-Path $env:RUNNER_TEMP "msi-contents"
           $p = Start-Process msiexec.exe -ArgumentList "/a `"$msi`" /qn TARGETDIR=`"$unpacked`"" -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "could not unpack the signed MSI (msiexec exit $($p.ExitCode))" }
-          foreach ($exe in 'localpass-desktop.exe', 'localpass-daemon.exe') {
+          foreach ($exe in 'localpass-desktop.exe', 'localpass-daemon.exe', 'localpass.exe') {
             $found = @(Get-ChildItem $unpacked -Recurse -File -Filter $exe)
             if ($found.Count -ne 1) { throw "expected one $exe inside the MSI, found $($found.Count)" }
             Assert-Signed $found[0].FullName

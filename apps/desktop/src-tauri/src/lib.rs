@@ -183,6 +183,13 @@ pub fn run() {
             qrsync::qr_receive_finish,
             qrsync::qr_receive_cancel,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running the LocalPass desktop application");
+        .build(tauri::generate_context!())
+        .expect("error while building the LocalPass desktop application")
+        .run(|_app, event| {
+            // The service outlives this window, so without this the vault stays
+            // unlocked after the app closes and reopens straight into it.
+            if let tauri::RunEvent::Exit = event {
+                commands::lock_on_exit();
+            }
+        });
 }

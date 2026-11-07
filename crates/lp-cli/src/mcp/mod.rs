@@ -56,12 +56,15 @@
 //!
 //! # Unlock
 //!
-//! The server unlocks **once at startup**, through the same
+//! The server picks its route **at startup**, through the same
 //! [`crate::daemonctl::route`] matrix every other subcommand uses — daemon-first
 //! with a direct-unlock fallback, honouring `--profile`, `--no-daemon`,
 //! `LOCALPASS_PASSWORD` and `--password-stdin` — and serves until stdin EOF.
-//! There is no MCP tool to unlock, lock, create, edit, or delete anything: the
-//! surface is deliberately read-plus-inject only.
+//! With no daemon session and no password to hand it still starts, and each tool
+//! call says the vault is locked until a person unlocks it ([`backend`]). A lock,
+//! an auto-lock, or a daemon restart never needs a server restart. There is no
+//! MCP tool to unlock, lock, create, edit, or delete anything: the surface is
+//! deliberately read-plus-inject only.
 //!
 //! # Human presence
 //!
@@ -88,6 +91,7 @@ use serde_json::{Value, json};
 use crate::error::CliError;
 use crate::unlock::PasswordSource;
 use backend::Backend;
+use lp_daemon::protocol::AgentEndReason;
 
 /// The MCP protocol version this server implements and advertises.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -121,9 +125,10 @@ fn log(msg: &str) {
 /// mid-frame).
 pub fn run(profile_dir: &Path, src: PasswordSource, no_daemon: bool) -> Result<()> {
     let mut backend = Backend::acquire(profile_dir, src, no_daemon)?;
+    let profile = profile_dir.display().to_string();
     // Hold an agent session with any daemon for as long as this server runs,
     // whichever route the tools use (see `presence`).
-    presence::spawn_sentinel(profile_dir.display().to_string(), log);
+    presence::spawn_sentinel(profile.clone(), log);
     log(&format!(
         "serving profile {} via {} route; protocol {PROTOCOL_VERSION}",
         profile_dir.display(),
@@ -138,19 +143,25 @@ pub fn run(profile_dir: &Path, src: PasswordSource, no_daemon: bool) -> Result<(
         match reader.read_line(&mut line) {
             Ok(0) => {
                 log("stdin closed; shutting down");
+                presence::say_goodbye(&profile, AgentEndReason::HostClosed);
                 return Ok(());
             }
             Ok(_) => {}
             Err(e) => {
                 log(&format!("stdin read failed: {e}; shutting down"));
+                presence::say_goodbye(&profile, AgentEndReason::HostClosed);
                 return Ok(());
             }
         }
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(frame) = handle_line(&mut backend, line.trim()) {
-            write_frame(&frame)?;
+        if let Some(frame) = handle_line(&mut backend, line.trim())
+            && let Err(e) = write_frame(&frame)
+        {
+            // The host is gone without closing stdin first.
+            presence::say_goodbye(&profile, AgentEndReason::HostClosed);
+            return Err(e);
         }
     }
 }
@@ -228,7 +239,9 @@ fn initialize(params: &Value) -> Value {
         "instructions":
             "LocalPass never returns secret values. list_items/get_item show field NAMES with \
              masked values; to actually use a secret, call run_with_secrets, which injects it \
-             into a child process's environment and redacts it out of the captured output.",
+             into a child process's environment and redacts it out of the captured output. \
+             If a tool says the vault is locked, ask the user to unlock LocalPass and call it \
+             again; this server reconnects by itself and never needs a restart.",
     })
 }
 
@@ -246,7 +259,14 @@ fn tools_call(backend: &mut Backend, id: Value, params: &Value) -> Value {
         Some(v @ Value::Object(_)) => v.clone(),
         _ => json!({}),
     };
-    match tools::call(backend, name, &args) {
+    let outcome = tools::call(backend, name, &args);
+    if tools::is_known(name) {
+        let ok = outcome
+            .as_ref()
+            .is_ok_and(|result| result.get("isError") != Some(&Value::Bool(true)));
+        backend.note_tool_call(name, ok);
+    }
+    match outcome {
         Ok(result) => jsonrpc::result(id, result),
         Err(e) => {
             // The CLI's error taxonomy already guarantees secret-free messages.

@@ -34,6 +34,9 @@
       <pe-file path="PFiles/LocalPass/localpass-daemon.exe" product-name="LocalPass" product-version="${version}">
         <authenticode-sign />
       </pe-file>
+      <pe-file path="PFiles/LocalPass/localpass.exe" product-name="LocalPass" product-version="${version}">
+        <authenticode-sign />
+      </pe-file>
       <authenticode-sign />
     </msi-file>
     <pe-file path="LocalPass_${version}_x64-setup.exe" product-name="LocalPass" product-version="${version}">

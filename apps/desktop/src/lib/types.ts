@@ -12,6 +12,8 @@ export type SessionState =
       idle_remaining_secs: number | null;
       /** An AI agent is connected: changes and consent ask for the master password. */
       agent_session?: boolean;
+      /** The process ids of the AI agents connected right now. */
+      agent_pids?: number[];
       /** The idle auto-lock timeout in seconds (0 = never). */
       autolock_secs?: number;
       /** Seconds left in an open pairing-mode window, null when off. */

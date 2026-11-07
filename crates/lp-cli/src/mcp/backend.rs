@@ -1,18 +1,30 @@
 //! Vault access for the MCP server, over the CLI's existing two routes.
 //!
-//! The server acquires a session **once at startup** through
-//! [`crate::daemonctl::route`] — exactly the routing matrix every other
-//! subcommand uses, and the same one `localpass run` uses:
+//! The server picks a route at startup through [`crate::daemonctl::route`] —
+//! exactly the routing matrix every other subcommand uses, and the same one
+//! `localpass run` uses:
 //!
 //! - daemon running and unlocked for this profile → [`Backend::Proxy`], every
 //!   read goes over the same-user-only IPC channel and the keys stay in the
 //!   daemon;
-//! - otherwise (no daemon, locked daemon, `--no-daemon`) → [`Backend::Direct`],
-//!   the server unlocks with the master password itself and holds the
-//!   `lp_vault::Session` in this process.
+//! - otherwise, with a password to hand (`LOCALPASS_PASSWORD`,
+//!   `--password-stdin`, a terminal) or under `--no-daemon` →
+//!   [`Backend::Direct`], the server unlocks itself and holds the
+//!   `lp_vault::Session` in this process;
+//! - otherwise → [`Backend::Detached`]. An agent host starts this server with
+//!   none of those, usually while the vault is locked, and exiting there is what
+//!   used to make the host report it as failed for good.
 //!
 //! Either way the *outputs* of this module are identical, so the tool layer
 //! above never branches on the route.
+//!
+//! # Reconnecting
+//!
+//! [`Backend::prepare`] runs before every tool call and is what keeps a
+//! long-lived server useful without a restart: it re-attaches to a daemon that
+//! appeared or restarted, and turns "not running" and "locked" into a message an
+//! agent can act on. It re-registers the agent session on every new connection,
+//! so a reconnect never skips the presence check (`mcp-server.md` §7).
 //!
 //! # Idle auto-lock on the Direct route
 //!
@@ -31,10 +43,11 @@
 //! and once it lapses the session is dropped (zeroizing key material) and every
 //! later call fails cleanly.
 //!
-//! It **fails rather than re-unlocking** on purpose: re-unlocking would require
-//! keeping the master password in memory for the process's lifetime, which is
-//! the very exposure the timeout exists to end. The agent's host restarts the
-//! server (and re-prompts) instead.
+//! It **never re-unlocks** on purpose: that would require keeping the master
+//! password in memory for the process's lifetime, which is the very exposure the
+//! timeout exists to end. A lapsed server moves to [`Backend::Detached`] and uses
+//! the daemon from then on. Under `--no-daemon` there is no daemon to move to, so
+//! every later call fails until the host restarts the server.
 //!
 //! # Secret exposure
 //!
@@ -50,13 +63,16 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
 use lp_daemon::client::Client;
-use lp_daemon::protocol::{FillRefusal, FillReport, FillStatus, Request, Response, WireItem};
+use lp_daemon::protocol::{
+    FillRefusal, FillReport, FillStatus, LockState, Request, Response, WireItem,
+};
 use lp_vault::Session;
 
 use crate::commands::{run as run_cmd, totp as totp_cmd};
 use crate::daemonctl::{self, Route};
 use crate::error::CliError;
 use crate::mcp::mask::{FieldView, ItemView};
+use crate::profile;
 use crate::reference;
 use crate::resolve;
 use crate::unlock::{self, PasswordSource};
@@ -80,7 +96,23 @@ pub enum Backend {
     },
     /// Hold an unlocked session in this process, under its own idle timeout.
     Direct(DirectSession),
+    /// Attached to nothing: no daemon was reachable and there was no password
+    /// to unlock with, or the connection or session was lost. [`Backend::prepare`]
+    /// moves on from here as soon as a daemon answers.
+    Detached {
+        /// The profile string a later connection will use.
+        profile: String,
+    },
 }
+
+/// What a tool call reports while the vault is locked.
+const LOCKED_MESSAGE: &str = "The LocalPass vault is locked. Ask the user to open LocalPass and \
+     unlock it, then call this tool again. This server does not need to be restarted.";
+
+/// What a tool call reports while no daemon is reachable.
+const NOT_RUNNING_MESSAGE: &str = "The LocalPass service is not running. Ask the user to open \
+     LocalPass and unlock it, then call this tool again. This server does not need to be \
+     restarted.";
 
 /// An in-process unlocked session with an idle auto-lock, for the Direct route.
 ///
@@ -94,16 +126,36 @@ pub struct DirectSession {
     autolock: Duration,
     /// When the last vault-touching call happened.
     last_activity: Instant,
+    /// The profile string, for moving to the daemon once this lapses.
+    profile: String,
+    /// `--no-daemon`: never move to the daemon.
+    no_daemon: bool,
 }
 
 impl DirectSession {
     /// Wrap `session` with the configured idle window.
-    fn new(session: Session) -> Self {
+    fn new(session: Session, profile: String, no_daemon: bool) -> Self {
         Self {
             session: Some(Box::new(session)),
             autolock: configured_autolock(),
             last_activity: Instant::now(),
+            profile,
+            no_daemon,
         }
+    }
+
+    /// Drop the session if the idle window has lapsed. Returns whether it is gone.
+    fn lapse_if_idle(&mut self) -> bool {
+        if self.session.is_some()
+            && !self.autolock.is_zero()
+            && self.last_activity.elapsed() >= self.autolock
+        {
+            // Dropping the session zeroizes its key material.
+            if let Some(s) = self.session.take() {
+                s.lock();
+            }
+        }
+        self.session.is_none()
     }
 
     /// Borrow the session for one vault-touching call, enforcing the idle
@@ -115,15 +167,7 @@ impl DirectSession {
     /// failure the agent sees as a tool error. It never re-unlocks: that would
     /// require holding the master password for the process's lifetime.
     fn session(&mut self) -> Result<&Session> {
-        if self.session.is_some()
-            && !self.autolock.is_zero()
-            && self.last_activity.elapsed() >= self.autolock
-        {
-            // Dropping the session zeroizes its key material.
-            if let Some(s) = self.session.take() {
-                s.lock();
-            }
-        }
+        self.lapse_if_idle();
         let secs = self.autolock.as_secs();
         let session = self.session.as_deref().ok_or_else(|| {
             CliError::usage(format!(
@@ -149,26 +193,132 @@ fn configured_autolock() -> Duration {
 }
 
 impl Backend {
-    /// Acquire a session for `profile_dir`, mirroring `localpass run`.
+    /// Pick the startup route for `profile_dir`, mirroring `localpass run`,
+    /// except that a locked or absent daemon with no password to hand is not a
+    /// failure: the server starts [`Backend::Detached`] and waits.
     ///
     /// # Errors
     ///
     /// [`CliError::Auth`] on a wrong master password / Secret Key, or
     /// [`CliError::Usage`] when there is no account at `profile_dir`.
     pub fn acquire(profile_dir: &Path, src: PasswordSource, no_daemon: bool) -> Result<Self> {
+        let profile = profile_dir.display().to_string();
         match daemonctl::route(profile_dir, no_daemon) {
             Route::Proxy(mut client) => {
-                let profile = profile_dir.display().to_string();
                 // Mark this connection as the agent's, so the daemon asks a
                 // person before any consent or change (mcp-server.md §7). A
-                // daemon that cannot is refused rather than silently served.
-                super::presence::register(&mut client, &profile)?;
-                Ok(Backend::Proxy { client, profile })
+                // daemon that cannot is refused rather than silently served:
+                // the connection is dropped and every tool call says why.
+                match super::presence::register(&mut client, &profile) {
+                    Ok(()) => Ok(Backend::Proxy { client, profile }),
+                    Err(e) => {
+                        super::log(&format!("agent-session registration failed: {e:#}"));
+                        Ok(Backend::Detached { profile })
+                    }
+                }
+            }
+            Route::Direct if !no_daemon && !unlock::password_available(src) => {
+                if !profile::account_exists(profile_dir) {
+                    bail!(CliError::usage(format!(
+                        "no account at {} — run `localpass init` first",
+                        profile_dir.display()
+                    )));
+                }
+                Ok(Backend::Detached { profile })
             }
             Route::Direct => {
                 let (session, _sk) = unlock::unlock(profile_dir, src)?;
-                Ok(Backend::Direct(DirectSession::new(session)))
+                Ok(Backend::Direct(DirectSession::new(
+                    session, profile, no_daemon,
+                )))
             }
+        }
+    }
+
+    /// Get ready for one tool call: move off a lapsed direct session, re-attach
+    /// to the daemon if the connection is gone, and report a locked vault.
+    ///
+    /// Everything here is passive for the idle timer, so a server that keeps
+    /// checking never holds the vault open. Only the tool's own request counts.
+    ///
+    /// # Errors
+    ///
+    /// [`CliError::Usage`] with a message the agent can act on when the service
+    /// is not running, the vault is locked, or the daemon refused this agent.
+    pub fn prepare(&mut self) -> Result<()> {
+        if let Backend::Direct(direct) = self {
+            if !direct.lapse_if_idle() || direct.no_daemon {
+                return Ok(());
+            }
+            super::log("direct session auto-locked; using the daemon from now on");
+            let profile = direct.profile.clone();
+            *self = Backend::Detached { profile };
+        }
+        let (profile, answer) = match self {
+            Backend::Proxy { client, profile } => {
+                let answer = client.call(&status_request(profile)).ok();
+                (profile.clone(), answer)
+            }
+            Backend::Detached { profile } => (profile.clone(), None),
+            Backend::Direct(_) => return Ok(()),
+        };
+        let answer = match answer {
+            Some(answer) => answer,
+            None => {
+                *self = Backend::Detached {
+                    profile: profile.clone(),
+                };
+                let mut client = Client::connect()
+                    .map_err(|_| CliError::usage(NOT_RUNNING_MESSAGE.to_string()))?;
+                super::presence::register(&mut client, &profile)?;
+                let answer = client
+                    .call(&status_request(&profile))
+                    .map_err(|_| CliError::usage(NOT_RUNNING_MESSAGE.to_string()))?;
+                super::log("connected to the LocalPass service");
+                *self = Backend::Proxy {
+                    client: Box::new(client),
+                    profile,
+                };
+                answer
+            }
+        };
+        match answer {
+            Response::Status {
+                state: LockState::Locked,
+                ..
+            } => Err(CliError::usage(LOCKED_MESSAGE.to_string()).into()),
+            Response::Status { .. } => Ok(()),
+            other => {
+                daemonctl::check_error(&other)?;
+                bail!(unexpected(&other));
+            }
+        }
+    }
+
+    /// Record one finished tool call, for the activity the desktop app shows.
+    /// Best-effort: a report that cannot be delivered changes nothing.
+    pub fn note_tool_call(&mut self, tool: &str, ok: bool) {
+        match self {
+            Backend::Proxy { client, profile } => {
+                let _ = client.call(&Request::AgentToolCall {
+                    profile: profile.clone(),
+                    tool: tool.to_string(),
+                    ok,
+                });
+            }
+            Backend::Direct(direct) => {
+                if let Some(session) = direct.session.as_deref() {
+                    let detail = if ok {
+                        tool.to_string()
+                    } else {
+                        format!("{tool}:failed")
+                    };
+                    session
+                        .record_audit(lp_vault::AuditKind::AgentToolCall, Some(&detail))
+                        .ok();
+                }
+            }
+            Backend::Detached { .. } => {}
         }
     }
 
@@ -178,6 +328,7 @@ impl Backend {
         match self {
             Backend::Proxy { .. } => "daemon",
             Backend::Direct(_) => "direct",
+            Backend::Detached { .. } => "waiting",
         }
     }
 
@@ -214,6 +365,7 @@ impl Backend {
                     name,
                 })
                 .collect()),
+            Backend::Detached { .. } => Err(detached()),
         }
     }
 
@@ -256,6 +408,7 @@ impl Backend {
                 let items = vault.list_items().map_err(crate::error::map_vault_error)?;
                 Ok(items.iter().map(view_from_item).collect())
             }
+            Backend::Detached { .. } => Err(detached()),
         }
     }
 
@@ -273,6 +426,7 @@ impl Backend {
                 let item = resolve::find_item(&vault, item)?;
                 Ok(view_from_item(&item))
             }
+            Backend::Detached { .. } => Err(detached()),
         }
     }
 
@@ -296,6 +450,7 @@ impl Backend {
                     CliError::usage(format!("could not resolve {key}={reference}: {e:#}")).into()
                 })
             }
+            Backend::Detached { .. } => Err(detached()),
         }
     }
 
@@ -312,6 +467,7 @@ impl Backend {
                 run_cmd::load_env_set_proxied(profile, client, vault, item)
             }
             Backend::Direct(direct) => run_cmd::load_env_set(direct.session()?, vault, item),
+            Backend::Detached { .. } => Err(detached()),
         }
     }
 
@@ -364,7 +520,9 @@ impl Backend {
     ) -> Result<std::result::Result<FinishedFill, FillRefusal>> {
         let (client, profile) = match self {
             Backend::Proxy { client, profile } => (client, profile.clone()),
-            Backend::Direct(_) => return Ok(Err(FillRefusal::ExtensionUnavailable)),
+            Backend::Direct(_) | Backend::Detached { .. } => {
+                return Ok(Err(FillRefusal::ExtensionUnavailable));
+            }
         };
         // At most two attempts; see "The one re-arm" above.
         for attempt in 0..2u8 {
@@ -468,8 +626,23 @@ impl Backend {
                 totp_cmd::compute_proxied(profile, client, vault, item)
             }
             Backend::Direct(direct) => totp_cmd::compute_direct(direct.session()?, vault, item),
+            Backend::Detached { .. } => Err(detached()),
         }
     }
+}
+
+/// A passive status probe: observing the lock state never resets the idle timer.
+fn status_request(profile: &str) -> Request {
+    Request::Status {
+        profile: profile.to_string(),
+        keepalive: false,
+    }
+}
+
+/// A tool method reached without a session. [`Backend::prepare`] reports this
+/// first, so it is only a backstop.
+fn detached() -> anyhow::Error {
+    CliError::usage(NOT_RUNNING_MESSAGE.to_string()).into()
 }
 
 /// Fetch one item over IPC with `reveal = false`, so the daemon masks before the

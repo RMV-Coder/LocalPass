@@ -47,6 +47,11 @@ user never has to start a daemon by hand. It locates the `localpass-daemon`
 binary next to the app (in a packaged install — see [Build](#build)) or on
 `PATH` (a `cargo install`ed dev setup).
 
+The service outlives the window, so closing the app **locks the vault**: the next
+launch asks for the password. A connected AI agent stays connected and is told the
+vault is locked until it is unlocked again. If the app is killed rather than
+closed, the service's idle auto-lock is the backstop.
+
 ## Prerequisites
 
 - The `localpass-daemon` binary must be **findable**: bundled beside the app in a
@@ -80,9 +85,10 @@ npm run bundle         # self-contained installer (recommended)
 
 **`npm run bundle`** is the way to produce a shareable installer. It:
 
-1. builds `localpass-daemon` in release and stages it as a Tauri **sidecar**
-   (`scripts/prepare-sidecar.mjs` → `src-tauri/binaries/`), then
-2. runs `tauri build`, which bundles the daemon **beside** the app binary and
+1. builds `localpass-daemon` and the `localpass` CLI in release and stages them
+   as Tauri **sidecars** (`scripts/prepare-sidecar.mjs` → `src-tauri/binaries/`),
+   then
+2. runs `tauri build`, which bundles them **beside** the app binary and
    produces the platform installer under
    `src-tauri/target/release/bundle/` (NSIS `.exe` / MSI on Windows).
 

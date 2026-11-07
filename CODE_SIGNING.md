@@ -7,7 +7,7 @@ certificate by [SignPath Foundation](https://signpath.org/).
 
 | Artifact | Signed with |
 |---|---|
-| `LocalPass_<version>_x64_en-US.msi` (Windows installer), and the `localpass-desktop.exe` and `localpass-daemon.exe` inside it | Authenticode, SignPath Foundation certificate |
+| `LocalPass_<version>_x64_en-US.msi` (Windows installer), and the `localpass-desktop.exe`, `localpass-daemon.exe` and `localpass.exe` inside it | Authenticode, SignPath Foundation certificate |
 | `LocalPass_<version>_x64-setup.exe` (Windows installer, NSIS) | Authenticode, SignPath Foundation certificate |
 | `LocalPass_<version>_aarch64.apk` (Android) | The project's own Android release key (not SignPath) |
 | Every desktop installer, for the in-app updater | A minisign signature (`<installer>.sig`); the public key is in [`apps/desktop/src-tauri/tauri.conf.json`](apps/desktop/src-tauri/tauri.conf.json) |

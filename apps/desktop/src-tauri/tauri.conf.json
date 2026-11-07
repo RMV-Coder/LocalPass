@@ -30,7 +30,8 @@
     "active": true,
     "targets": "all",
     "externalBin": [
-      "binaries/localpass-daemon"
+      "binaries/localpass-daemon",
+      "binaries/localpass"
     ],
     "icon": [
       "icons/32x32.png",
