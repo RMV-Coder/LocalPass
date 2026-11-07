@@ -266,6 +266,13 @@ pub fn error_result(message: &str) -> Value {
 /// Any tool-level failure (unknown vault/item, unresolvable reference, spawn
 /// failure, wrong item type).
 pub fn call(backend: &mut Backend, name: &str, args: &Value) -> Result<Value> {
+    // `fill_login` answers "locked" and "no service" as refusals of its own
+    // (agent-fill.md §10), so it reads the state `prepare` leaves, not its error.
+    match backend.prepare() {
+        Err(_) if name == "fill_login" => {}
+        Err(e) if is_known(name) => return Err(e),
+        _ => {}
+    }
     match name {
         "list_vaults" => list_vaults(backend),
         "list_items" => list_items(backend, args),
@@ -278,6 +285,16 @@ pub fn call(backend: &mut Backend, name: &str, args: &Value) -> Result<Value> {
         ))
         .into()),
     }
+}
+
+/// Whether `name` is one of this server's tools. Only those are reported as
+/// agent activity, because a host can send any string as a tool name.
+#[must_use]
+pub fn is_known(name: &str) -> bool {
+    matches!(
+        name,
+        "list_vaults" | "list_items" | "get_item" | "run_with_secrets" | "totp_code" | "fill_login"
+    )
 }
 
 // --- argument helpers -----------------------------------------------------

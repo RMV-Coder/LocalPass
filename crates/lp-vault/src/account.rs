@@ -305,6 +305,26 @@ impl AccountStore {
     /// - [`Error::NotFound`] if no account store exists at `dir`.
     /// - [`Error::Sqlite`] on a DB failure.
     pub fn record_access_denied(dir: &Path, reason: audit::DenyReason) -> Result<()> {
+        Self::record_keyless(dir, AuditKind::AccessDenied { reason }, None)
+    }
+
+    /// Record an AI agent's connection, disconnection, or tool call
+    /// ([`AuditKind::AgentConnected`] and its siblings) **without a session**: an
+    /// agent stays connected through a lock, and what it did then is exactly
+    /// what the person will want to read after unlocking. Same keyless path as
+    /// [`record_access_denied`](Self::record_access_denied), and `detail` must be
+    /// a closed token or a tool name, never a value.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NotFound`] if no account store exists at `dir`.
+    /// - [`Error::Sqlite`] on a DB failure.
+    pub fn record_agent_activity(dir: &Path, kind: AuditKind, detail: Option<&str>) -> Result<()> {
+        Self::record_keyless(dir, kind, detail)
+    }
+
+    /// Append one audit record using only the plaintext device id.
+    fn record_keyless(dir: &Path, kind: AuditKind, detail: Option<&str>) -> Result<()> {
         let path = dir.join(ACCOUNT_FILE);
         if !path.exists() {
             return Err(Error::NotFound("account store"));
@@ -313,7 +333,7 @@ impl AccountStore {
         db::ensure_audit_table(&conn)?;
         let device_id = read_device_id(&conn)?;
         let tx = conn.transaction()?;
-        append_audit_record(&tx, &device_id, AuditKind::AccessDenied { reason }, None)?;
+        append_audit_record(&tx, &device_id, kind, detail)?;
         tx.commit()?;
         Ok(())
     }

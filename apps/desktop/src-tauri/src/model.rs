@@ -43,6 +43,8 @@ pub enum SessionState {
         /// password (`mcp-server.md` §7). The UI shows a banner.
         #[serde(default)]
         agent_session: bool,
+        /// The process ids of the AI agents connected right now.
+        agent_pids: Vec<u32>,
         /// The effective idle auto-lock timeout in seconds (`0` = never), so
         /// the UI can restart its countdown after activity it caused.
         #[serde(default)]
@@ -598,6 +600,7 @@ pub fn session_state_from_status(resp: &Response) -> SessionState {
             vault_count,
             idle_remaining_secs,
             agent_session,
+            agent_pids,
             autolock_secs,
             pairing_mode_secs,
             agent_fill_secs,
@@ -608,6 +611,7 @@ pub fn session_state_from_status(resp: &Response) -> SessionState {
             profile: profile.clone(),
             idle_remaining_secs: *idle_remaining_secs,
             agent_session: *agent_session,
+            agent_pids: agent_pids.clone(),
             autolock_secs: *autolock_secs,
             pairing_mode_secs: *pairing_mode_secs,
             agent_fill_secs: *agent_fill_secs,
@@ -913,6 +917,7 @@ mod tests {
             pairing_mode_secs: None,
             agent_fill_secs: Some(120),
             agent_session: false,
+            agent_pids: Vec::new(),
         };
         let st = session_state_from_status(&resp);
         assert_eq!(
@@ -922,6 +927,7 @@ mod tests {
                 profile: "/home/u/.local/share/localpass".into(),
                 idle_remaining_secs: Some(540),
                 agent_session: false,
+                agent_pids: Vec::new(),
                 autolock_secs: 600,
                 pairing_mode_secs: None,
                 agent_fill_secs: Some(120),
@@ -943,6 +949,7 @@ mod tests {
             pairing_mode_secs: None,
             agent_fill_secs: None,
             agent_session: false,
+            agent_pids: Vec::new(),
         };
         assert_eq!(
             session_state_from_status(&resp),

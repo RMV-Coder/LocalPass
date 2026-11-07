@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
-// Build the `localpass-daemon` release binary and stage it as a Tauri sidecar
-// (`externalBin`) so the installed desktop app ships the daemon beside itself.
+// Build the `localpass-daemon` and `localpass` release binaries and stage them as
+// Tauri sidecars (`externalBin`) so the installed desktop app ships both beside
+// itself. The CLI is there so an MCP client has a stable path to launch, updated
+// in step with the service it talks to: `commands::locate_localpass` finds it.
 //
 // Tauri's externalBin expects the source file named with the host target triple
 // (e.g. `localpass-daemon-x86_64-pc-windows-msvc.exe`); it strips the triple and
@@ -33,23 +35,25 @@ const triple = hostLine.slice("host: ".length).trim();
 const isWindows = triple.includes("windows");
 const exeExt = isWindows ? ".exe" : "";
 
-// 2) Build the daemon in release from the (excluded) core workspace. The app
-//    version goes in as LOCALPASS_PRODUCT_VERSION, so on Windows the daemon
-//    carries the same product name + version as the app (lp-daemon/build.rs):
-//    release signing only signs files whose metadata matches the release.
+// 2) Build both in release from the (excluded) core workspace. The app version
+//    goes in as LOCALPASS_PRODUCT_VERSION, so on Windows they carry the same
+//    product name + version as the app (the crates' build.rs): release signing
+//    only signs files whose metadata matches the release.
 const appVersion = JSON.parse(
   readFileSync(join(desktopDir, "src-tauri", "tauri.conf.json"), "utf8"),
 ).version;
-console.log(`[sidecar] building localpass-daemon ${appVersion} (release) for ${triple} …`);
-run("cargo", ["build", "-p", "lp-daemon", "--release"], {
+console.log(`[sidecar] building localpass-daemon + localpass ${appVersion} (release) for ${triple} …`);
+run("cargo", ["build", "-p", "lp-daemon", "-p", "lp-cli", "--release"], {
   cwd: repoRoot,
   stdio: "inherit",
   env: { ...process.env, LOCALPASS_PRODUCT_VERSION: appVersion },
 });
 
-// 3) Stage it as the Tauri sidecar source (triple-suffixed).
-const built = join(repoRoot, "target", "release", `localpass-daemon${exeExt}`);
-const dest = join(binariesDir, `localpass-daemon-${triple}${exeExt}`);
+// 3) Stage them as the Tauri sidecar sources (triple-suffixed).
 mkdirSync(binariesDir, { recursive: true });
-copyFileSync(built, dest);
-console.log(`[sidecar] staged ${dest}`);
+for (const name of ["localpass-daemon", "localpass"]) {
+  const built = join(repoRoot, "target", "release", `${name}${exeExt}`);
+  const dest = join(binariesDir, `${name}-${triple}${exeExt}`);
+  copyFileSync(built, dest);
+  console.log(`[sidecar] staged ${dest}`);
+}

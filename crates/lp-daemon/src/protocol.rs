@@ -812,6 +812,26 @@ pub enum Request {
         /// The profile directory being operated on.
         profile: String,
     },
+    /// An agent connection reports one finished MCP tool call, for the activity
+    /// the desktop app shows (`mcp-server.md` §7.2). Informational: it changes
+    /// nothing but the audit log, and is refused on any other connection.
+    AgentToolCall {
+        /// The profile directory being operated on.
+        profile: String,
+        /// The tool's name. Reduced to a plain identifier before it is logged.
+        tool: String,
+        /// Whether the call succeeded.
+        ok: bool,
+    },
+    /// An agent connection says why its process is about to go away. It only
+    /// labels the end of the session: the session still ends when the
+    /// connections close, and not before.
+    AgentGoodbye {
+        /// The profile directory being operated on.
+        profile: String,
+        /// Why the process is stopping.
+        reason: AgentEndReason,
+    },
     /// **Human presence:** re-enter the master password to prove a person is
     /// at the keyboard. Answered by [`Response::PresenceGrant`], or
     /// [`Response::Error`] with `auth: true` on a wrong password.
@@ -836,6 +856,33 @@ pub const PRESENCE_GRANT_SECS: u64 = 300;
 /// locks the vault. A lock forces a full unlock, which already has its own
 /// cost (the KDF); this just stops an unattended guessing loop.
 pub const MAX_PRESENCE_FAILURES: u32 = 5;
+
+/// Why an AI agent's session ended, stored as the `detail` of an
+/// [`lp_vault::AuditKind::AgentDisconnected`] record (`mcp-server.md` §7.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentEndReason {
+    /// The agent's host closed the server: the host's session ended, or it
+    /// restarted the server. The server said so before it exited.
+    HostClosed,
+    /// The connections closed with no explanation: the process was killed or
+    /// crashed.
+    ConnectionLost,
+    /// The LocalPass service itself stopped (an update, or a person stopping it).
+    ServiceStopped,
+}
+
+impl AgentEndReason {
+    /// The closed token stored in the audit record.
+    #[must_use]
+    pub fn token(self) -> &'static str {
+        match self {
+            AgentEndReason::HostClosed => "host_closed",
+            AgentEndReason::ConnectionLost => "connection_lost",
+            AgentEndReason::ServiceStopped => "service_stopped",
+        }
+    }
+}
 
 /// The hard cap on how many audit records one [`Request::AuditList`] returns.
 /// A UI shows a recent window; an auditor uses `localpass audit`, which reads
@@ -902,6 +949,8 @@ impl Request {
             Request::GetEnvSet { .. } => "GetEnvSet",
             Request::AuditList { .. } => "AuditList",
             Request::BeginAgentSession { .. } => "BeginAgentSession",
+            Request::AgentToolCall { .. } => "AgentToolCall",
+            Request::AgentGoodbye { .. } => "AgentGoodbye",
             Request::ConfirmPresence { .. } => "ConfirmPresence",
             Request::Shutdown => "Shutdown",
         }
@@ -964,6 +1013,8 @@ impl Request {
             | Request::GetAttachment { profile, .. }
             | Request::DeleteAttachment { profile, .. }
             | Request::BeginAgentSession { profile }
+            | Request::AgentToolCall { profile, .. }
+            | Request::AgentGoodbye { profile, .. }
             | Request::ConfirmPresence { profile, .. } => Some(profile),
             Request::Ping | Request::Lock | Request::Shutdown => None,
         }
@@ -1721,6 +1772,11 @@ pub enum Response {
         /// `#[serde(default)]` for peers that predate the presence check.
         #[serde(default)]
         agent_session: bool,
+        /// The process ids of the AI agents connected right now. A process with
+        /// several connections is listed once. `#[serde(default)]` for peers
+        /// that predate it.
+        #[serde(default)]
+        agent_pids: Vec<u32>,
     },
     /// A generic "did it" acknowledgement (Unlock, Lock, mutations).
     Ok {

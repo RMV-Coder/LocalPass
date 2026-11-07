@@ -12,6 +12,10 @@ repository.workspace = true
 name = "localpass"
 path = "src/main.rs"
 
+[build-dependencies]
+# Windows VERSIONINFO for the release CLI (build.rs), as in lp-daemon. MIT.
+winresource = { version = "0.1", default-features = false }
+
 [dependencies]
 # --- The storage/crypto core we drive. lp-cli holds NO crypto primitives; it
 # --- unlocks through lp-vault and only handles the SecretKey display string via

@@ -103,16 +103,40 @@ Frames that are not valid JSON get `-32700` with `id: null`; a request missing
 
 ## 3. Unlock and session lifetime
 
-The server acquires a session **once at startup**, through the same
-`daemonctl::route` matrix every other subcommand uses (`architecture.md` §3):
+The server picks a route **at startup**, through the same `daemonctl::route`
+matrix every other subcommand uses (`architecture.md` §3):
 
 | Condition | Route |
 |-----------|-------|
 | daemon running **and** unlocked for this profile, no `--no-daemon` | **proxy** — reads go over the same-user-only IPC channel; the server holds no keys |
-| otherwise (no daemon / locked / wrong profile / `--no-daemon`) | **direct** — the server unlocks itself and holds an `lp_vault::Session` |
+| otherwise, under `--no-daemon` or with a password source (`LOCALPASS_PASSWORD`, `--password-stdin`, a terminal) | **direct** — the server unlocks itself and holds an `lp_vault::Session` |
+| otherwise (how an agent host starts it: no password, stdin a pipe) | **detached** — the server starts anyway and holds nothing |
 
 `--profile`, `--no-daemon`, `--password-stdin` and `LOCALPASS_PASSWORD` behave
 exactly as documented for every other command. It then serves until stdin EOF.
+Only a missing account, or a wrong password on the direct route, stops it from
+starting.
+
+**Why a locked vault is not a startup failure.** A host treats a server that
+exits during `initialize` as failed, and will not retry it by itself. Before the
+detached route, every restart while the vault was locked ended that way, which a
+person saw as a plugin that had disconnected and could not reconnect.
+
+### 3.0 Staying connected
+
+Before every tool call the server checks where it stands:
+
+| State | What the tool call does |
+|-------|-------------------------|
+| connection to the daemon lost, or never made | reconnect and re-register the agent session (§7.1), then continue |
+| no daemon reachable | `isError` result: the service is not running, ask the user to open LocalPass |
+| daemon locked | `isError` result: the vault is locked, ask the user to unlock it |
+| daemon refuses the agent session (older build, other profile) | `isError` result saying why; the daemon is not used |
+
+Every message says the server does not need a restart, because it does not: the
+next call after an unlock or a daemon restart simply works. `fill_login` keeps
+its own structured refusals for the same states (§5.6). These checks are passive
+for the idle timer (§3.1).
 
 ### 3.1 Idle auto-lock
 
@@ -124,11 +148,12 @@ An MCP server is long-lived, so **both routes auto-lock when idle**:
 | direct | the server's own timer, mirroring the daemon default of **600s** and reading the same `LOCALPASS_AUTOLOCK_SECS` variable (`0` = never). Each vault-touching tool call resets it. |
 
 When the direct-route window lapses the `lp_vault::Session` is **dropped**
-(zeroizing key material) and every later tool call returns an `isError` result
-saying the session auto-locked. The server does **not** re-unlock: doing so would
-require holding the master password in memory for the process's lifetime, which
-is exactly the exposure the timeout exists to end. The MCP host restarts the
-server (and re-prompts) instead.
+(zeroizing key material) and the server moves to the detached route, using the
+daemon from then on. It does **not** re-unlock: doing so would require holding the
+master password in memory for the process's lifetime, which is exactly the
+exposure the timeout exists to end. Under `--no-daemon` there is no daemon to move
+to, so every later tool call returns an `isError` result saying the session
+auto-locked, until the host restarts the server.
 
 ### 3.2 Audit attribution
 
@@ -143,8 +168,9 @@ There is **no MCP tool to unlock, lock, create, edit, delete, or export**. The
 surface is read-plus-inject only, by construction — an agent that is confused,
 prompt-injected, or adversarial cannot mutate a vault through it.
 
-Recommended posture: run `localpass unlock` first so the server takes the proxy
-route and never holds key material itself.
+Recommended posture: leave `LOCALPASS_PASSWORD` unset, so the server only ever
+uses the daemon and never holds key material itself. Closing the desktop app locks
+the daemon, so tools report a locked vault until a person opens the app again.
 
 ---
 
@@ -446,6 +472,37 @@ dialog and keeps the grant in its Rust backend; the webview never sees it.
 logger, a script with `LOCALPASS_PASSWORD` set) can still confirm; that is the
 PRD's T3 limit. So can a process able to read another process's memory while a
 grant is live. A grant is a bearer token for its 5 minutes.
+
+### 7.2 Agent activity
+
+So a person can tell whether an agent is connected, what it used, and why it went
+away, the audit log records:
+
+| Kind | Written when | `detail` |
+|------|--------------|----------|
+| `agent_connected` | a process registers its first agent session | none |
+| `agent_tool_call` | a tool call finishes | the tool name, with `:failed` if it failed |
+| `agent_disconnected` | a process's last session ends | why: see below |
+
+| Reason | Meaning |
+|--------|---------|
+| `host_closed` | the server saw stdin close or its host vanish, and said so before exiting |
+| `connection_lost` | the connections closed with no explanation: the process was killed or crashed |
+| `service_stopped` | the daemon was asked to shut down while the agent was connected |
+
+A connection with no later end means the daemon itself stopped abruptly, or the
+computer restarted. `Status` lists the connected `agent_pids`, and the desktop
+app's Developer page shows all of this.
+
+**Safety.** The records are written keylessly, so they work while locked, and
+they hold only names and closed tokens: the daemon reduces anything but a plain
+identifier to `unknown`, and arguments are never reported. The two requests that
+feed them (`AgentToolCall`, `AgentGoodbye`) are honoured only on a registered agent
+connection, do not count as activity for the idle timer, and cannot end a session.
+A goodbye only labels an end that the closing connections still decide. Like all
+attribution these records are provenance, not proof: a same-user process can
+register and write them (T3). On the direct route with no daemon, only tool calls
+are recorded, since nothing is connected to.
 
 ---
 

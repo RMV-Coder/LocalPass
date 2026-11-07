@@ -20,7 +20,7 @@
 //! auto-lock, or another client (PRD requirement: "locking must be immune to a
 //! hung client").
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -31,8 +31,8 @@ use lp_vault::{AccountStore, Item, Session, Vault, VaultId};
 use zeroize::Zeroize;
 
 use crate::protocol::{
-    FillRefusal, FillReport, FillStatus, LockState, MAX_PRESENCE_FAILURES, PRESENCE_GRANT_SECS,
-    Request, Response, WireItem,
+    AgentEndReason, FillRefusal, FillReport, FillStatus, LockState, MAX_PRESENCE_FAILURES,
+    PRESENCE_GRANT_SECS, Request, Response, WireItem,
 };
 use crate::render;
 
@@ -160,6 +160,9 @@ pub struct State {
     /// open. While non-zero, consent and change requests need a presence grant.
     /// The server decrements it when such a connection closes.
     agent_sessions: usize,
+    /// The agent processes behind those connections, keyed by pid, so a process
+    /// with several connections is one agent in the audit log and the status.
+    agent_processes: HashMap<Option<u32>, AgentProcess>,
     /// Live presence grants. In memory only, and dropped on lock: a grant
     /// vouches for a person at *this* unlock, never a later one.
     presence_grants: Vec<PresenceGrant>,
@@ -210,6 +213,7 @@ impl State {
             agent_fill_window: AGENT_FILL_WINDOW,
             fill_intent_ttl: FILL_INTENT_TTL,
             agent_sessions: 0,
+            agent_processes: HashMap::new(),
             presence_grants: Vec::new(),
             presence_failures: 0,
             presence_ttl: Duration::from_secs(PRESENCE_GRANT_SECS),
@@ -312,8 +316,73 @@ impl State {
 
     /// Close one agent session. The server calls this when a connection that
     /// registered with [`Request::BeginAgentSession`] closes, however it closes.
+    ///
+    /// When it was that process's last connection, the end is logged with the
+    /// reason the process gave, or [`AgentEndReason::ConnectionLost`] if it gave
+    /// none. The caller must have the connection's origin in scope
+    /// ([`lp_vault::audit::with_origin`]), which is how the process is found.
     pub fn end_agent_session(&mut self) {
         self.agent_sessions = self.agent_sessions.saturating_sub(1);
+        let pid = lp_vault::audit::current_origin().pid;
+        let Some(process) = self.agent_processes.get_mut(&pid) else {
+            return;
+        };
+        process.connections = process.connections.saturating_sub(1);
+        if process.connections == 0
+            && let Some(process) = self.agent_processes.remove(&pid)
+        {
+            let reason = process.goodbye.unwrap_or(AgentEndReason::ConnectionLost);
+            self.record_agent_end(process.origin, reason);
+        }
+    }
+
+    /// Count one more connection for the calling process, logging the agent as
+    /// connected if this is its first.
+    fn begin_agent_process(&mut self) {
+        let origin = lp_vault::audit::current_origin();
+        let process = self
+            .agent_processes
+            .entry(origin.pid)
+            .or_insert_with(|| AgentProcess {
+                connections: 0,
+                goodbye: None,
+                origin,
+            });
+        process.connections += 1;
+        if process.connections == 1 {
+            self.record_agent_activity(lp_vault::AuditKind::AgentConnected, None);
+        }
+    }
+
+    /// Log the end of every connected agent: the service is stopping, and the
+    /// connections will not get to close in an orderly way.
+    fn end_all_agent_processes(&mut self) {
+        for (_, process) in std::mem::take(&mut self.agent_processes) {
+            self.record_agent_end(process.origin, AgentEndReason::ServiceStopped);
+        }
+    }
+
+    /// Append an [`lp_vault::AuditKind::AgentDisconnected`] attributed to `origin`.
+    fn record_agent_end(&self, origin: lp_vault::AuditOrigin, reason: AgentEndReason) {
+        lp_vault::audit::with_origin(origin, || {
+            self.record_agent_activity(
+                lp_vault::AuditKind::AgentDisconnected,
+                Some(reason.token()),
+            );
+        });
+    }
+
+    /// Append an agent-activity record. **Best-effort and keyless**, like
+    /// [`record_denied_reason`]: a logging failure changes no answer.
+    fn record_agent_activity(&self, kind: lp_vault::AuditKind, detail: Option<&str>) {
+        AccountStore::record_agent_activity(self.profile(), kind, detail).ok();
+    }
+
+    /// The pids of the agents connected right now, sorted.
+    fn agent_pids(&self) -> Vec<u32> {
+        let mut pids: Vec<u32> = self.agent_processes.keys().flatten().copied().collect();
+        pids.sort_unstable();
+        pids
     }
 
     /// Change how long a fresh presence grant lasts. Nothing in the daemon calls
@@ -799,6 +868,7 @@ pub fn handle_with(state: &mut State, request: Request, ctx: &RequestContext) ->
         Request::Ping => return Handled::reply(Response::Pong),
         Request::Shutdown => {
             state.lock();
+            state.end_all_agent_processes();
             return Handled {
                 response: Response::Ok {
                     message: Some("shutting down".into()),
@@ -874,6 +944,7 @@ pub fn handle_with(state: &mut State, request: Request, ctx: &RequestContext) ->
                 pairing_mode_secs: state.pairing_mode_remaining_secs(),
                 agent_fill_secs: state.agent_fill_remaining_secs(),
                 agent_session: state.agent_session_active(),
+                agent_pids: state.agent_pids(),
             })
         }
 
@@ -882,6 +953,7 @@ pub fn handle_with(state: &mut State, request: Request, ctx: &RequestContext) ->
             // so one agent can never hold two counts it only releases once.
             if !ctx.agent_connection {
                 state.agent_sessions += 1;
+                state.begin_agent_process();
             }
             Handled {
                 response: Response::Ok {
@@ -891,6 +963,26 @@ pub fn handle_with(state: &mut State, request: Request, ctx: &RequestContext) ->
                 began_agent_session: true,
                 deferred: None,
             }
+        }
+
+        Request::AgentToolCall { tool, ok, .. } => {
+            if !ctx.agent_connection {
+                return Handled::reply(not_an_agent_connection());
+            }
+            let detail = tool_call_detail(&tool, ok);
+            state.record_agent_activity(lp_vault::AuditKind::AgentToolCall, Some(&detail));
+            Handled::reply(Response::Ok { message: None })
+        }
+
+        Request::AgentGoodbye { reason, .. } => {
+            if !ctx.agent_connection {
+                return Handled::reply(not_an_agent_connection());
+            }
+            let pid = lp_vault::audit::current_origin().pid;
+            if let Some(process) = state.agent_processes.get_mut(&pid) {
+                process.goodbye = Some(reason);
+            }
+            Handled::reply(Response::Ok { message: None })
         }
 
         Request::ConfirmPresence { mut password, .. } => {
@@ -1565,6 +1657,43 @@ fn record_denied_reason(state: &State, reason: lp_vault::DenyReason) {
     AccountStore::record_access_denied(state.profile(), reason).ok();
 }
 
+/// One AI-agent process holding sessions with this daemon.
+struct AgentProcess {
+    /// How many of its connections are registered and open.
+    connections: usize,
+    /// Why it said it is stopping, if it did.
+    goodbye: Option<AgentEndReason>,
+    /// Who it is, for the record written when it ends.
+    origin: lp_vault::AuditOrigin,
+}
+
+/// The longest tool name written to the audit log.
+const MAX_LOGGED_TOOL_CHARS: usize = 32;
+
+/// The `detail` of an [`lp_vault::AuditKind::AgentToolCall`] record. The log is
+/// plaintext, so anything but a plain identifier is logged as `unknown`.
+fn tool_call_detail(tool: &str, ok: bool) -> String {
+    let plain = !tool.is_empty()
+        && tool.chars().count() <= MAX_LOGGED_TOOL_CHARS
+        && tool
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    let name = if plain { tool } else { "unknown" };
+    if ok {
+        name.to_string()
+    } else {
+        format!("{name}:failed")
+    }
+}
+
+/// The answer to an agent-activity report from a connection that is not an agent's.
+fn not_an_agent_connection() -> Response {
+    Response::Error {
+        auth: false,
+        message: "only an AI-agent connection can report agent activity".to_string(),
+    }
+}
+
 /// Whether a request counts as user activity for the idle auto-lock timer.
 ///
 /// `Status` is the one request that can be passive: clients poll it to *observe*
@@ -1594,8 +1723,15 @@ fn counts_as_activity(request: &Request) -> bool {
         // Watching the nearby window is an observation too; and the window
         // itself never holds the vault open (`lan-transport.md` §7.1).
         Request::NearbyStatus { .. } => false,
-        // Registering is bookkeeping, not a person using the vault.
-        Request::BeginAgentSession { .. } => false,
+        // Registering is bookkeeping, not a person using the vault, and so is
+        // reporting on a tool call: the call's own request already counted.
+        Request::BeginAgentSession { .. }
+        | Request::AgentToolCall { .. }
+        | Request::AgentGoodbye { .. } => false,
+        // Reading the log is an observation: the desktop app refreshes its view
+        // of agent activity while it is open, and must not hold the vault open
+        // by watching it.
+        Request::AuditList { .. } => false,
         _ => true,
     }
 }
@@ -2775,6 +2911,18 @@ mod tests {
         assert!(!counts_as_activity(&Request::Status {
             profile: String::new(),
             keepalive: false,
+        }));
+        // The desktop app watches agent activity through the log while it is
+        // open, which must not hold the vault unlocked.
+        assert!(!counts_as_activity(&Request::AuditList {
+            profile: String::new(),
+            limit: None,
+            since: None,
+        }));
+        assert!(!counts_as_activity(&Request::AgentToolCall {
+            profile: String::new(),
+            tool: String::new(),
+            ok: true,
         }));
         assert!(counts_as_activity(&Request::Status {
             profile: String::new(),

@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use lp_daemon::client::Client;
-use lp_daemon::protocol::{Request, Response};
+use lp_daemon::protocol::{AgentEndReason, Request, Response};
 
 use crate::error::CliError;
 
@@ -64,6 +64,22 @@ fn interpret(response: &Response) -> Result<()> {
             other.kind()
         ))
         .into()),
+    }
+}
+
+/// Tell the daemon why this process is about to exit, so the desktop app can say
+/// why the agent went away. Best-effort, and on a connection of its own: the
+/// label only sticks to a connection that is itself registered, and this works
+/// on every route, including one where this thread holds no connection at all.
+pub fn say_goodbye(profile: &str, reason: AgentEndReason) {
+    let Ok(mut client) = Client::connect() else {
+        return;
+    };
+    if register(&mut client, profile).is_ok() {
+        let _ = client.call(&Request::AgentGoodbye {
+            profile: profile.to_string(),
+            reason,
+        });
     }
 }
 

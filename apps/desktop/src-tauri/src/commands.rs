@@ -417,6 +417,16 @@ pub fn lock() -> Result<SessionState, String> {
     }
 }
 
+/// Lock the vault because the app is closing. Closing the window is how a person
+/// says they are done, whichever window control or shortcut they used, and the
+/// background service stays running for the next launch. A service that is
+/// already gone (an update stops it first) has nothing to lock.
+pub fn lock_on_exit() {
+    crate::clipboard::clear_on_lock();
+    lp_daemon::presence::clear_grant();
+    let _ = daemon::call(&Request::Lock);
+}
+
 /// Confirm a person is present by re-entering the master password, while an AI
 /// agent is connected (`mcp-server.md` §7). On success the daemon's short-lived
 /// grant is kept in this process's memory and rides on every later request, so

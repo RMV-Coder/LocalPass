@@ -11,7 +11,9 @@ use std::time::Duration;
 
 use lp_daemon::client::Client;
 use lp_daemon::engine::{self, RequestContext, State};
-use lp_daemon::protocol::{MAX_PRESENCE_FAILURES, PRESENCE_GRANT_SECS, Request, Response};
+use lp_daemon::protocol::{
+    AgentEndReason, MAX_PRESENCE_FAILURES, PRESENCE_GRANT_SECS, Request, Response,
+};
 use lp_daemon::server::{self, Config};
 
 const PW: &str = "correct-horse-battery-presence";
@@ -450,6 +452,197 @@ fn status_reports_the_session_and_ending_it_lifts_the_check() {
     assert!(!status(&mut state), "one connection, one count");
     let h = engine::handle_with(&mut state, create_item(&profile, "Free"), &person(None));
     assert!(matches!(h.response, Response::Ok { .. }));
+}
+
+// --- agent activity (mcp-server.md §7.2) ----------------------------------
+
+/// The agent-activity records, oldest first, as `(kind, detail)`.
+fn agent_activity(state: &mut State, profile: &str) -> Vec<(String, Option<String>)> {
+    match engine::handle(
+        state,
+        Request::AuditList {
+            profile: profile.into(),
+            limit: Some(500),
+            since: None,
+        },
+    )
+    .response
+    {
+        Response::AuditRecords { records } => records
+            .into_iter()
+            .rev()
+            .filter(|r| {
+                matches!(
+                    r.kind.as_str(),
+                    "agent_connected" | "agent_disconnected" | "agent_tool_call"
+                )
+            })
+            .map(|r| (r.kind, r.detail))
+            .collect(),
+        other => panic!("expected AuditRecords, got {}", other.kind()),
+    }
+}
+
+fn entry(kind: &str, detail: Option<&str>) -> (String, Option<String>) {
+    (kind.to_string(), detail.map(str::to_string))
+}
+
+#[test]
+fn a_process_with_two_connections_is_one_agent_and_says_why_it_left() {
+    let (mut state, _tmp, profile) = fixture();
+    begin_agent(&mut state, &profile);
+    begin_agent(&mut state, &profile);
+
+    let goodbye = engine::handle_with(
+        &mut state,
+        Request::AgentGoodbye {
+            profile: profile.clone(),
+            reason: AgentEndReason::HostClosed,
+        },
+        &agent_conn(None),
+    );
+    assert!(matches!(goodbye.response, Response::Ok { .. }));
+
+    // A goodbye labels the end; it does not bring it forward.
+    assert!(state.agent_session_active());
+    state.end_agent_session();
+    assert!(state.agent_session_active());
+    assert_eq!(
+        agent_activity(&mut state, &profile),
+        vec![entry("agent_connected", None)]
+    );
+
+    state.end_agent_session();
+    assert!(!state.agent_session_active());
+    assert_eq!(
+        agent_activity(&mut state, &profile),
+        vec![
+            entry("agent_connected", None),
+            entry("agent_disconnected", Some("host_closed")),
+        ]
+    );
+}
+
+#[test]
+fn an_agent_that_leaves_without_a_goodbye_is_a_lost_connection() {
+    let (mut state, _tmp, profile) = fixture();
+    begin_agent(&mut state, &profile);
+    state.end_agent_session();
+    assert_eq!(
+        agent_activity(&mut state, &profile).last(),
+        Some(&entry("agent_disconnected", Some("connection_lost")))
+    );
+}
+
+#[test]
+fn a_service_shutdown_ends_every_agent_once() {
+    let (mut state, _tmp, profile) = fixture();
+    begin_agent(&mut state, &profile);
+    let shutdown = engine::handle(&mut state, Request::Shutdown);
+    assert!(shutdown.shutdown);
+    // The connection closing afterwards must not write a second end.
+    state.end_agent_session();
+
+    assert!(matches!(
+        engine::handle(
+            &mut state,
+            Request::Unlock {
+                profile: profile.clone(),
+                password: PW.into(),
+                secret_key: None,
+                autolock_secs: None,
+            },
+        )
+        .response,
+        Response::Ok { .. }
+    ));
+    assert_eq!(
+        agent_activity(&mut state, &profile),
+        vec![
+            entry("agent_connected", None),
+            entry("agent_disconnected", Some("service_stopped")),
+        ]
+    );
+}
+
+#[test]
+fn tool_calls_are_logged_while_locked_and_only_as_plain_names() {
+    let (mut state, _tmp, profile) = fixture();
+    begin_agent(&mut state, &profile);
+    state.lock();
+
+    for (tool, ok) in [
+        ("list_vaults", false),
+        ("get_item", true),
+        ("hunter2 is the password", true),
+        ("", true),
+    ] {
+        let h = engine::handle_with(
+            &mut state,
+            Request::AgentToolCall {
+                profile: profile.clone(),
+                tool: tool.into(),
+                ok,
+            },
+            &agent_conn(None),
+        );
+        assert!(matches!(h.response, Response::Ok { .. }));
+    }
+
+    assert!(matches!(
+        engine::handle(
+            &mut state,
+            Request::Unlock {
+                profile: profile.clone(),
+                password: PW.into(),
+                secret_key: None,
+                autolock_secs: None,
+            },
+        )
+        .response,
+        Response::Ok { .. }
+    ));
+    assert_eq!(
+        agent_activity(&mut state, &profile),
+        vec![
+            entry("agent_connected", None),
+            entry("agent_tool_call", Some("list_vaults:failed")),
+            entry("agent_tool_call", Some("get_item")),
+            entry("agent_tool_call", Some("unknown")),
+            entry("agent_tool_call", Some("unknown")),
+        ]
+    );
+}
+
+#[test]
+fn only_an_agent_connection_can_report_agent_activity() {
+    let (mut state, _tmp, profile) = fixture();
+    begin_agent(&mut state, &profile);
+
+    for request in [
+        Request::AgentToolCall {
+            profile: profile.clone(),
+            tool: "list_items".into(),
+            ok: true,
+        },
+        Request::AgentGoodbye {
+            profile: profile.clone(),
+            reason: AgentEndReason::HostClosed,
+        },
+    ] {
+        let h = engine::handle_with(&mut state, request, &person(None));
+        assert!(matches!(h.response, Response::Error { auth: false, .. }));
+    }
+
+    // Neither report was taken: no tool call, and the end has no goodbye.
+    state.end_agent_session();
+    assert_eq!(
+        agent_activity(&mut state, &profile),
+        vec![
+            entry("agent_connected", None),
+            entry("agent_disconnected", Some("connection_lost")),
+        ]
+    );
 }
 
 // --- the real server: the session is bound to the agent's connection -----

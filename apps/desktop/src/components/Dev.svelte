@@ -25,6 +25,7 @@
   import {
     listItems,
     auditList,
+    status as statusApi,
     devEnv,
     setAgentFillMode,
     agentFillSecs,
@@ -51,6 +52,7 @@
   import { copyToClipboard } from "../lib/clipboard";
   import { toast } from "../lib/toast";
   import { lastSeenBySource } from "../lib/activity";
+  import { AGENT_RECORD_WINDOW, agentHeadline, agentSessions, endReasonText } from "../lib/agents";
   import { formatAgo } from "../lib/format";
   import Icon from "./Icon.svelte";
   import CopyRow from "./CopyRow.svelte";
@@ -143,6 +145,34 @@
     });
   });
 
+  // --- AI agents: who is connected, when one was last used, why one left ---
+  // Both reads are passive, so this watching never holds the vault unlocked.
+  let agentRecords = $state<AuditRecordView[]>([]);
+  let livePids = $state<number[]>([]);
+  let now = $state(Date.now());
+
+  async function pollAgents() {
+    if (document.visibilityState !== "visible") return;
+    try {
+      const [status, recent] = await Promise.all([statusApi(), auditList(AGENT_RECORD_WINDOW)]);
+      if (status.state === "unlocked") livePids = status.agent_pids ?? [];
+      agentRecords = recent;
+      now = Date.now();
+    } catch {
+      /* The log view above reports read failures; this one just keeps its last view. */
+    }
+  }
+
+  $effect(() => {
+    untrack(() => void pollAgents());
+    const timer = setInterval(pollAgents, 5000);
+    return () => clearInterval(timer);
+  });
+
+  const sessions = $derived(agentSessions(agentRecords, livePids));
+  const anyAgentLive = $derived(agentConnected || livePids.length > 0);
+  const agentLine = $derived(agentHeadline(sessions, anyAgentLive, now));
+
   // --- Copy-able snippets ---
   const injectExample = $derived(
     `localpass run --no-input -e "DATABASE_URL=localpass://${vaultName}/Prod DB/password" -- npm run dev`,
@@ -166,11 +196,13 @@
   );
 
   // --- What is using the vault (derived from the audit log) ---
-  const lastSeen = $derived(lastSeenBySource(records));
+  // The agent poll reads further back than the log view, and keeps reading.
+  const activity = $derived(agentRecords.length ? agentRecords : records);
+  const lastSeen = $derived(lastSeenBySource(activity));
   function lastSeenText(source: string): string {
     const t = lastSeen.get(source);
-    if (!records.length) return loading ? "Reading activity…" : "No activity read yet";
-    return t ? `Last used ${formatAgo(t)}` : `No use in the last ${records.length} records`;
+    if (!activity.length) return loading ? "Reading activity…" : "No activity read yet";
+    return t ? `Last used ${formatAgo(t, now)}` : `No use in the last ${activity.length} records`;
   }
   /** Used in the last 10 minutes. */
   function recentlyActive(source: string): boolean {
@@ -380,15 +412,39 @@
         <span class="surf-ico"><Icon name="agent" size={18} /></span>
         <span>
           <span class="t">AI agents (MCP)</span>
-          <span class="d">{lastSeenText("mcp")}</span>
+          <span class="d">{agentLine}</span>
         </span>
       </div>
-      {#if agentConnected}
+      {#if anyAgentLive}
         <span class="badge accent"><i class="dot accent"></i> Connected now</span>
       {:else}
         <span class="badge">Not connected</span>
       {/if}
     </div>
+    {#if sessions.length}
+      <ul class="plain-list agent-sessions" aria-label="Recent AI agent sessions">
+        {#each sessions as s (s.key)}
+          <li>
+            <span class="agent-when">
+              {#if s.live}
+                Connected {s.connectedAt ? formatAgo(s.connectedAt, now) : "now"}
+              {:else}
+                {s.endedAt ? `Ended ${formatAgo(s.endedAt, now)}` : s.connectedAt ? `Started ${formatAgo(s.connectedAt, now)}` : "Earlier"}
+              {/if}
+            </span>
+            <span class="agent-use">
+              {#if s.toolCalls}
+                {s.toolCalls} tool call{s.toolCalls === 1 ? "" : "s"}{#if s.failedCalls}, {s.failedCalls} failed{/if} · last {s.lastTool}
+                {#if s.lastToolAt}{formatAgo(s.lastToolAt, now)}{/if}
+              {:else}
+                No tools used
+              {/if}
+            </span>
+            <span class="agent-end">{s.live ? "Running" : endReasonText(s.endReason)}</span>
+          </li>
+        {/each}
+      </ul>
+    {/if}
     <div class="set-row">
       <div class="surf">
         <span class="surf-ico"><Icon name="dev" size={18} /></span>
@@ -608,7 +664,7 @@
             write tools. While an agent is connected, changes in this app ask for your master password.
           </span>
         </div>
-        <p class="hint">Add this to your MCP client's configuration, then run <code>localpass unlock</code> before starting the agent:</p>
+        <p class="hint">Add this to your MCP client's configuration. It can start while the vault is locked, and it picks up as soon as you unlock here:</p>
         <div class="code-block">
           <pre class="scroll" aria-label="MCP registration snippet">{mcpSnippet}</pre>
           <button class="icon-btn" type="button" onclick={() => copy(mcpSnippet, "Snippet")} aria-label="Copy snippet"><Icon name="copy" size={16} /></button>
@@ -651,6 +707,33 @@
   }
   .surf-ico {
     color: var(--text-muted);
+  }
+  .agent-sessions {
+    border-top: 1px solid var(--border-strong);
+    padding: 4px 0 8px 30px;
+    font-size: 12.5px;
+  }
+  .agent-sessions > li {
+    display: grid;
+    grid-template-columns: minmax(110px, 1fr) minmax(0, 2fr) minmax(0, 2fr);
+    gap: 12px;
+    padding: 6px 0;
+  }
+  .agent-when {
+    font-weight: 500;
+  }
+  .agent-use,
+  .agent-end {
+    color: var(--text-muted);
+  }
+  @media (max-width: 640px) {
+    .agent-sessions {
+      padding-left: 0;
+    }
+    .agent-sessions > li {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 2px;
+    }
   }
   .consent {
     margin: 10px 0 12px;

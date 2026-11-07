@@ -37,6 +37,12 @@ export function sourceLabel(source: string | null | undefined): string {
 /** Human label for an audit kind token (`lp_vault::AuditKind::label`). An
  *  unknown token (a newer core writing a kind this build predates) degrades to
  *  the raw token with underscores spaced out, rather than being hidden. */
+/** Split an `agent_tool_call` record's detail into the tool and its outcome. */
+export function parseToolDetail(detail: string): { tool: string; failed: boolean } {
+  const failed = detail.endsWith(":failed");
+  return { tool: failed ? detail.slice(0, -":failed".length) : detail, failed };
+}
+
 export function kindLabel(kind: string): string {
   switch (kind) {
     case "unlock_success":
@@ -67,6 +73,12 @@ export function kindLabel(kind: string): string {
       return "Agent fill armed";
     case "agent_fill_mode_disabled":
       return "Agent fill closed";
+    case "agent_connected":
+      return "Agent connected";
+    case "agent_disconnected":
+      return "Agent disconnected";
+    case "agent_tool_call":
+      return "Agent tool call";
     case "access_denied":
       return "Refused";
     default:
@@ -150,6 +162,13 @@ export function operationLabel(record: AuditRecordView): string {
   }
   if (record.kind === "access_denied" && record.deny_reason) {
     return `${base} · ${record.deny_reason.replace(/_/g, " ")}`;
+  }
+  if (record.kind === "agent_tool_call" && record.detail) {
+    const { tool, failed } = parseToolDetail(record.detail);
+    return `${base} · ${tool}${failed ? " · failed" : ""}`;
+  }
+  if (record.kind === "agent_disconnected" && record.detail) {
+    return `${base} · ${record.detail.replace(/_/g, " ")}`;
   }
   return base;
 }
