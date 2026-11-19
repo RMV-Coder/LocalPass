@@ -68,7 +68,8 @@
 
   // Login / api-key common.
   let username = $state(fieldVal("username"));
-  let url = $state(fieldVal("url"));
+  // An api-key's endpoint is shown as "endpoint"; a login's URL as "url".
+  let url = $state(fieldVal(seed?.type_str === "api_key" ? "endpoint" : "url"));
   let apiKey = $state(fieldVal("key"));
   // Secret value inputs (blank on edit = keep current).
   let password = $state("");
@@ -128,6 +129,10 @@
   // would be dropped on save). Secret custom values are NOT prefilled; a blank
   // secret row preserves the stored value server-side.
   let customFields = $state<CustomFieldInput[]>(seed ? seedCustomFields(seed.fields) : []);
+  // Names of the item's existing secret custom fields. A row with one of these
+  // names left blank must stay secret on save (blank secret = keep the stored
+  // value); unticking "Secret" without typing a value would otherwise save "".
+  const seededSecretNames = new Set((seed?.fields ?? []).filter((f) => f.custom && f.secret).map((f) => f.name));
 
   let showSecret = $state(false);
   let genLen = $state(20);
@@ -236,7 +241,11 @@
       favorite,
       custom_fields: customFields
         .filter((f) => f.name.trim().length > 0)
-        .map((f) => ({ name: f.name.trim(), value: f.value, secret: f.secret })),
+        .map((f) => {
+          const name = f.name.trim();
+          const keepSecret = isEdit && f.value.length === 0 && seededSecretNames.has(name);
+          return { name, value: f.value, secret: f.secret || keepSecret };
+        }),
     };
 
     // undefined for a secret left blank on edit = preserve; on create an empty
