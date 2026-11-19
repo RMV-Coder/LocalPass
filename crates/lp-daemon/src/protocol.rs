@@ -1102,6 +1102,11 @@ pub struct WireField {
     pub value: String,
     /// Whether the field is secret (masked when not revealed).
     pub secret: bool,
+    /// Whether this is a user-defined custom field (as opposed to a field the
+    /// item type defines). Lets an editing client seed its custom-field rows.
+    /// Defaults to `false` so an older peer that omits it still parses.
+    #[serde(default)]
+    pub custom: bool,
 }
 
 /// A single item rendered for the wire (metadata + flattened display fields).

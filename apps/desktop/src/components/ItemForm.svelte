@@ -22,6 +22,7 @@
 <script lang="ts">
   import { createItem, updateItem, generatePassword, parseDotenv, revealField } from "../lib/api";
   import type { ItemView, NewItemInput, CustomFieldInput, EnvEntryInput } from "../lib/types";
+  import { seedCustomFields, typeFieldValue, envKeys } from "../lib/itemform";
   import { toast } from "../lib/toast";
   import Icon, { typeIcon } from "./Icon.svelte";
 
@@ -55,7 +56,7 @@
   // svelte-ignore state_referenced_locally
   const seed = existing;
   function fieldVal(name: string): string {
-    return seed?.fields.find((f) => f.name === name && !f.secret)?.value ?? "";
+    return typeFieldValue(seed?.fields, name);
   }
 
   // Form state, seeded from the item snapshot when editing.
@@ -67,7 +68,8 @@
 
   // Login / api-key common.
   let username = $state(fieldVal("username"));
-  let url = $state(fieldVal("url"));
+  // An api-key's endpoint is shown as "endpoint"; a login's URL as "url".
+  let url = $state(fieldVal(seed?.type_str === "api_key" ? "endpoint" : "url"));
   let apiKey = $state(fieldVal("key"));
   // Secret value inputs (blank on edit = keep current).
   let password = $state("");
@@ -86,7 +88,7 @@
   async function loadEnvEntriesForEdit() {
     if (envLoaded || !seed || seed.type_str !== "env_set") return;
     envLoaded = true;
-    const keys = seed.fields.map((f) => f.name);
+    const keys = envKeys(seed.fields);
     if (keys.length === 0) return;
     envLoading = true;
     envLoadError = "";
@@ -110,21 +112,27 @@
 
   // ssh-key.
   let sshAlgo = $state(fieldVal("algo"));
-  let sshPublic = $state("");
+  let sshPublic = $state(fieldVal("public_openssh"));
   let sshPrivate = $state(""); // secret; blank on edit = keep
-  let sshFingerprint = $state("");
+  let sshFingerprint = $state(fieldVal("fingerprint"));
 
   // totp.
   let totpSecret = $state(""); // secret; blank on edit = keep
-  let totpAlgo = $state("SHA1");
-  let totpDigits = $state(6);
-  let totpPeriod = $state(30);
-  let totpIssuer = $state("");
-  let totpAccount = $state("");
+  let totpAlgo = $state(fieldVal("algo") || "SHA1");
+  let totpDigits = $state(Number(fieldVal("digits")) || 6);
+  let totpPeriod = $state(Number(fieldVal("period")) || 30);
+  let totpIssuer = $state(fieldVal("issuer"));
+  let totpAccount = $state(fieldVal("account"));
 
-  // Custom fields (create + edit). On edit we do NOT prefill secret custom
-  // values; the user can set a new value or leave blank to preserve.
-  let customFields = $state<CustomFieldInput[]>([]);
+  // Custom fields (create + edit). On edit the item's existing custom fields
+  // are seeded as rows (the form submits the FULL list, so an unseeded field
+  // would be dropped on save). Secret custom values are NOT prefilled; a blank
+  // secret row preserves the stored value server-side.
+  let customFields = $state<CustomFieldInput[]>(seed ? seedCustomFields(seed.fields) : []);
+  // Names of the item's existing secret custom fields. A row with one of these
+  // names left blank must stay secret on save (blank secret = keep the stored
+  // value); unticking "Secret" without typing a value would otherwise save "".
+  const seededSecretNames = new Set((seed?.fields ?? []).filter((f) => f.custom && f.secret).map((f) => f.name));
 
   let showSecret = $state(false);
   let genLen = $state(20);
@@ -233,7 +241,11 @@
       favorite,
       custom_fields: customFields
         .filter((f) => f.name.trim().length > 0)
-        .map((f) => ({ name: f.name.trim(), value: f.value, secret: f.secret })),
+        .map((f) => {
+          const name = f.name.trim();
+          const keepSecret = isEdit && f.value.length === 0 && seededSecretNames.has(name);
+          return { name, value: f.value, secret: f.secret || keepSecret };
+        }),
     };
 
     // undefined for a secret left blank on edit = preserve; on create an empty
