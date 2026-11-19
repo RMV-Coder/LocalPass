@@ -59,7 +59,14 @@ struct Flat {
     name: String,
     value: String,
     secret: bool,
+    /// A user-defined custom field (from `payload.fields`), as opposed to one
+    /// projected from the type data or a login's built-in username/password/url.
+    custom: bool,
 }
+
+/// The `fields[]` names a login item uses for its own built-in form fields
+/// (everything else in a login's `fields[]` is a user custom field).
+const LOGIN_BUILTIN_FIELDS: [&str; 3] = ["username", "password", "url"];
 
 /// Render a `serde_json::Value` field value to a display string (strings without
 /// quotes, everything else via its JSON form) — matching the CLI.
@@ -81,6 +88,7 @@ fn flatten(payload: &ItemPayload) -> Vec<Flat> {
                     name: "urls".into(),
                     value: urls.join(", "),
                     secret: false,
+                    custom: false,
                 });
             }
         }
@@ -96,17 +104,20 @@ fn flatten(payload: &ItemPayload) -> Vec<Flat> {
                 name: "key".into(),
                 value: key.clone(),
                 secret: false,
+                custom: false,
             });
             out.push(Flat {
                 name: "secret".into(),
                 value: secret.clone(),
                 secret: true,
+                custom: false,
             });
             if !endpoint.is_empty() {
                 out.push(Flat {
                     name: "endpoint".into(),
                     value: endpoint.clone(),
                     secret: false,
+                    custom: false,
                 });
             }
             if let Some(e) = expiry {
@@ -114,6 +125,7 @@ fn flatten(payload: &ItemPayload) -> Vec<Flat> {
                     name: "expiry".into(),
                     value: e.to_string(),
                     secret: false,
+                    custom: false,
                 });
             }
             if let Some(r) = rotate_after {
@@ -121,6 +133,7 @@ fn flatten(payload: &ItemPayload) -> Vec<Flat> {
                     name: "rotate_after".into(),
                     value: r.to_string(),
                     secret: false,
+                    custom: false,
                 });
             }
         }
@@ -130,6 +143,7 @@ fn flatten(payload: &ItemPayload) -> Vec<Flat> {
                     name: e.key.clone(),
                     value: e.value.clone(),
                     secret: true,
+                    custom: false,
                 });
             }
         }
@@ -144,18 +158,21 @@ fn flatten(payload: &ItemPayload) -> Vec<Flat> {
                     name: "algo".into(),
                     value: algo.clone(),
                     secret: false,
+                    custom: false,
                 });
             }
             out.push(Flat {
                 name: "private_pem".into(),
                 value: private_pem.clone(),
                 secret: true,
+                custom: false,
             });
             if !public_openssh.is_empty() {
                 out.push(Flat {
                     name: "public_openssh".into(),
                     value: public_openssh.clone(),
                     secret: false,
+                    custom: false,
                 });
             }
             if !fingerprint.is_empty() {
@@ -163,6 +180,7 @@ fn flatten(payload: &ItemPayload) -> Vec<Flat> {
                     name: "fingerprint".into(),
                     value: fingerprint.clone(),
                     secret: false,
+                    custom: false,
                 });
             }
         }
@@ -178,12 +196,14 @@ fn flatten(payload: &ItemPayload) -> Vec<Flat> {
                 name: "secret_b32".into(),
                 value: secret_b32.clone(),
                 secret: true,
+                custom: false,
             });
             if !algo.is_empty() {
                 out.push(Flat {
                     name: "algo".into(),
                     value: algo.clone(),
                     secret: false,
+                    custom: false,
                 });
             }
             if *digits != 0 {
@@ -191,6 +211,7 @@ fn flatten(payload: &ItemPayload) -> Vec<Flat> {
                     name: "digits".into(),
                     value: digits.to_string(),
                     secret: false,
+                    custom: false,
                 });
             }
             if *period != 0 {
@@ -198,6 +219,7 @@ fn flatten(payload: &ItemPayload) -> Vec<Flat> {
                     name: "period".into(),
                     value: period.to_string(),
                     secret: false,
+                    custom: false,
                 });
             }
             if !issuer.is_empty() {
@@ -205,6 +227,7 @@ fn flatten(payload: &ItemPayload) -> Vec<Flat> {
                     name: "issuer".into(),
                     value: issuer.clone(),
                     secret: false,
+                    custom: false,
                 });
             }
             if !account.is_empty() {
@@ -212,15 +235,18 @@ fn flatten(payload: &ItemPayload) -> Vec<Flat> {
                     name: "account".into(),
                     value: account.clone(),
                     secret: false,
+                    custom: false,
                 });
             }
         }
     }
+    let is_login = matches!(payload.type_data, TypeData::Login { .. });
     for f in &payload.fields {
         out.push(Flat {
             name: f.name.clone(),
             value: value_to_string(&f.value),
             secret: matches!(f.kind, FieldKind::Hidden),
+            custom: !(is_login && LOGIN_BUILTIN_FIELDS.contains(&f.name.as_str())),
         });
     }
     out
@@ -245,6 +271,7 @@ fn wire_fields(payload: &ItemPayload, reveal: bool) -> Vec<WireField> {
             name: f.name.clone(),
             value: shown(f, reveal),
             secret: f.secret,
+            custom: f.custom,
         })
         .collect()
 }
@@ -442,6 +469,51 @@ mod tests {
         let pw = flat.iter().find(|f| f.name == "password").unwrap();
         assert_eq!(shown(pw, false), MASK);
         assert_eq!(shown(pw, true), "s3cr3t");
+    }
+
+    #[test]
+    fn login_marks_only_user_fields_custom() {
+        let mut p = login();
+        p.fields.push(Field {
+            name: "Recovery code".into(),
+            kind: FieldKind::Hidden,
+            value: json!("r3c"),
+        });
+        let wire = wire_fields(&p, false);
+        let custom: Vec<&str> = wire
+            .iter()
+            .filter(|f| f.custom)
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(custom, ["Recovery code"]);
+    }
+
+    #[test]
+    fn env_set_entries_are_not_custom_but_extra_fields_are() {
+        let mut p = ItemPayload::new(
+            TypeData::EnvSet {
+                entries: vec![EnvEntry {
+                    key: "TOKEN".into(),
+                    value: "sk_live".into(),
+                }],
+            },
+            "env",
+        );
+        p.fields.push(Field {
+            name: "Owner".into(),
+            kind: FieldKind::Text,
+            value: json!("ops"),
+        });
+        let wire = wire_fields(&p, false);
+        let flags: Vec<(&str, bool)> = wire.iter().map(|f| (f.name.as_str(), f.custom)).collect();
+        assert_eq!(flags, [("TOKEN", false), ("Owner", true)]);
+    }
+
+    #[test]
+    fn wire_field_without_custom_flag_still_parses() {
+        let f: WireField =
+            serde_json::from_str(r#"{"name":"a","value":"b","secret":false}"#).unwrap();
+        assert!(!f.custom);
     }
 
     #[test]

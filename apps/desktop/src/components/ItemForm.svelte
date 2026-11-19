@@ -22,6 +22,7 @@
 <script lang="ts">
   import { createItem, updateItem, generatePassword, parseDotenv, revealField } from "../lib/api";
   import type { ItemView, NewItemInput, CustomFieldInput, EnvEntryInput } from "../lib/types";
+  import { seedCustomFields, typeFieldValue, envKeys } from "../lib/itemform";
   import { toast } from "../lib/toast";
   import Icon, { typeIcon } from "./Icon.svelte";
 
@@ -55,7 +56,7 @@
   // svelte-ignore state_referenced_locally
   const seed = existing;
   function fieldVal(name: string): string {
-    return seed?.fields.find((f) => f.name === name && !f.secret)?.value ?? "";
+    return typeFieldValue(seed?.fields, name);
   }
 
   // Form state, seeded from the item snapshot when editing.
@@ -86,7 +87,7 @@
   async function loadEnvEntriesForEdit() {
     if (envLoaded || !seed || seed.type_str !== "env_set") return;
     envLoaded = true;
-    const keys = seed.fields.map((f) => f.name);
+    const keys = envKeys(seed.fields);
     if (keys.length === 0) return;
     envLoading = true;
     envLoadError = "";
@@ -110,21 +111,23 @@
 
   // ssh-key.
   let sshAlgo = $state(fieldVal("algo"));
-  let sshPublic = $state("");
+  let sshPublic = $state(fieldVal("public_openssh"));
   let sshPrivate = $state(""); // secret; blank on edit = keep
-  let sshFingerprint = $state("");
+  let sshFingerprint = $state(fieldVal("fingerprint"));
 
   // totp.
   let totpSecret = $state(""); // secret; blank on edit = keep
-  let totpAlgo = $state("SHA1");
-  let totpDigits = $state(6);
-  let totpPeriod = $state(30);
-  let totpIssuer = $state("");
-  let totpAccount = $state("");
+  let totpAlgo = $state(fieldVal("algo") || "SHA1");
+  let totpDigits = $state(Number(fieldVal("digits")) || 6);
+  let totpPeriod = $state(Number(fieldVal("period")) || 30);
+  let totpIssuer = $state(fieldVal("issuer"));
+  let totpAccount = $state(fieldVal("account"));
 
-  // Custom fields (create + edit). On edit we do NOT prefill secret custom
-  // values; the user can set a new value or leave blank to preserve.
-  let customFields = $state<CustomFieldInput[]>([]);
+  // Custom fields (create + edit). On edit the item's existing custom fields
+  // are seeded as rows (the form submits the FULL list, so an unseeded field
+  // would be dropped on save). Secret custom values are NOT prefilled; a blank
+  // secret row preserves the stored value server-side.
+  let customFields = $state<CustomFieldInput[]>(seed ? seedCustomFields(seed.fields) : []);
 
   let showSecret = $state(false);
   let genLen = $state(20);

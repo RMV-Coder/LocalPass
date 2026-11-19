@@ -158,6 +158,8 @@ export interface FieldView {
   /** Empty string for a secret field in the masked view. */
   value: string;
   secret: boolean;
+  /** A user-defined custom field (vs. one the item type defines). */
+  custom: boolean;
 }
 
 export interface ItemView {

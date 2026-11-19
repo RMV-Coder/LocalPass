@@ -139,6 +139,9 @@ pub struct FieldView {
     pub value: String,
     /// Whether this field holds a secret (renders masked, with a Reveal button).
     pub secret: bool,
+    /// Whether this is a user-defined custom field (the edit form seeds its
+    /// custom-field rows from these).
+    pub custom: bool,
 }
 
 /// The masked item detail view sent to the webview by `get_item`.
@@ -386,6 +389,7 @@ fn field_view_masked(f: &WireField) -> FieldView {
             f.value.clone()
         },
         secret: f.secret,
+        custom: f.custom,
     }
 }
 
@@ -841,6 +845,7 @@ mod tests {
                     name: "username".into(),
                     value: "svc_acme".into(),
                     secret: false,
+                    custom: false,
                 },
                 WireField {
                     // Simulate a daemon that (incorrectly or via a reveal path)
@@ -848,11 +853,13 @@ mod tests {
                     name: "password".into(),
                     value: "s3cr3t-should-be-dropped".into(),
                     secret: true,
+                    custom: false,
                 },
                 WireField {
                     name: "url".into(),
                     value: "https://acme.example".into(),
                     secret: false,
+                    custom: false,
                 },
             ],
         }
