@@ -18,7 +18,7 @@ lp-crypto = { path = "../lp-crypto" }
 # --- `backup` enables rusqlite's binding to SQLite's Online Backup API
 # --- (`rusqlite::backup::Backup`), used by the `backup` module to take a
 # --- consistent snapshot of a live (WAL-mode) DB without a raw file copy. ---
-rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+rusqlite = { version = "0.41", features = ["bundled", "backup"] }
 # --- UUIDv7 for every id (vault/item/op/folder/device). v7's time-ordered prefix
 # --- gives creation-order locality (accepted leak, vault-format.md §12 T1) while
 # --- staying a random identifier. `v7` for generation. ---

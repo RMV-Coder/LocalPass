@@ -127,4 +127,4 @@ signature = "2"
 # --- `audit_log` table directly (raw SQL) to prove proxied actions record their
 # --- audit events exactly once. Same crate/features lp-vault uses (bundled
 # --- SQLite, no system-lib skew). ---
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
